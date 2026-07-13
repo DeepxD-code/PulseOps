@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PulseOps — Pipeline Console</title>
+<style>
+  :root{
+    --bg: #0B0E12;
+    --surface: #11151C;
+    --surface-2: #161B23;
+    --border: #232A35;
+    --text: #E7E2D6;
+    --text-dim: #8A93A3;
+    --accent: #F2A33C;
+    --accent-dim: #7A5A22;
+    --good: #4FD1C5;
+    --bad: #E2675A;
+    --warn: #E8C547;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--text); font-family:var(--sans); }
+  body{ min-height:100vh; }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:18px 28px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; background:rgba(11,14,18,0.92); backdrop-filter:blur(6px);
+    z-index:10;
+  }
+  .brand{ display:flex; align-items:center; gap:12px; }
+  .brand .mark{
+    width:30px; height:30px; border-radius:8px;
+    background:linear-gradient(135deg, var(--accent), #C97A1E);
+    display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-weight:700; color:#0B0E12; font-size:15px;
+  }
+  .brand h1{ font-size:16px; margin:0; letter-spacing:0.02em; font-weight:600; }
+  .brand .sub{ font-family:var(--mono); font-size:11px; color:var(--text-dim); margin-top:1px; }
+
+  .pulse-line{ width:120px; height:24px; }
+  .pulse-line path{ stroke:var(--accent); stroke-width:1.6; fill:none; opacity:0.85; }
+
+  .header-actions{ display:flex; align-items:center; gap:10px; }
+  .pill{
+    font-family:var(--mono); font-size:11px; padding:5px 10px; border-radius:999px;
+    border:1px solid var(--border); color:var(--text-dim); display:flex; align-items:center; gap:6px;
+  }
+  .pill .dot{ width:7px; height:7px; border-radius:50%; background:var(--text-dim); }
+  .pill.live .dot{ background:var(--good); box-shadow:0 0 8px var(--good); }
+  .pill.paused .dot{ background:var(--bad); }
+
+  button{
+    font-family:var(--sans); font-size:12.5px; font-weight:600; cursor:pointer;
+    border-radius:7px; border:1px solid var(--border); background:var(--surface-2);
+    color:var(--text); padding:8px 13px; transition:all .15s ease;
+  }
+  button:hover{ border-color:var(--accent); color:var(--accent); }
+  button.primary{ background:var(--accent); color:#1A1100; border-color:var(--accent); }
+  button.primary:hover{ filter:brightness(1.08); color:#1A1100; }
+  button.danger:hover{ border-color:var(--bad); color:var(--bad); }
+  button:disabled{ opacity:0.45; cursor:not-allowed; }
+  select, input[type=text]{
+    font-family:var(--sans); font-size:12.5px; background:var(--surface-2);
+    border:1px solid var(--border); color:var(--text); border-radius:7px; padding:7px 10px;
+  }
+
+  /* ── Layout ─────────────────────────────────────────── */
+  main{ padding:24px 28px 60px; max-width:1320px; margin:0 auto; }
+
+  .stat-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:22px; }
+  @media (max-width:1100px){ .stat-grid{ grid-template-columns:repeat(3,1fr);} }
+  .stat-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px;
+  }
+  .stat-card .label{ font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-dim); }
+  .stat-card .value{ font-family:var(--mono); font-size:24px; margin-top:4px; font-weight:600; }
+  .stat-card.accent .value{ color:var(--accent); }
+  .stat-card.good .value{ color:var(--good); }
+
+  .tabs{ display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:18px; }
+  .tab{
+    font-family:var(--mono); font-size:12px; padding:9px 14px; cursor:pointer;
+    color:var(--text-dim); border-bottom:2px solid transparent; user-select:none;
+  }
+  .tab.active{ color:var(--accent); border-bottom-color:var(--accent); }
+
+  .panel{ display:none; }
+  .panel.active{ display:block; }
+
+  .toolbar{ display:flex; gap:10px; margin-bottom:14px; align-items:center; flex-wrap:wrap; }
+
+  table{ width:100%; border-collapse:collapse; background:var(--surface); border-radius:10px; overflow:hidden; border:1px solid var(--border); }
+  thead th{
+    text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:0.05em;
+    color:var(--text-dim); padding:10px 12px; background:var(--surface-2); font-weight:600;
+    border-bottom:1px solid var(--border);
+  }
+  tbody td{ padding:10px 12px; font-size:13px; border-bottom:1px solid var(--border); vertical-align:top; }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:hover{ background:var(--surface-2); cursor:pointer; }
+  .mono{ font-family:var(--mono); }
+  .muted{ color:var(--text-dim); }
+
+  .badge{
+    font-family:var(--mono); font-size:10.5px; padding:2px 8px; border-radius:5px;
+    border:1px solid var(--border); display:inline-block;
+  }
+  .badge.score-A{ color:var(--good); border-color:var(--good); }
+  .badge.score-B{ color:var(--accent); border-color:var(--accent); }
+  .badge.score-C{ color:var(--warn); border-color:var(--warn); }
+  .badge.score-D, .badge.score-F{ color:var(--bad); border-color:var(--bad); }
+  .badge.status{ color:var(--text-dim); }
+
+  .empty{ padding:40px; text-align:center; color:var(--text-dim); font-family:var(--mono); font-size:12.5px; }
+
+  pre.log{
+    background:#070A0D; border:1px solid var(--border); border-radius:10px; padding:14px;
+    font-family:var(--mono); font-size:12px; line-height:1.55; color:#C9D1D9;
+    max-height:420px; overflow-y:auto; white-space:pre-wrap; word-break:break-word;
+  }
+
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none;
+    align-items:flex-start; justify-content:center; z-index:50; padding:60px 20px;
+  }
+  .modal-backdrop.open{ display:flex; }
+  .modal{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    max-width:680px; width:100%; padding:22px 24px; max-height:80vh; overflow-y:auto;
+  }
+  .modal h2{ margin:0 0 4px; font-size:16px; }
+  .modal .row{ margin-top:12px; }
+  .modal .row .k{ font-size:10.5px; text-transform:uppercase; color:var(--text-dim); letter-spacing:0.05em; margin-bottom:4px; }
+  .modal .row .v{ font-size:13px; line-height:1.5; }
+  .modal ul{ margin:4px 0; padding-left:18px; }
+  .modal-close{ float:right; }
+
+  .card-list .item{
+    background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; margin-bottom:10px;
+  }
+  .card-list .item .top{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:6px; font-family:var(--mono); }
+  .card-list .item .body{ font-size:13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="mark">P</div>
+    <div>
+      <h1>PulseOps</h1>
+      <div class="sub">backend-engineer pipeline · india</div>
+    </div>
+  </div>
+  <svg class="pulse-line" viewBox="0 0 120 24" preserveAspectRatio="none">
+    <path id="pulseSvgPath" d="M0,12 L40,12 L46,3 L52,21 L58,12 L120,12" />
+  </svg>
+  <div class="header-actions">
+    <span class="pill" id="sendPill"><span class="dot"></span><span id="sendPillText">checking…</span></span>
+    <button id="pauseBtn">Pause sends</button>
+    <select id="runMode">
+      <option value="simulate" selected>Simulate</option>
+      <option value="live">Live</option>
+    </select>
+    <button class="primary" id="runBtn">Run pipeline</button>
+  </div>
+</header>
+
+<main>
+
+  <div class="stat-grid" id="statGrid">
+    <div class="stat-card"><div class="label">Sourced</div><div class="value" id="st-Sourced">—</div></div>
+    <div class="stat-card"><div class="label">Evaluated</div><div class="value" id="st-Evaluated">—</div></div>
+    <div class="stat-card accent"><div class="label">Matched / PDF</div><div class="value" id="st-pdf">—</div></div>
+    <div class="stat-card good"><div class="label">Outreach sent</div><div class="value" id="st-Sent">—</div><div class="muted mono" id="st-channels" style="font-size:10px; margin-top:2px;"></div></div>
+    <div class="stat-card"><div class="label">Queued</div><div class="value" id="st-Queued">—</div></div>
+    <div class="stat-card"><div class="label">Replied</div><div class="value" id="st-Replied">—</div></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="jobs">jobs</div>
+    <div class="tab" data-tab="queue">queue</div>
+    <div class="tab" data-tab="memory">memory</div>
+    <div class="tab" data-tab="audit">audit log</div>
+    <div class="tab" data-tab="digest">weekly digest</div>
+    <div class="tab" data-tab="run">run console</div>
+  </div>
+
+  <div class="panel active" id="panel-jobs">
+    <div class="toolbar">
+      <input type="text" id="jobSearch" placeholder="search title or company…" style="width:240px" />
+      <select id="jobStatusFilter">
+        <option value="">all statuses</option>
+        <option>Sourced</option><option>Filtered</option><option>Evaluated</option>
+        <option>Matched</option><option>Queued</option><option>Sent</option>
+        <option>FollowupSent</option><option>Replied</option><option>phone_screen</option>
+        <option>technical</option><option>final</option><option>offer</option>
+        <option>rejected</option><option>accepted</option><option>manual_required</option>
+      </select>
+      <button id="refreshJobs">Refresh</button>
+      <span class="muted mono" id="jobCount" style="font-size:11px;"></span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Score</th><th>Title</th><th>Company</th><th>Status</th><th>Source</th><th>Variant</th>
+      </tr></thead>
+      <tbody id="jobsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel" id="panel-queue">
+    <table>
+      <thead><tr><th>Score</th><th>Title</th><th>Company</th><th>Reason</th><th>Queued at</th></tr></thead>
+      <tbody id="queueBody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel" id="panel-memory">
+    <h3 style="font-size:13px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em;">Pending CV candidates (never auto-written to cv.md)</h3>
+    <div class="card-list" id="cvCandidates"></div>
+    <h3 style="font-size:13px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em; margin-top:22px;">Active memories</h3>
+    <div class="card-list" id="activeMemories"></div>
+  </div>
+
+  <div class="panel" id="panel-audit">
+    <div class="toolbar"><button id="refreshAudit">Refresh</button></div>
+    <pre class="log" id="auditLog">Loading…</pre>
+  </div>
+
+  <div class="panel" id="panel-digest">
+    <div class="toolbar"><button id="loadDigest">Generate digest preview</button></div>
+    <pre class="log" id="digestText">Click "Generate digest preview" — this runs notifications.weekly_digest.build_digest() on demand.</pre>
+  </div>
+
+  <div class="panel" id="panel-run">
+    <pre class="log" id="runLog">No run started yet this session.</pre>
+  </div>
+
+</main>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <h2 id="modalTitle"></h2>
+    <div class="muted mono" id="modalSub" style="font-size:12px;"></div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+function escapeHtml(s){
+  return (s ?? "").toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ── Tabs ─────────────────────────────────────────────────
+$$(".tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    $$(".tab").forEach(t => t.classList.remove("active"));
+    $$(".panel").forEach(p => p.classList.remove("active"));
+    tab.classList.add("active");
+    $("#panel-" + tab.dataset.tab).classList.add("active");
+    if (tab.dataset.tab === "queue") loadQueue();
+    if (tab.dataset.tab === "memory") loadMemory();
+    if (tab.dataset.tab === "audit") loadAudit();
+  });
+});
+
+// ── Stats ────────────────────────────────────────────────
+async function loadStats(){
+  const r = await fetch("/api/stats");
+  const d = await r.json();
+  if(!d.success) return;
+  const f = d.funnel || {};
+  const ch = d.outreach_channels || {};
+  $("#st-Sourced").textContent = d.total_jobs ?? "—";
+  $("#st-Evaluated").textContent = (f.Evaluated||0) + (f.Matched||0) + (f.Queued||0) + (f.Sent||0) + (f.FollowupSent||0) + (f.Replied||0);
+  $("#st-pdf").textContent = Object.values(f).reduce((a,b)=>a+b,0) > 0 ? (f.Matched||0)+(f.Sent||0)+(f.Queued||0)+(f.FollowupSent||0)+(f.Replied||0) : "0";
+
+  const totalOutreach = Object.values(ch).reduce((a,b)=>a+b,0);
+  $("#st-Sent").textContent = totalOutreach;
+  const parts = [];
+  if (ch.linkedin_dm) parts.push(`${ch.linkedin_dm} DM`);
+  if (ch.email) parts.push(`${ch.email} email`);
+  if (ch.referral) parts.push(`${ch.referral} referral`);
+  if (ch.other) parts.push(`${ch.other} other`);
+  $("#st-channels").textContent = parts.length ? parts.join(" · ") : "";
+
+  $("#st-Queued").textContent = f.Queued||0;
+  $("#st-Replied").textContent = f.Replied||0;
+
+  const pill = $("#sendPill"), pillText = $("#sendPillText");
+  if(d.send_paused){
+    pill.className = "pill paused"; pillText.textContent = "sends paused";
+    $("#pauseBtn").textContent = "Resume sends";
+  } else {
+    pill.className = "pill live"; pillText.textContent = "sends live";
+    $("#pauseBtn").textContent = "Pause sends";
+  }
+}
+
+// ── Jobs ─────────────────────────────────────────────────
+function scoreBadgeClass(grade){
+  const safe = ["A","B","C","D","F"].includes(grade) ? grade : "F";
+  return "badge score-" + safe;
+}
+
+async function loadJobs(){
+  const status = $("#jobStatusFilter").value;
+  const q = $("#jobSearch").value;
+  const params = new URLSearchParams();
+  if(status) params.set("status", status);
+  if(q) params.set("q", q);
+  const r = await fetch("/api/jobs?" + params.toString());
+  const d = await r.json();
+  const body = $("#jobsBody");
+  body.innerHTML = "";
+  if(!d.success || !d.jobs.length){
+    body.innerHTML = `<tr><td colspan="6"><div class="empty">No jobs match. Run the pipeline from the "run console" tab.</div></td></tr>`;
+    $("#jobCount").textContent = "";
+    return;
+  }
+  $("#jobCount").textContent = d.count + " job(s)";
+  d.jobs.forEach(j => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="${scoreBadgeClass(j.letter_grade)}">${escapeHtml(String(j.score ?? 0))} ${escapeHtml(j.letter_grade||"")}</span></td>
+      <td>${escapeHtml(j.title)}</td>
+      <td>${escapeHtml(j.company)}</td>
+      <td><span class="badge status">${escapeHtml(j.status)}</span></td>
+      <td class="muted mono" style="font-size:11px;">${escapeHtml(j.source||"")}</td>
+      <td class="muted mono" style="font-size:11px;">${escapeHtml(j.email_variant_used||"")}</td>
+    `;
+    tr.addEventListener("click", () => openJobModal(j));
+    body.appendChild(tr);
+  });
+}
+
+function openJobModal(j){
+  $("#modalTitle").textContent = `${j.title} @ ${j.company}`;
+  $("#modalSub").textContent = `score ${j.score} (${j.letter_grade}) · status ${j.status} · source ${j.source||"?"}`;
+  let skillGap = []; let starStories = [];
+  try { skillGap = JSON.parse(j.skill_gap || "[]"); } catch(e){}
+  try { starStories = JSON.parse(j.star_stories || "[]"); } catch(e){}
+
+  const statusOptions = ["Sourced","Filtered","Evaluated","Matched","Queued","Sent","FollowupSent",
+    "Replied","phone_screen","technical","final","offer","rejected","accepted","manual_required"];
+
+  $("#modalBody").innerHTML = `
+    <div class="row"><div class="k">Summary</div><div class="v">${escapeHtml(j.text_summary || "—")}</div></div>
+    <div class="row"><div class="k">Skill gap</div><div class="v">${skillGap.length ? "<ul>"+skillGap.map(s=>`<li>${escapeHtml(s)}</li>`).join("")+"</ul>" : "—"}</div></div>
+    <div class="row"><div class="k">Level strategy</div><div class="v">${escapeHtml(j.level_strategy || "—")}</div></div>
+    <div class="row"><div class="k">Comp research</div><div class="v">${escapeHtml(j.comp_research || "—")}</div></div>
+    <div class="row"><div class="k">Negotiation notes</div><div class="v">${escapeHtml(j.negotiation_notes || "—")}</div></div>
+    <div class="row"><div class="k">STAR+R stories</div><div class="v">${starStories.length ? "<ul>"+starStories.map(s=>`<li><b>${escapeHtml(s.question||"")}</b><br>${escapeHtml(s.answer||"")}</li>`).join("")+"</ul>" : "—"}</div></div>
+    <div class="row"><div class="k">Contact email / domain</div><div class="v">${escapeHtml(j.contact_email||"—")} · ${escapeHtml(j.inferred_domain||"—")} (${escapeHtml(j.domain_confidence||"?")})</div></div>
+    <div class="row">
+      <div class="k">LinkedIn DM draft</div>
+      <div class="v">
+        ${j.recruiter_message ? `<pre style="white-space:pre-wrap;font-family:inherit;margin:0 0 8px;">${escapeHtml(j.recruiter_message)}</pre>` : "—"}
+        <select id="outreachChannel" style="margin-right:6px;">
+          <option value="linkedin_dm">Sent as LinkedIn DM</option>
+          <option value="referral">Sent as referral request</option>
+          <option value="other">Sent another way</option>
+        </select>
+        <button id="markOutreach">Mark sent</button>
+        <span id="outreachMarkedNote" class="muted mono" style="font-size:11px; margin-left:8px;"></span>
+      </div>
+    </div>
+    <div class="row"><div class="k">Cold email draft</div><div class="v">${j.recruiter_email ? `<pre style="white-space:pre-wrap;font-family:inherit;margin:0;">${escapeHtml(j.recruiter_email)}</pre>` : "—"}</div></div>
+    ${j.pdf_path ? `<div class="row"><div class="k">Resume PDF</div><div class="v"><a href="/pdf/${encodeURIComponent(j.pdf_path.split('/').pop())}" target="_blank" style="color:var(--accent)">Open PDF →</a></div></div>` : ""}
+    <div class="row">
+      <div class="k">Manual status override</div>
+      <div class="v">
+        <select id="statusOverride">
+          ${statusOptions.map(s => `<option value="${s}" ${s===j.status?"selected":""}>${s}</option>`).join("")}
+        </select>
+        <button id="applyStatus" style="margin-left:8px;">Apply</button>
+      </div>
+    </div>
+  `;
+  $("#applyStatus").addEventListener("click", async () => {
+    const newStatus = $("#statusOverride").value;
+    await fetch(`/api/jobs/${j.id}/status`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({status:newStatus}),
+    });
+    closeModal();
+    loadJobs(); loadStats();
+  });
+  const markBtn = $("#markOutreach");
+  if (markBtn) {
+    markBtn.addEventListener("click", async () => {
+      const channel = $("#outreachChannel").value;
+      markBtn.disabled = true;
+      const r = await fetch(`/api/jobs/${j.id}/mark-outreach`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({channel}),
+      });
+      const d = await r.json();
+      if (d.success) {
+        $("#outreachMarkedNote").textContent = "✓ logged — helps cooldown tracking + weekly calibration";
+        loadStats();
+      } else {
+        $("#outreachMarkedNote").textContent = "Error: " + (d.error || "failed");
+        markBtn.disabled = false;
+      }
+    });
+  }
+  $("#modalBackdrop").classList.add("open");
+}
+function closeModal(){ $("#modalBackdrop").classList.remove("open"); }
+$("#modalBackdrop").addEventListener("click", e => { if(e.target.id==="modalBackdrop") closeModal(); });
+
+$("#refreshJobs").addEventListener("click", loadJobs);
+$("#jobStatusFilter").addEventListener("change", loadJobs);
+let searchTimer;
+$("#jobSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadJobs, 300); });
+
+// ── Queue ────────────────────────────────────────────────
+async function loadQueue(){
+  const r = await fetch("/api/queue");
+  const d = await r.json();
+  const body = $("#queueBody");
+  body.innerHTML = "";
+  if(!d.success || !d.items.length){
+    body.innerHTML = `<tr><td colspan="5"><div class="empty">Queue is empty.</div></td></tr>`;
+    return;
+  }
+  d.items.forEach(it => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="badge">${escapeHtml(String(it.score))}</span></td>
+      <td>${escapeHtml(it.job_title)}</td>
+      <td>${escapeHtml(it.job_company)}</td>
+      <td class="muted">${escapeHtml(it.reason||"")}</td>
+      <td class="mono muted" style="font-size:11px;">${escapeHtml(it.queued_at||"")}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// ── Memory ───────────────────────────────────────────────
+async function loadMemory(){
+  const r = await fetch("/api/memory");
+  const d = await r.json();
+  if(!d.success) return;
+  const cv = $("#cvCandidates");
+  cv.innerHTML = d.cv_candidates.length ? "" : `<div class="empty">No pending cv_candidate flags. (Memory never auto-writes cv.md.)</div>`;
+  d.cv_candidates.forEach(m => {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `<div class="top"><span>${escapeHtml(m.category)}</span><span>${escapeHtml(m.created_at||"")}</span></div><div class="body">${escapeHtml(m.raw_text)}</div>`;
+    cv.appendChild(div);
+  });
+
+  const am = $("#activeMemories");
+  am.innerHTML = d.active.length ? "" : `<div class="empty">No active memories yet. Use: python memory.py add "..."</div>`;
+  d.active.forEach(m => {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `<div class="top"><span>${escapeHtml(m.category)} ${m.company?(' · '+escapeHtml(m.company)):''}</span><span>${escapeHtml(m.created_at||"")}</span></div><div class="body">${escapeHtml(m.raw_text)}</div>`;
+    am.appendChild(div);
+  });
+}
+
+// ── Audit log ────────────────────────────────────────────
+async function loadAudit(){
+  const r = await fetch("/api/audit?limit=150");
+  const d = await r.json();
+  $("#auditLog").textContent = d.success && d.entries.length
+    ? d.entries.map(e => JSON.stringify(e)).join("\n")
+    : "No audit entries yet this month.";
+}
+$("#refreshAudit").addEventListener("click", loadAudit);
+
+// ── Digest ───────────────────────────────────────────────
+$("#loadDigest").addEventListener("click", async () => {
+  $("#digestText").textContent = "Generating…";
+  const r = await fetch("/api/digest");
+  const d = await r.json();
+  $("#digestText").textContent = d.success ? d.digest : ("Error: " + d.error);
+});
+
+// ── Pause / resume ───────────────────────────────────────
+$("#pauseBtn").addEventListener("click", async () => {
+  const paused = $("#sendPill").classList.contains("paused");
+  await fetch(paused ? "/api/resume" : "/api/pause", { method: "POST" });
+  loadStats();
+});
+
+// ── Run pipeline + SSE log stream ────────────────────────
+$("#runBtn").addEventListener("click", async () => {
+  const mode = $("#runMode").value;
+  $$(".tab").forEach(t => t.classList.remove("active"));
+  $$(".panel").forEach(p => p.classList.remove("active"));
+  $('.tab[data-tab="run"]').classList.add("active");
+  $("#panel-run").classList.add("active");
+
+  $("#runLog").textContent = "";
+  $("#runBtn").disabled = true;
+
+  const resp = await fetch("/api/run", {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ simulate: mode === "simulate" }),
+  });
+  const d = await resp.json();
+  if(!d.success){
+    $("#runLog").textContent = "Error: " + d.error;
+    $("#runBtn").disabled = false;
+    return;
+  }
+
+  const es = new EventSource("/api/run/stream");
+  es.onmessage = (ev) => {
+    if(ev.data === "[FINISHED]"){
+      es.close();
+      $("#runBtn").disabled = false;
+      loadStats(); loadJobs();
+      return;
+    }
+    $("#runLog").textContent += ev.data + "\n";
+    $("#runLog").scrollTop = $("#runLog").scrollHeight;
+  };
+  es.onerror = () => { es.close(); $("#runBtn").disabled = false; };
+});
+
+// ── Pulse line animation (signature element) ─────────────
+(function animatePulse(){
+  const path = document.getElementById("pulseSvgPath");
+  let t = 0;
+  setInterval(() => {
+    t += 1;
+    const shift = Math.sin(t/14) * 1.4;
+    path.setAttribute("d", `M0,12 L40,12 L46,${3+shift} L52,${21-shift} L58,12 L120,12`);
+  }, 90);
+})();
+
+// ── Init ─────────────────────────────────────────────────
+loadStats();
+loadJobs();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>

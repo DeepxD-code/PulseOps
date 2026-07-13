@@ -1,0 +1,21 @@
+# PulseOps Contacts — people you know at companies
+# Checked before every cold email send
+# If match found: email blocked, Telegram referral alert fired instead
+# This file is gitignored.
+
+contacts:
+  - name: "Friend Name"
+    company: "Vercel"
+    domain: "vercel.com"
+    linkedin: "https://linkedin.com/in/friend"
+    relationship: "college"        # college | worked_together | online | other
+    last_contact: "2026-01-15"
+    notes: "Strong connection, can ask for referral directly"
+
+  - name: "Another Person"
+    company: "Stripe"
+    domain: "stripe.com"
+    linkedin: "https://linkedin.com/in/person"
+    relationship: "online"
+    last_contact: "2025-11-01"
+    notes: "Met at hackathon — comfortable reaching out"

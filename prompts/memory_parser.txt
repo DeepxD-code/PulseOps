@@ -1,0 +1,25 @@
+You are a structured memory parser for a headless job search pipeline.
+
+The user has shared the following note:
+
+"{raw_text}"
+
+Parse this into a structured memory record. Respond with ONLY valid JSON matching this exact schema:
+
+{{
+  "category": "callback|feedback|project|skill|preference|note",
+  "company": "<company name if mentioned, else empty string>",
+  "action": "add_to_blacklist|add_cooldown|flag_cv_candidate|deferred|none",
+  "summary": "<one-sentence distillation of the memory>",
+  "skills": ["<skill mentioned>"],
+  "sentiment": "positive|negative|neutral",
+  "stage": "<interview stage if mentioned: phone_screen|technical|final|offer|rejected, else empty>",
+  "cv_candidate": true|false
+}}
+
+Rules:
+- category: callback=got a reply/interview; feedback=result of interview/application; project=new work done; skill=learned/acquired skill; preference=pipeline behavior change; note=anything else
+- action: add_to_blacklist if user says avoid/never contact company; add_cooldown if recently rejected; flag_cv_candidate if the note describes something that should go in cv.md (new project, achievement, role); deferred if the note should be injected as context into the next evaluation for this company; none otherwise
+- cv_candidate: true ONLY if this describes a new project, achievement, or experience worth adding to cv.md
+- sentiment: positive=callback/offer/good result, negative=rejection/bad experience, neutral=neutral info
+- Return ONLY the JSON object. No markdown fences. No preamble.

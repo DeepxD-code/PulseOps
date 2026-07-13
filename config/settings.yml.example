@@ -1,0 +1,90 @@
+# PulseOps Settings
+# Copy to config/settings.yml and fill values
+# This file is committed. config/settings.yml is gitignored.
+
+scoring:
+  send_threshold: 88        # Auto-send cold email (all 10 guardrails must pass)
+  pdf_threshold: 75         # Generate tailored PDF resume
+  notify_threshold: 70      # Telegram alert
+
+outreach:
+  # dm_first (default): every A/B/C match gets a LinkedIn DM draft delivered
+  #   to Telegram regardless of guardrail outcome — you always have something
+  #   to send by hand. Cold email auto-send is a bonus on top when G1-G10 all
+  #   pass, requiring either a JD-listed email or a Hunter.io verified lookup.
+  # cold_email_required: G10 behaves the same either way — this flag only
+  #   changes how doctor.py and the weekly digest talk about the funnel, so
+  #   you're not alarmed by a low "Sent" count when running DM-only.
+  # No HUNTER_API_KEY set? dm_first is what you're already running — nothing
+  # to configure, this pipeline was designed to work well without Hunter.io.
+  mode: "dm_first"
+
+guardrails:
+  daily_send_cap: 5
+  company_cooldown_days: 30
+  send_window_start: "09:00"
+  send_window_end: "18:00"
+  send_timezone: "Asia/Kolkata"
+  domain_daily_limit: 2
+  bounce_pause_threshold: 2
+  bounce_pause_hours: 24
+  min_send_gap_minutes: 8
+
+sourcing:
+  max_age_days: 7
+  location: "India"
+  preferred_cities:
+    - "Bangalore"
+    - "Hyderabad"
+    - "Pune"
+    - "Chennai"
+    - "Remote"
+  open_to_relocation: false
+  remote_preference: true
+
+followup:
+  enabled: true
+  day: 5
+  max_per_application: 1
+
+email_variants:
+  enabled: true
+  variants:
+    - technical_lead
+    - mission_lead
+    - direct
+
+digest:
+  enabled: true
+  day: "sunday"
+  time: "09:00"
+  timezone: "Asia/Kolkata"
+
+llm:
+  preferred: "gemini"
+  soft_filter_max_input_tokens: 150
+  soft_filter_max_output_tokens: 50
+  full_eval_max_tokens: 2500
+  profile_builder_max_tokens: 2000
+  memory_parser_max_tokens: 500
+  temperature: 0.2
+  max_retries: 3
+
+github:
+  sync_enabled: true
+  max_repos: 5
+  prefer_pinned: true
+  cache_hours: 24
+
+portal:
+  scan_enabled: true
+  delay_between_portals_seconds: 2
+  run_day: "sunday"
+  run_time: "08:00"
+
+dashboard:
+  flask_port: 5000
+  flask_host: "127.0.0.1"
+  auth_enabled: false
+  auth_username: ""
+  auth_password: ""

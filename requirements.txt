@@ -1,0 +1,31 @@
+# PulseOps — Python dependencies
+# Install: pip install -r requirements.txt
+
+# LLM cascade
+google-genai>=2.6.0
+groq>=1.2.0
+openai>=2.38.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Config / env
+python-dotenv>=1.2.2
+pyyaml>=6.0.1
+
+# HTTP / scraping
+requests>=2.34.2
+beautifulsoup4>=4.14.3
+lxml>=6.1.1
+
+# PDF generation
+playwright>=1.44.0
+
+# Templating
+jinja2>=3.1.4
+
+# Dashboard (Phase 10)
+Flask>=3.0.3
+
+# PDF page counting (optional, for 1-page fit validation)
+pypdf>=4.0.0

@@ -1,0 +1,44 @@
+You are a career profile builder for a headless job search pipeline.
+
+Given the candidate's parsed CV data below, generate a valid YAML profile.yml.
+
+CV Data:
+{cv_json}
+
+Generate a YAML document with exactly this structure:
+
+candidate:
+  name: "<full name>"
+  email: "<email>"
+  linkedin: "<linkedin url or empty>"
+  github: "<github url or empty>"
+  portfolio: "<portfolio url or empty>"
+  experience_years: <integer, 0 if student>
+  education: "<degree, institution, year>"
+
+domain:
+  title: "Backend Engineer"
+  core_skills:
+    - <skills appearing across 2+ roles/projects in the CV>
+  adjacent_skills:
+    - <skills used in limited context>
+
+past_employers:
+  - <company names from experience section>
+
+search:
+  queries:
+    - "<title> intern <top_skill>"
+    - "<title> intern <second_skill>"
+    - "software engineer intern <top_skill>"
+    - "backend developer intern entry level"
+    - "systems engineer intern <tech>"
+  location: "India"
+  max_age_days: 7
+
+Rules:
+- core_skills: skills the candidate demonstrably used across multiple contexts
+- adjacent_skills: skills mentioned once or in learning context
+- experience_years: 0 for students/interns with no full-time roles
+- Do NOT include hard_exclude, soft_exclude, seniority, or role_types — these are managed by the system
+- Return ONLY valid YAML. No markdown fences. No explanations.

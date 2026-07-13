@@ -1,0 +1,107 @@
+# PulseOps Profile — Auto-generated from cv.md
+# DO NOT EDIT MANUALLY — run: python doctor.py --sync-profile
+# This file is gitignored. profile.yml.example is committed.
+
+candidate:
+  name: "Your Name"
+  email: "you@gmail.com"
+  linkedin: "https://linkedin.com/in/you"
+  github: "https://github.com/you"
+  portfolio: "https://yoursite.com"
+  experience_years: 1
+  education: "B.Tech Computer Science, 2026"
+
+domain:
+  title: "Backend Engineer"
+
+  core_skills:
+    - Java
+    - C++
+    - Python
+    - Go
+    - Spring Boot
+    - gRPC
+    - PostgreSQL
+    - Redis
+    - Kafka
+    - Docker
+    - Kubernetes
+
+  adjacent_skills:
+    - AWS
+    - Linux
+    - MongoDB
+    - RabbitMQ
+    - System Design
+    - Microservices
+    - CI/CD
+    - Node.js
+
+  hard_exclude:
+    - React
+    - Angular
+    - Vue
+    - Figma
+    - CSS
+    - Flutter
+    - Swift
+    - Android
+    - iOS
+
+  soft_exclude:
+    - TypeScript
+    - JavaScript
+    - Node.js
+    - Next.js
+
+  seniority:
+    target:
+      - intern
+      - junior
+      - associate
+      - entry-level
+      - new grad
+    exclude:
+      - senior
+      - lead
+      - principal
+      - staff
+      - director
+      - manager
+      - head of
+      - vp
+
+  role_types:
+    include:
+      - backend
+      - software engineer
+      - systems engineer
+      - infrastructure
+      - platform engineer
+      - site reliability
+      - devops
+      - api engineer
+    exclude:
+      - frontend
+      - designer
+      - product manager
+      - data scientist
+      - ml engineer
+      - recruiter
+      - sales
+      - marketing
+      - android
+      - ios
+      - mobile
+
+past_employers: []
+
+search:
+  queries:
+    - "backend engineer intern Java"
+    - "backend developer intern C++"
+    - "software engineer intern Python"
+    - "systems engineer intern Go"
+    - "backend intern Spring Boot"
+  location: "India"
+  max_age_days: 7

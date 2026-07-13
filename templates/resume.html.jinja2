@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ candidate.name }} — {{ role }} at {{ company }}</title>
+<style>
+  /* ── Reset ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* ── Page / print setup ── */
+  html, body {
+    width: 210mm;
+    /* height intentionally unconstrained — Playwright crops to content */
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: {{ font_size_pt }}pt;
+    line-height: {{ line_height }};
+    color: #1a202c;
+    background: #ffffff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  @page {
+    size: A4;
+    margin: {{ page_margin_mm }}mm;
+  }
+
+  @media print {
+    html, body { width: 100%; }
+    a { color: inherit; text-decoration: none; }
+  }
+
+  /* ── Outer wrapper — same as @page margin ── */
+  .page {
+    padding: {{ page_margin_mm }}mm;
+    max-width: 210mm;
+  }
+
+  /* ── Header: two-column name / contact ── */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: {{ header_mb_pt }}pt;
+    padding-bottom: {{ header_mb_pt | half }}pt;
+    border-bottom: 1.5px solid #2d3748;
+  }
+
+  .name {
+    font-size: {{ name_size_pt }}pt;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #1a202c;
+    line-height: 1.1;
+  }
+
+  .tagline {
+    font-size: {{ font_size_pt | minus1 }}pt;
+    color: #4a5568;
+    margin-top: 3pt;
+    font-weight: 400;
+  }
+
+  .contact {
+    text-align: right;
+    font-size: {{ contact_size_pt }}pt;
+    color: #4a5568;
+    line-height: 1.55;
+    white-space: nowrap;
+  }
+
+  .contact a { color: #2b6cb0; text-decoration: none; }
+
+  /* ── Section header ── */
+  .section { margin-bottom: {{ section_mb_pt }}pt; }
+
+  .section-title {
+    font-size: {{ section_title_pt }}pt;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #2d3748;
+    margin-bottom: 3pt;
+    padding-bottom: 2pt;
+    border-bottom: 0.75px solid #cbd5e0;
+  }
+
+  /* ── Experience / Project entry ── */
+  .entry { margin-bottom: {{ entry_mb_pt }}pt; }
+
+  .entry-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .entry-title {
+    font-weight: 700;
+    font-size: {{ font_size_pt }}pt;
+    color: #1a202c;
+  }
+
+  .entry-meta {
+    font-size: {{ meta_size_pt }}pt;
+    color: #718096;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .entry-sub {
+    font-size: {{ meta_size_pt }}pt;
+    color: #4a5568;
+    margin-top: 0.5pt;
+    font-style: italic;
+  }
+
+  /* ── Bullets ── */
+  ul.bullets {
+    margin-top: {{ bullet_mt_pt }}pt;
+    margin-left: 12pt;
+    list-style: none;
+    padding: 0;
+  }
+
+  ul.bullets li {
+    position: relative;
+    padding-left: 10pt;
+    margin-bottom: {{ bullet_mb_pt }}pt;
+    font-size: {{ font_size_pt }}pt;
+    color: #2d3748;
+    line-height: {{ line_height }};
+  }
+
+  ul.bullets li::before {
+    content: "▸";
+    position: absolute;
+    left: 0;
+    color: #4299e1;
+    font-size: {{ font_size_pt | minus1 }}pt;
+    top: 0.5pt;
+  }
+
+  /* ── Skills section — category: items layout ── */
+  .skills-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: {{ skills_row_gap_pt }}pt 8pt;
+    margin-top: 2pt;
+  }
+
+  .skill-label {
+    font-weight: 600;
+    font-size: {{ meta_size_pt }}pt;
+    color: #2d3748;
+    white-space: nowrap;
+  }
+
+  .skill-value {
+    font-size: {{ meta_size_pt }}pt;
+    color: #4a5568;
+  }
+
+  /* ── Education — inline layout ── */
+  .edu-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: {{ edu_mb_pt }}pt;
+  }
+
+  .edu-degree {
+    font-weight: 600;
+    font-size: {{ font_size_pt }}pt;
+  }
+
+  .edu-meta {
+    font-size: {{ meta_size_pt }}pt;
+    color: #718096;
+    white-space: nowrap;
+  }
+
+  .edu-school {
+    font-size: {{ meta_size_pt }}pt;
+    color: #4a5568;
+  }
+
+  /* ── Certifications ── */
+  .cert-row {
+    font-size: {{ meta_size_pt }}pt;
+    color: #4a5568;
+    margin-bottom: 2pt;
+  }
+
+  /* ── Summary ── */
+  .summary-text {
+    font-size: {{ font_size_pt }}pt;
+    color: #2d3748;
+    line-height: {{ line_height }};
+  }
+
+  /* ── Page-break avoidance ── */
+  .entry, .edu-row, .section { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="header">
+    <div>
+      <div class="name">{{ candidate.name }}</div>
+      <div class="tagline">{{ domain_title }}{% if candidate.experience_years %} · {{ candidate.experience_years }}y experience{% endif %}</div>
+    </div>
+    <div class="contact">
+      {% if candidate.email %}<a href="mailto:{{ candidate.email }}">{{ candidate.email }}</a><br>{% endif %}
+      {% if candidate.linkedin %}<a href="{{ candidate.linkedin }}">linkedin.com/in/{{ candidate.linkedin | linkedin_handle }}</a><br>{% endif %}
+      {% if candidate.github %}<a href="{{ candidate.github }}">github.com/{{ candidate.github | github_handle }}</a><br>{% endif %}
+      {% if candidate.portfolio %}<a href="{{ candidate.portfolio }}">{{ candidate.portfolio | strip_https }}</a><br>{% endif %}
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY (always present) ═══ -->
+  {% if summary %}
+  <section class="section">
+    <div class="section-title">Summary</div>
+    <p class="summary-text">{{ summary }}</p>
+  </section>
+  {% endif %}
+
+  <!-- ═══ SKILLS (always present) ═══ -->
+  {% if skills %}
+  <section class="section">
+    <div class="section-title">Technical Skills</div>
+    <div class="skills-grid">
+      {% for category, items in skills.items() %}
+      {% if items %}
+      <span class="skill-label">{{ category }}:</span>
+      <span class="skill-value">{{ items | join(", ") }}</span>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- ═══ EXPERIENCE (always present if exists) ═══ -->
+  {% if experience %}
+  <section class="section">
+    <div class="section-title">Experience</div>
+    {% for job in experience %}
+    <div class="entry">
+      <div class="entry-header">
+        <span class="entry-title">{{ job.title }}</span>
+        <span class="entry-meta">{{ job.date_range }}</span>
+      </div>
+      <div class="entry-sub">{{ job.company }}{% if job.location %} · {{ job.location }}{% endif %}</div>
+      {% if job.bullets %}
+      <ul class="bullets">
+        {% for bullet in job.bullets %}
+        <li>{{ bullet }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <!-- ═══ PROJECTS (top 2 by JD overlap, conditional) ═══ -->
+  {% if projects %}
+  <section class="section">
+    <div class="section-title">Projects</div>
+    {% for proj in projects %}
+    <div class="entry">
+      <div class="entry-header">
+        <span class="entry-title">
+          {% if proj.link %}<a href="{{ proj.link }}">{{ proj.name }}</a>{% else %}{{ proj.name }}{% endif %}
+        </span>
+        <span class="entry-meta">{{ proj.tech_stack | join(" · ") if proj.tech_stack else "" }}</span>
+      </div>
+      {% if proj.bullets %}
+      <ul class="bullets">
+        {% for bullet in proj.bullets %}
+        <li>{{ bullet }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <!-- ═══ EDUCATION (always present) ═══ -->
+  {% if education %}
+  <section class="section">
+    <div class="section-title">Education</div>
+    {% for edu in education %}
+    <div class="edu-row">
+      <div>
+        <div class="edu-degree">{{ edu.degree }}</div>
+        <div class="edu-school">{{ edu.institution }}</div>
+      </div>
+      <div class="edu-meta">{{ edu.graduation_year }}</div>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <!-- ═══ CERTIFICATIONS (conditional — only if relevant cert in JD) ═══ -->
+  {% if certifications %}
+  <section class="section">
+    <div class="section-title">Certifications</div>
+    {% for cert in certifications %}
+    <div class="cert-row">{{ cert.name }}{% if cert.issuer %} · {{ cert.issuer }}{% endif %}{% if cert.year %} ({{ cert.year }}){% endif %}</div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+</div>
+</body>
+</html>

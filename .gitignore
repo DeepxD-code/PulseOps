@@ -1,0 +1,51 @@
+# PulseOps .gitignore
+
+# ── Secrets (never commit) ──────────────────────────────────
+.env
+config/profile.yml
+config/settings.yml
+config/blacklist.txt
+config/contacts.yml
+config/.cv_hash
+
+# ── CV — gitignored per spec (only cv.md.example if needed) ─
+cv.md
+
+# ── Generated artifacts ─────────────────────────────────────
+output/
+data/
+logs/
+memory/cv_history/
+temp_linkedin_jobs.json
+temp_portal_jobs.json
+memory/.github_synced.json
+pulseops.db
+pulseops-tui
+dashboard/tui/pulseops-tui
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Node ────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── OS ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo

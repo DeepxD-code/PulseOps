@@ -1,0 +1,125 @@
+name: PulseOps Daily Pipeline
+
+# Runs the daily sourcing → evaluate → send pipeline (main.py).
+# See ../../CRON.md for required repo secrets and the state-branch pattern
+# this workflow relies on to persist pulseops.db across stateless runners.
+
+on:
+  schedule:
+    # 03:30 UTC = 09:00 IST — aligned with SEND_WINDOW_START so the run
+    # lands right as the send window opens (config/settings.yml).
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      simulate:
+        description: "Run with --simulate (no API calls, no sends)"
+        type: boolean
+        default: false
+      force:
+        description: "Re-evaluate jobs already seen (--force)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to push updated state back to pulseops-state
+
+concurrency:
+  group: pulseops-daily
+  cancel-in-progress: false   # never cancel a run that might be mid-send
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout persistent state (pulseops-state branch)
+        uses: actions/checkout@v4
+        with:
+          ref: pulseops-state
+          path: .state
+        continue-on-error: true   # first-ever run: branch doesn't exist yet
+
+      - name: Restore DB + logs + memory from state branch
+        run: |
+          mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
+          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no prior DB — first run"
+          [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
+          [ -d .state/data ] && cp -r .state/data/. ./data/ || true
+          [ -d .state/memory/cv_history ] && cp -r .state/memory/cv_history/. ./memory/cv_history/ || true
+          [ -f .state/memory/.github_synced.json ] && cp .state/memory/.github_synced.json ./memory/ || true
+          [ -f .state/config/profile.yml ] && cp .state/config/profile.yml ./config/ || true
+          [ -f .state/config/.cv_hash ] && cp .state/config/.cv_hash ./config/ || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt --break-system-packages
+
+      - name: Install Node dependencies + Playwright browser
+        run: |
+          npm install
+          npx playwright install chromium --with-deps
+
+      - name: Write secrets to disk
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+          CV_MD: ${{ secrets.CV_MD }}
+          SETTINGS_YML: ${{ secrets.SETTINGS_YML }}
+          BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
+          CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
+        run: |
+          printf '%s' "$ENV_FILE" > .env
+          printf '%s' "$CV_MD" > cv.md
+          printf '%s' "$SETTINGS_YML" > config/settings.yml
+          printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt
+          printf '%s' "$CONTACTS_YML" > config/contacts.yml
+
+      - name: doctor.py --check (non-blocking — informational)
+        run: python doctor.py --check || true
+
+      - name: Sync profile.yml from cv.md if changed
+        run: python doctor.py --init 2>/dev/null || python doctor.py --sync-profile
+
+      - name: Run daily pipeline
+        run: |
+          ARGS=""
+          if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          python main.py $ARGS
+
+      - name: Commit state back to pulseops-state branch
+        if: always()   # persist state even if the pipeline step failed partway through
+        run: |
+          rm -rf .state
+          mkdir -p .state/logs .state/data .state/memory/cv_history .state/config
+          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          cp -r logs/. .state/logs/ 2>/dev/null || true
+          cp -r data/. .state/data/ 2>/dev/null || true
+          cp -r memory/cv_history/. .state/memory/cv_history/ 2>/dev/null || true
+          cp memory/.github_synced.json .state/memory/ 2>/dev/null || true
+          cp config/profile.yml .state/config/ 2>/dev/null || true
+          cp config/.cv_hash .state/config/ 2>/dev/null || true
+
+          cd .state
+          git init -q
+          git checkout -B pulseops-state
+          git config user.name "pulseops-bot"
+          git config user.email "pulseops-bot@users.noreply.github.com"
+          git add -A
+          git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
+              commit -q -m "state: daily run $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing changed"
+          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+              HEAD:pulseops-state --force

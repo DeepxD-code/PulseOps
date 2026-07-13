@@ -1,0 +1,120 @@
+name: PulseOps Weekly Portal Scan
+
+# Runs the deep Playwright portal scan (main_weekly.py): Naukri, Instahyre,
+# Wellfound India, plus the ATS company boards in portal/portals.yml.
+# Shares the same pulseops-state branch as daily.yml — see CRON.md.
+
+on:
+  schedule:
+    # 02:30 UTC Sunday = 08:00 IST Sunday — ahead of the daily run's 09:00
+    # IST send window, matching config/settings.yml `portal.run_day/run_time`.
+    - cron: "30 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      simulate:
+        description: "Run with --simulate (mock portal data, no network)"
+        type: boolean
+        default: false
+      skip_liveness:
+        description: "Skip the pre-flight portal liveness check"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pulseops-weekly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout persistent state (pulseops-state branch)
+        uses: actions/checkout@v4
+        with:
+          ref: pulseops-state
+          path: .state
+        continue-on-error: true
+
+      - name: Restore DB + logs + memory from state branch
+        run: |
+          mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
+          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no prior DB — first run"
+          [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
+          [ -d .state/data ] && cp -r .state/data/. ./data/ || true
+          [ -d .state/memory/cv_history ] && cp -r .state/memory/cv_history/. ./memory/cv_history/ || true
+          [ -f .state/config/profile.yml ] && cp .state/config/profile.yml ./config/ || true
+          [ -f .state/config/.cv_hash ] && cp .state/config/.cv_hash ./config/ || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt --break-system-packages
+
+      - name: Install Node dependencies + Playwright browser
+        run: |
+          npm install
+          npx playwright install chromium --with-deps
+
+      - name: Write secrets to disk
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+          CV_MD: ${{ secrets.CV_MD }}
+          SETTINGS_YML: ${{ secrets.SETTINGS_YML }}
+          BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
+          CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
+        run: |
+          printf '%s' "$ENV_FILE" > .env
+          printf '%s' "$CV_MD" > cv.md
+          printf '%s' "$SETTINGS_YML" > config/settings.yml
+          printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt
+          printf '%s' "$CONTACTS_YML" > config/contacts.yml
+
+      - name: Sync profile.yml from cv.md if changed
+        run: python doctor.py --init 2>/dev/null || python doctor.py --sync-profile
+
+      - name: Run weekly portal scan
+        run: |
+          ARGS=""
+          if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
+          if [ "${{ inputs.skip_liveness }}" = "true" ]; then ARGS="$ARGS --skip-liveness"; fi
+          python main_weekly.py $ARGS
+
+      - name: Commit state back to pulseops-state branch
+        if: always()
+        run: |
+          rm -rf .state
+          mkdir -p .state/logs .state/data .state/memory/cv_history .state/config
+          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          cp -r logs/. .state/logs/ 2>/dev/null || true
+          cp -r data/. .state/data/ 2>/dev/null || true
+          cp -r memory/cv_history/. .state/memory/cv_history/ 2>/dev/null || true
+          cp config/profile.yml .state/config/ 2>/dev/null || true
+          cp config/.cv_hash .state/config/ 2>/dev/null || true
+
+          cd .state
+          git init -q
+          git checkout -B pulseops-state
+          git config user.name "pulseops-bot"
+          git config user.email "pulseops-bot@users.noreply.github.com"
+          git add -A
+          git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
+              commit -q -m "state: weekly scan $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing changed"
+          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+              HEAD:pulseops-state --force

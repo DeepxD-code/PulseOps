@@ -1,0 +1,142 @@
+# portal/portals.yml — Weekly Playwright portal scan configuration
+#
+# Priority order (per project direction, June 2026):
+#   1. Naukri, Instahyre, Wellfound India — underrepresented in the daily
+#      API sourcing (Google Jobs + TheirStack), so the weekly deep scan
+#      exists specifically to fill that gap.
+#   2. ATS ID company boards (Greenhouse / Lever / Ashby) — same approach
+#      Career-Ops used, trimmed to companies that actually hire backend
+#      interns/new-grads in India.
+#   3. LinkedIn — demoted to optional. The daily pipeline already has a
+#      LinkedIn source (linkedin_bridge.js); re-scanning it weekly via
+#      Playwright adds ban risk for little incremental signal, so it is
+#      disabled by default. Flip `enabled: true` if you want it anyway.
+#
+# Each entry:
+#   name            display name, used as the `source` field on scraped jobs
+#   engine          one of: naukri | instahyre | wellfound | greenhouse |
+#                   lever | ashby | linkedin
+#   url             search URL (search engines) or board URL (ATS engines)
+#   company         only used by greenhouse/lever/ashby — the board slug
+#   enabled         set false to skip without deleting the config
+#   requires_auth   true → scan.mjs skips it and flags via Telegram with
+#                   the direct link instead of attempting to scrape
+
+search_portals:
+  - name: "Naukri"
+    engine: naukri
+    enabled: true
+    requires_auth: false
+    # Naukri's own query syntax: keyword, location as URL segments.
+    url: "https://www.naukri.com/backend-developer-jobs-in-bangalore-hyderabad-pune-chennai?experience=0"
+
+  - name: "Naukri (Java/Spring Boot)"
+    engine: naukri
+    enabled: true
+    requires_auth: false
+    url: "https://www.naukri.com/java-spring-boot-jobs-in-bangalore-hyderabad-pune-chennai?experience=0"
+
+  - name: "Instahyre"
+    engine: instahyre
+    enabled: true
+    requires_auth: true   # Instahyre listing pages require a logged-in session
+    url: "https://www.instahyre.com/search-jobs/?function=Engineering&q=backend+intern"
+
+  - name: "Wellfound India"
+    engine: wellfound
+    enabled: true
+    requires_auth: false
+    url: "https://wellfound.com/india/role/r/backend-engineer"
+
+  - name: "Wellfound India (Internships)"
+    engine: wellfound
+    enabled: true
+    requires_auth: false
+    url: "https://wellfound.com/india/role/intern/backend-engineer"
+
+  - name: "LinkedIn (weekly deep scan)"
+    engine: linkedin
+    enabled: false   # demoted — daily linkedin_bridge.js already covers this source
+    requires_auth: true
+    url: "https://www.linkedin.com/jobs/search/?keywords=backend%20engineer%20intern&location=India"
+
+# ATS-hosted company boards — predictable HTML/JSON structure per engine,
+# so these are the most reliable sources in this file. Trimmed to
+# companies known to run backend/infra-heavy India hiring.
+ats_portals:
+  - name: "Razorpay"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "razorpay"
+    url: "https://boards.greenhouse.io/razorpay"
+
+  - name: "Zerodha"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "zerodha"
+    url: "https://boards.greenhouse.io/zerodha"
+
+  - name: "CRED"
+    engine: lever
+    enabled: true
+    requires_auth: false
+    company: "cred"
+    url: "https://jobs.lever.co/cred"
+
+  - name: "Postman"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "postman"
+    url: "https://boards.greenhouse.io/postman"
+
+  - name: "Groww"
+    engine: lever
+    enabled: true
+    requires_auth: false
+    company: "groww"
+    url: "https://jobs.lever.co/groww"
+
+  - name: "Chargebee"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "chargebee"
+    url: "https://boards.greenhouse.io/chargebee"
+
+  - name: "Freshworks"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "freshworks"
+    url: "https://boards.greenhouse.io/freshworks"
+
+  - name: "Sprinto"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "sprinto"
+    url: "https://jobs.ashbyhq.com/sprinto"
+
+  - name: "Vercel"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "vercel"
+    url: "https://jobs.ashbyhq.com/vercel"
+
+  - name: "Anthropic"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "anthropic"
+    url: "https://boards.greenhouse.io/anthropic"
+
+# Tuning
+settings:
+  delay_between_portals_seconds: 2
+  page_timeout_ms: 30000
+  max_jobs_per_portal: 40
+  headless: true

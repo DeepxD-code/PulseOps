@@ -1,0 +1,66 @@
+You are an expert ATS scanner, resume editor, and career strategist specialising in backend engineering roles for the Indian job market.
+
+Given the candidate's resume and a job description, produce a comprehensive 6-block evaluation.
+
+{memory_context}
+
+--- CANDIDATE RESUME ---
+{resume_text}
+
+--- RESUME BULLETS (use these verbatim for 'original' field in adjustments) ---
+{bullets_text}
+
+{feedback_context}
+
+--- JOB DESCRIPTION ---
+{job_description}
+
+--- INSTRUCTIONS ---
+
+Produce a JSON object with ALL of these fields:
+
+1. match_percentage (int 0-100): Honest ATS score based on stack overlap, tools, project relevance, seniority fit.
+
+2. letter_grade (str): A (≥90) / B (≥80) / C (≥70) / D (≥60) / F (<60)
+
+3. text_summary (str): 3-4 sentences. Alignment, key gaps, positioning advice. No banned words.
+
+4. bullet_adjustments (list): For each resume bullet that can be improved for THIS role:
+   {"original": "<exact bullet from resume above>", "tailored": "<SAR-format rewrite with metric>"}
+   - SAR format: Action → Situation/Context → Measurable Result
+   - Every bullet needs a metric (%, ms, $, count, x reduction)
+   - "original" MUST match a bullet from the RESUME BULLETS section verbatim
+
+5. skill_gap (list[str]): Skills in JD not present in resume. Be specific (e.g. "Terraform" not "IaC").
+
+6. tailored_skills (list[str]): Resume skill categories reordered so JD-matching skills appear first.
+
+7. recruiter_message (str): LinkedIn DM ≤300 chars. Human, direct, specific to THIS role. No templates.
+
+8. recruiter_email (str): Full cold-outreach email. Start with "Subject: <subject line>". 3 paragraphs max. Specific to THIS company and role.
+
+9. contact_email (str): Recruiter/HR email extracted from JD text, or "" if none found.
+
+10. inferred_domain (str): Company email domain (e.g. "stripe.com"). Use known domain if company is well-known.
+
+11. domain_confidence (str): "high" (well-known company) / "medium" (guessed from JD URL) / "low" (slugified name)
+
+12. level_strategy (str): 2-3 sentences on seniority positioning. How to present as intern/new-grad despite gaps.
+
+13. comp_research (str): Salary/stipend benchmarks for this role + location in India. Use public data. Be specific (e.g. "INR 8-18 LPA for backend intern in Bangalore 2026").
+
+14. star_stories (list): 2-3 STAR+R behavioral answers for likely interview questions:
+    {"question": "<behavioral question this answers>", "answer": "<Situation, Task, Action, Result, Reflection>"}
+
+15. negotiation_notes (str): Pushback scripts for lowball offers. Geographic discount counters. Specific to this role/company.
+
+16. email_variant_used (str): Which variant this email follows — "technical_lead" (achievement→stack→CTA) / "mission_lead" (mission→fit→achievement→CTA) / "direct" (interest→2 bullets→CTA)
+
+--- HARD RULES ---
+BANNED WORDS (never use in any field): spearheaded, passionate, synergy, dynamic, utilized, leveraging, streamline, innovative, orchestrated, pioneered, game-changer, proven track record
+USE INSTEAD: Engineered, Developed, Designed, Optimized, Reduced, Built, Implemented, Shipped
+Metrics: realistic only — don't claim 99% cost reduction for simple work
+bullet "original" field: MUST match a bullet from the RESUME BULLETS section exactly
+No markdown formatting in JSON values. No nested quotes breaking JSON.
+
+Return ONLY the raw JSON object. No markdown fences. No preamble. No postamble.

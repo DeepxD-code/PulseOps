@@ -1,0 +1,15 @@
+# PulseOps Blacklist — companies and domains to never contact
+# One entry per line. Partial matches work.
+# This file is gitignored.
+
+# Service companies
+TCS
+Infosys
+Wipro
+HCL Technologies
+Tech Mahindra
+Cognizant
+
+# Bad email domains
+@noreply.com
+@donotreply.com

@@ -1,0 +1,18 @@
+{
+  "name": "pulseops",
+  "version": "1.0.0",
+  "description": "PulseOps — automated backend engineering job search pipeline",
+  "main": "linkedin_bridge.js",
+  "scripts": {
+    "bridge": "node linkedin_bridge.js",
+    "install-playwright": "npx playwright install chromium",
+    "scan": "node portal/scan.mjs",
+    "scan:mock": "node portal/scan.mjs --mock",
+    "check-liveness": "node portal/check_liveness.mjs"
+  },
+  "dependencies": {
+    "linkedin-jobs-api": "^1.0.7",
+    "playwright": "^1.44.0",
+    "js-yaml": "^4.1.0"
+  }
+}
