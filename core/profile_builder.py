@@ -190,7 +190,7 @@ def _query_gemini(prompt: str) -> dict:
     for attempt in range(2):
         try:
             resp = client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.2,
@@ -212,7 +212,7 @@ def _query_groq(prompt: str) -> dict:
     from groq import Groq
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         timeout=30,
