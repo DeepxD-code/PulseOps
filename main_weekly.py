@@ -189,7 +189,11 @@ def main() -> None:
     from core.cv_parser import parse_cv
 
     reset_circuit_breakers()
-    cv_data = parse_cv(str(ROOT / "cv.md"))
+    try:
+        cv_data = parse_cv(str(ROOT / "cv.md")) if (ROOT / "cv.md").exists() else None
+    except Exception as e:
+        print(f"  [!] CV parse failed ({e}) — using empty context (simulate mode)")
+        cv_data = None
 
     for idx, job in enumerate(soft_passed, 1):
         title, company, link = job.get("title", "Unknown"), job.get("company", "Unknown"), job.get("link", "")
