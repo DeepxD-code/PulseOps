@@ -92,6 +92,10 @@ jobs:
             python doctor.py --init || python doctor.py --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
           else
             echo "::warning::cv.md missing/empty — skipping profile sync (set CV_MD secret)"
+            if [ ! -f config/profile.yml ] && [ -f config/profile.yml.example ]; then
+              cp config/profile.yml.example config/profile.yml
+              echo "::notice::using profile.yml.example for simulate/missing CV"
+            fi
           fi
 
       - name: Run weekly portal scan

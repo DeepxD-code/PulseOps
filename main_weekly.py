@@ -401,12 +401,18 @@ def _load_settings() -> dict:
 
 def _load_profile() -> dict:
     import yaml
-    p = ROOT / "config" / "profile.yml"
-    if not p.exists():
-        print("[!] profile.yml not found — run: python doctor.py --init")
-        sys.exit(1)
-    with open(p) as f:
-        return yaml.safe_load(f)
+    for p in [ROOT / "config" / "profile.yml",
+              ROOT / "config" / "profile.yml.example"]:
+        if p.exists():
+            try:
+                with open(p) as f:
+                    data = yaml.safe_load(f) or {}
+                    if data:
+                        return data
+            except Exception:
+                continue
+    print("[!] profile.yml not found — run: python doctor.py --init (using empty profile)")
+    return {}
 
 
 def _mock_evaluation(title: str, company: str) -> dict:
