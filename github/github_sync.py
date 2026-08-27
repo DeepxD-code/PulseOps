@@ -123,7 +123,7 @@ def _llm_bullet(readme_content: str, repo_name: str, language: str) -> str | Non
             from google import genai
             client = genai.Client(api_key=gemini_key)
             resp = client.models.generate_content(
-                model="gemini-2.5-flash-lite", contents=prompt,
+                model="gemini-2.0-flash", contents=prompt,
             )
             text = (resp.text or "").strip()
             if text:
@@ -137,7 +137,7 @@ def _llm_bullet(readme_content: str, repo_name: str, language: str) -> str | Non
             from groq import Groq
             client = Groq(api_key=groq_key)
             resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2, timeout=20,
             )

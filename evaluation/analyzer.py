@@ -166,7 +166,7 @@ def _query_gemini(prompt: str) -> dict:
     for attempt in range(3):
         try:
             resp = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model="gemini-2.0-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -196,7 +196,7 @@ def _query_groq(prompt: str) -> dict:
     from groq import Groq
 
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant"]
 
     for model in models:
         for attempt in range(2):
