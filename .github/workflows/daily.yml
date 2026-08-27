@@ -91,7 +91,12 @@ jobs:
         run: python doctor.py --check || true
 
       - name: Sync profile.yml from cv.md if changed
-        run: python doctor.py --init 2>/dev/null || python doctor.py --sync-profile
+        run: |
+          if [ -f cv.md ] && [ -s cv.md ]; then
+            python doctor.py --init || python doctor.py --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
+          else
+            echo "::warning::cv.md missing/empty — skipping profile sync (set CV_MD secret)"
+          fi
 
       - name: Run daily pipeline
         run: |
@@ -119,7 +124,11 @@ jobs:
           git config user.name "pulseops-bot"
           git config user.email "pulseops-bot@users.noreply.github.com"
           git add -A
+          if git diff --cached --quiet; then
+            echo "nothing changed — skipping push"
+            exit 0
+          fi
           git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
-              commit -q -m "state: daily run $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing changed"
+              commit -q -m "state: daily run $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
               HEAD:pulseops-state --force

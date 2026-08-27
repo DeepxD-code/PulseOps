@@ -48,8 +48,10 @@ def check(label: str, ok: bool, detail: str = "", warn_only: bool = False) -> bo
     return ok
 
 
+BOX = "\u2500"
+
 def section(title: str) -> None:
-    print(f"\n{BOLD}\u2500\u2500 {title} {'\u2500' * max(1, 50 - len(title))}{RESET}")
+    print(f"\n{BOLD}{BOX*2} {title} {BOX * max(1, 50 - len(title))}{RESET}")
 
 
 # ── Main check sequence ─────────────────────────────────────────────────────
@@ -263,7 +265,7 @@ def run_checks() -> bool:
         check("Send queue clean", True)
 
     # ── Summary ──────────────────────────────────────────────────────────
-    print(f"\n{'\u2500' * 54}")
+    print(f"\n{BOX * 54}")
     if all_ok:
         print(f"{GREEN}{BOLD}All required checks passed. PulseOps is ready.{RESET}")
         print("Run: python main.py --simulate")
