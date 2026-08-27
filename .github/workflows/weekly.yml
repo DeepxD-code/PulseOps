@@ -80,11 +80,11 @@ jobs:
           BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
           CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
         run: |
-          printf '%s' "$ENV_FILE" > .env
-          printf '%s' "$CV_MD" > cv.md
-          printf '%s' "$SETTINGS_YML" > config/settings.yml
-          printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt
-          printf '%s' "$CONTACTS_YML" > config/contacts.yml
+          if [ -n "$ENV_FILE" ]; then printf '%s' "$ENV_FILE" > .env; else echo "::warning::ENV_FILE secret empty — using defaults"; fi
+          if [ -n "$CV_MD" ]; then printf '%s' "$CV_MD" > cv.md; else echo "::warning::CV_MD secret empty — profile sync will be skipped"; fi
+          if [ -n "$SETTINGS_YML" ]; then printf '%s' "$SETTINGS_YML" > config/settings.yml; else echo "::warning::SETTINGS_YML secret empty — using config/settings.yml.example"; fi
+          if [ -n "$BLACKLIST_TXT" ]; then printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt; fi
+          if [ -n "$CONTACTS_YML" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
 
       - name: Sync profile.yml from cv.md if changed
         run: |

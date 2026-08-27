@@ -52,16 +52,7 @@ def _header(title: str) -> None:
 
 
 def _load_settings() -> dict:
-    try:
-        import yaml
-        for p in [ROOT / "config" / "settings.yml",
-                   ROOT / "config" / "settings.yml.example"]:
-            if p.exists():
-                with open(p) as f:
-                    return yaml.safe_load(f) or {}
-    except ImportError:
-        pass
-    return {
+    defaults = {
         "scoring":    {"send_threshold": 88, "pdf_threshold": 75, "notify_threshold": 70},
         "guardrails": {"daily_send_cap": 5, "company_cooldown_days": 30,
                         "send_window_start": "09:00", "send_window_end": "18:00",
@@ -70,6 +61,20 @@ def _load_settings() -> dict:
         "sourcing":   {"max_age_days": 7, "location": "India"},
         "followup":   {"enabled": True, "day": 5, "max_per_application": 1},
     }
+    try:
+        import yaml
+        for p in [ROOT / "config" / "settings.yml",
+                   ROOT / "config" / "settings.yml.example"]:
+            if p.exists():
+                with open(p) as f:
+                    data = yaml.safe_load(f) or {}
+                    if data.get("scoring"):
+                        return data
+                    # file exists but empty/invalid — try next fallback
+                    continue
+    except ImportError:
+        pass
+    return defaults
 
 
 def _load_profile() -> dict:

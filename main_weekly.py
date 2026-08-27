@@ -388,8 +388,13 @@ def _load_settings() -> dict:
     import yaml
     for p in [ROOT / "config" / "settings.yml", ROOT / "config" / "settings.yml.example"]:
         if p.exists():
-            with open(p) as f:
-                return yaml.safe_load(f)
+            try:
+                with open(p) as f:
+                    data = yaml.safe_load(f) or {}
+                    if data.get("scoring"):
+                        return data
+            except Exception:
+                pass
     return {"scoring": {"send_threshold": 88, "pdf_threshold": 75, "notify_threshold": 70},
             "guardrails": {}, "sourcing": {}, "portal": {}}
 
