@@ -107,11 +107,13 @@ class PulseOpsScraper:
             variants += [
                 f"{query} Bangalore", f"{query} Hyderabad",
                 "backend engineer intern India", "software engineer intern new grad India",
+                "AI engineer intern India", "machine learning intern India",
+                "generative AI intern India", "software engineer intern backend AI",
             ]
         variants = list(dict.fromkeys(variants))
 
         all_jobs, seen = [], set()
-        for q in variants[:3]:
+        for q in variants[:6]:
             try:
                 resp = requests.get(
                     "https://www.searchapi.io/api/v1/search",
@@ -171,6 +173,8 @@ class PulseOpsScraper:
             titles += [
                 "backend engineer intern", "software engineer intern",
                 "systems engineer intern", "platform engineer intern",
+                "AI engineer intern", "machine learning intern",
+                "generative AI intern", "data engineer intern",
             ]
         titles = list(dict.fromkeys(t.lower() for t in titles))
 
