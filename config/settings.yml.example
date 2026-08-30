@@ -20,15 +20,15 @@ outreach:
   mode: "dm_first"
 
 guardrails:
-  daily_send_cap: 5
-  company_cooldown_days: 30
-  send_window_start: "09:00"
-  send_window_end: "18:00"
+  daily_send_cap: 10
+  company_cooldown_days: 0
+  send_window_start: "00:00"
+  send_window_end: "23:59"
   send_timezone: "Asia/Kolkata"
-  domain_daily_limit: 2
-  bounce_pause_threshold: 2
-  bounce_pause_hours: 24
-  min_send_gap_minutes: 8
+  domain_daily_limit: 10
+  bounce_pause_threshold: 10
+  bounce_pause_hours: 1
+  min_send_gap_minutes: 0
 
 sourcing:
   max_age_days: 7
