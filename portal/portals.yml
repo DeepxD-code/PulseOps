@@ -54,6 +54,24 @@ search_portals:
     requires_auth: false
     url: "https://wellfound.com/india/role/intern/backend-engineer"
 
+  - name: "Indeed India"
+    engine: indeed
+    enabled: true
+    requires_auth: false
+    url: "https://in.indeed.com/jobs?q=backend+developer+intern&l=India&fromage=7&sort=date"
+
+  - name: "Glassdoor India"
+    engine: glassdoor
+    enabled: true
+    requires_auth: false
+    url: "https://www.glassdoor.co.in/Job/india-backend-developer-intern-jobs-SRCH_KO0,27.htm"
+
+  - name: "Job Hai"
+    engine: jobhai
+    enabled: true
+    requires_auth: false
+    url: "https://www.jobhai.com/search-jobs/backend-developer-jobs-in-india"
+
   - name: "LinkedIn (weekly deep scan)"
     engine: linkedin
     enabled: false   # demoted — daily linkedin_bridge.js already covers this source

@@ -78,10 +78,37 @@ function inferATS(url) {
   if (url.includes("naukri.com")) return "naukri";
   if (url.includes("wellfound.com") || url.includes("angel.co")) return "wellfound";
   if (url.includes("linkedin.com")) return "linkedin";
+  if (url.includes("indeed.com")) return "indeed";
+  if (url.includes("glassdoor.")) return "glassdoor";
+  if (url.includes("jobhai.com")) return "jobhai";
   return "generic";
 }
 
 const ATS_SELECTORS = {
+  indeed: {
+    applyBtn: ['a:has-text("Apply now")', 'button:has-text("Apply now")', 'div#applyButtonLinkContainer a', 'a[data-testid="applyButton"]'],
+    fields: {
+      name: ['input[name="name"]', '#applicant.name'],
+      email: ['input[name="email"]', 'input[type="email"]'],
+      phone: ['input[name="phone"]'],
+      resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Continue")', 'button:has-text("Submit")']
+  },
+  glassdoor: {
+    applyBtn: ['a[data-test="applyButton"]', 'button:has-text("Easy Apply")', 'a:has-text("Apply")'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")']
+  },
+  jobhai: {
+    applyBtn: ['a:has-text("Apply")', 'button:has-text("Apply")'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[name="mobile"]', 'input[type="tel"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")']
+  },
   greenhouse: {
     applyBtn: ['a#apply_button', 'a[data-mapped-click="apply"]', 'a:has-text("Apply")', 'button:has-text("Apply")'],
     fields: {

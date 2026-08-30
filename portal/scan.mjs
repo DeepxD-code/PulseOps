@@ -189,12 +189,73 @@ async function scrapeWellfound(page, portal) {
   );
 }
 
+async function scrapeIndeed(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForSelector(".job_seen_beacon, .tapItem, body", { timeout: 12000 }).catch(() => {});
+  return page.$$eval(
+    ".job_seen_beacon, .tapItem",
+    (nodes, sourceName) =>
+      nodes.map((el) => {
+        const titleEl = el.querySelector("h2.jobTitle a, a.jcs-JobTitle, [data-jk] a");
+        const compEl = el.querySelector('[data-testid="company-name"], .companyName');
+        const locEl = el.querySelector('[data-testid="text-location"], .companyLocation');
+        const href = titleEl?.getAttribute("href") || "";
+        return {
+          title: (titleEl?.textContent || "").trim(),
+          company: (compEl?.textContent || "").trim() || "Unknown",
+          link: href ? (href.startsWith("http") ? href : `https://in.indeed.com${href}`) : "",
+          description: `Location: ${(locEl?.textContent || "").trim()}. Source: ${sourceName}.`,
+        };
+      }).filter((j) => j.title && j.link),
+    portal.name
+  );
+}
+
+async function scrapeGlassdoor(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForSelector('[data-test="jobListing"], .JobsList_jobListItem__JBBUV, body', { timeout: 12000 }).catch(() => {});
+  return page.$$eval(
+    '[data-test="jobListing"], .JobsList_jobListItem__JBBUV, li[data-test="jobListing"]',
+    (nodes, sourceName) =>
+      nodes.map((el) => {
+        const a = el.querySelector('a[data-test="job-link"], a.JobCard_jobTitle__GLyJ1');
+        const comp = el.querySelector('[data-test="employerName"], .EmployerProfile_compactEmployerName__LE242');
+        return {
+          title: (a?.textContent || "").trim(),
+          company: (comp?.textContent || "").trim() || "Unknown",
+          link: a ? (a.getAttribute("href")?.startsWith("http") ? a.getAttribute("href") : `https://www.glassdoor.co.in${a.getAttribute("href") || ""}`) : "",
+          description: `Source: ${sourceName}.`,
+        };
+      }).filter((j) => j.title && j.link),
+    portal.name
+  );
+}
+
+async function scrapeJobHai(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForSelector('.job-card, [class*="job"] , body', { timeout: 10000 }).catch(() => {});
+  return page.$$eval(
+    'a[href*="/job/"], a[href*="/jobs/"]',
+    (nodes, sourceName) =>
+      nodes.slice(0, 40).map((a) => ({
+        title: (a.textContent || "").trim(),
+        company: "Unknown",
+        link: a.href,
+        description: `Source: ${sourceName}.`,
+      })).filter((j) => j.title && j.title.length > 4 && j.title.length < 120),
+    portal.name
+  );
+}
+
 const ENGINES = {
   greenhouse: scrapeGreenhouse,
   lever: scrapeLever,
   ashby: scrapeAshby,
   naukri: scrapeNaukri,
   wellfound: scrapeWellfound,
+  indeed: scrapeIndeed,
+  glassdoor: scrapeGlassdoor,
+  jobhai: scrapeJobHai,
 };
 
 // ── Main ────────────────────────────────────────────────────────────────
