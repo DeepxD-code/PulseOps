@@ -3,9 +3,9 @@
 # This file is committed. config/settings.yml is gitignored.
 
 scoring:
-  send_threshold: 88        # Auto-send cold email (all 10 guardrails must pass)
-  pdf_threshold: 75         # Generate tailored PDF resume
-  notify_threshold: 70      # Telegram alert
+  send_threshold: 70        # Auto-send cold email (all 10 guardrails must pass) — lowered for AI/Backend intern profile (was 88)
+  pdf_threshold: 65         # Generate tailored PDF resume — lowered to match (was 75)
+  notify_threshold: 60      # Telegram alert — lowered
 
 outreach:
   # dm_first (default): every A/B/C match gets a LinkedIn DM draft delivered
