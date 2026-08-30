@@ -6,9 +6,10 @@ name: PulseOps Daily Pipeline
 
 on:
   schedule:
-    # 03:30 UTC = 09:00 IST — aligned with SEND_WINDOW_START so the run
-    # lands right as the send window opens (config/settings.yml).
+    # 03:30 UTC = 09:00 IST — morning run (send window open)
     - cron: "30 3 * * *"
+    # 12:30 UTC = 18:00 IST — evening run (end of send window, per request 2× daily)
+    - cron: "30 12 * * *"
   workflow_dispatch:
     inputs:
       simulate:
