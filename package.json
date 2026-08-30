@@ -8,7 +8,9 @@
     "install-playwright": "npx playwright install chromium",
     "scan": "node portal/scan.mjs",
     "scan:mock": "node portal/scan.mjs --mock",
-    "check-liveness": "node portal/check_liveness.mjs"
+    "check-liveness": "node portal/check_liveness.mjs",
+    "apply": "node portal/apply.mjs --dry-run",
+    "apply:live": "node portal/apply.mjs --live --headed"
   },
   "dependencies": {
     "linkedin-jobs-api": "^1.0.7",
