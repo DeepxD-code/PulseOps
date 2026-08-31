@@ -110,6 +110,19 @@ jobs:
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
           python main.py $ARGS
 
+      - name: Browser auto-apply queued jobs (hands-off)
+        if: always()
+        run: |
+          echo "::group::Browser auto-apply"
+          if [ "${{ inputs.simulate }}" = "true" ]; then
+            echo "simulate — running apply dry-run"
+            node portal/apply.mjs --dry-run || true
+          else
+            echo "live — auto-submitting queued jobs (no prompt)"
+            node portal/apply.mjs --live --auto || echo "::warning::apply live failed (non-fatal)"
+          fi
+          echo "::endgroup::"
+
       - name: Commit state back to pulseops-state branch
         if: always()   # persist state even if the pipeline step failed partway through
         run: |

@@ -38,6 +38,7 @@ const ROOT = path.resolve(__dirname, "..");
 
 const DRY_RUN = !process.argv.includes("--live");
 const HEADED = process.argv.includes("--headed");
+const AUTO = process.argv.includes("--auto");
 const MOCK_ONLY = process.argv.includes("--mock");
 const JOB_URL_FLAG = process.argv.find((a) => a.startsWith("--job-url="));
 const JOB_ID_FLAG = process.argv.find((a) => a.startsWith("--job-id="));
@@ -305,9 +306,13 @@ async function processJob(browser, job, profile) {
       await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "dry-run-preview", pdf: resumePdf, screenshot: screenshotPath };
     } else {
-      console.log(`\n  [APPROVAL] Ready to SUBMIT ${job.company} — ${job.title}`);
-      console.log(`  Press ENTER to Submit, or Ctrl+C to skip`);
-      await new Promise(resolve => { process.stdin.resume(); process.stdin.once('data', ()=>resolve()); });
+      if (AUTO) {
+        console.log(`\n  [AUTO] --auto flag: submitting without prompt for ${job.company}`);
+      } else {
+        console.log(`\n  [APPROVAL] Ready to SUBMIT ${job.company} — ${job.title}`);
+        console.log(`  Press ENTER to Submit, or Ctrl+C to skip`);
+        await new Promise(resolve => { process.stdin.resume(); process.stdin.once('data', ()=>resolve()); });
+      }
       for (const sel of submitSels) {
         const el = page.locator(sel).first();
         if (await el.count() > 0) {
