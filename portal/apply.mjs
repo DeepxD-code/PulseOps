@@ -402,6 +402,20 @@ async function main() {
   fs.writeFileSync(outPath, JSON.stringify({ ran_at: new Date().toISOString(), dry_run: DRY_RUN, jobs, results }, null, 2), "utf-8");
   console.log(`\n[+] Done ${results.length} jobs → ${path.relative(ROOT, outPath)}`);
   console.log(DRY_RUN ? "[*] DRY-RUN — no applications submitted. Re-run with --live --headed after verifying previews." : "[*] LIVE — submitted with approval pauses");
+
+  // Discord confirmation: yes applied to this job (no links, just company + title)
+  if (!DRY_RUN && results.some(r=>r.action==="submitted")) {
+    const webhook = process.env.DISCORD_WEBHOOK_URL || "";
+    if (webhook) {
+      for (const r of results.filter(x=>x.action==="submitted")) {
+        const msg = `✅ Applied to ${r.company} — ${r.title} via ${r.ats}`;
+        try {
+          await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: msg }) });
+          console.log(`  [Discord] confirmation sent: ${msg}`);
+        } catch (e) { console.log(`  [Discord] confirm failed: ${e.message.slice(0,80)}`); }
+      }
+    }
+  }
 }
 
 main().catch(e=>{ console.error("[Fatal] apply crashed", e); process.exit(1); });
