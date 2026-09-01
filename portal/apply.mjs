@@ -354,14 +354,16 @@ async function loadJobsFromDB() {
       if (parsed.length) return parsed.map(p=>({ ...p, source: "db" }));
     } catch (e) { console.log(`  [db] load by id ${SINGLE_JOB_ID} failed: ${e.message.slice(0,120)}`); }
   }
-  // Try send_queue
+  // Try send_queue — use helper script to avoid quoting hell
   try {
     const { execSync } = await import("node:child_process");
-    const dbCandidates = [path.join(ROOT, "pulseops.db"), path.join(ROOT, ".state", "pulseops.db"), path.join(ROOT, "pulseops.db")];
+    const dbCandidates = [path.join(ROOT, "pulseops.db"), path.join(ROOT, ".state", "pulseops.db")];
     let dbPath = null;
     for (const p of dbCandidates) if (fs.existsSync(p)) { dbPath = p; break; }
     if (!dbPath) throw new Error("no pulseops.db");
-    const out = execSync(`python -c "import sqlite3,json; conn=sqlite3.connect(r'${dbPath.replace(/\\/g,'/')}'); rows=conn.execute('SELECT j.company,j.title,j.link FROM send_queue q JOIN jobs j ON j.id=q.job_id WHERE q.status=''pending'' ORDER BY q.score DESC LIMIT 5').fetchall(); print(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))"`, { encoding: "utf-8", timeout: 5000 });
+    const helper = path.join(ROOT, "portal", "queue_helper.py");
+    fs.writeFileSync(helper, `import sqlite3,json,sys\nconn=sqlite3.connect(r'${dbPath.replace(/\\/g,'/')}')\nrows=conn.execute('SELECT j.company,j.title,j.link FROM send_queue q JOIN jobs j ON j.id=q.job_id WHERE q.status=\"pending\" ORDER BY q.score DESC LIMIT 5').fetchall()\nprint(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))\n`, "utf-8");
+    const out = execSync(`python "${helper}"`, { encoding: "utf-8", timeout: 5000 });
     const parsed = JSON.parse(out.trim().split("\n").pop());
     if (parsed && parsed.length) {
       console.log(`[DB] loaded ${parsed.length} pending queued jobs`);
