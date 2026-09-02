@@ -370,7 +370,23 @@ async function loadJobsFromDB() {
       return parsed.map(p=>({ ...p, source: "queue" }));
     }
   } catch (e) { console.log(`[DB] queue load failed: ${e.message?.slice(0,120)}`); }
-  // Fallback: mock queued 3
+  // Fallback: try recent high-score jobs with real apply links ( greenhhouse/lever/indeed/naukri etc.), then mock
+  try {
+    const { execSync } = await import("node:child_process");
+    const dbCandidates = [path.join(ROOT, "pulseops.db"), path.join(ROOT, ".state", "pulseops.db")];
+    let dbPath2 = null;
+    for (const p of dbCandidates) if (fs.existsSync(p)) { dbPath2 = p; break; }
+    if (dbPath2) {
+      const helper2 = path.join(ROOT, "portal", "queue_helper2.py");
+      fs.writeFileSync(helper2, `import sqlite3,json\nconn=sqlite3.connect(r'${dbPath2.replace(/\\/g,'/')}')\nrows=conn.execute('SELECT company,title,link FROM jobs WHERE score>=65 AND status!=\"Sent\" AND link LIKE \"%http%\" ORDER BY score DESC LIMIT 5').fetchall()\nprint(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))\n`, "utf-8");
+      const out2 = execSync(`python "${helper2}"`, { encoding: "utf-8", timeout: 5000 });
+      const parsed2 = JSON.parse(out2.trim().split("\n").pop());
+      if (parsed2 && parsed2.length) {
+        console.log(`[DB] fallback to ${parsed2.length} recent high-score jobs with real links`);
+        return parsed2.map(p=>({ ...p, source: "jobs-fallback" }));
+      }
+    }
+  } catch (e) { console.log(`[DB] jobs fallback failed: ${e.message?.slice(0,80)}`); }
   console.log(`[fallback] using mock queued 3 (MediNex etc.)`);
   return [
     { company: "MediNex Workforce", title: "Java Developer Intern | Entry Level | Fresher | Core Java, Spring Boot, REST APIs", link: "https://example.com/mediNex", source: "mock-queue" },
