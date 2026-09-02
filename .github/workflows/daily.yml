@@ -53,9 +53,9 @@ jobs:
           [ -f .state/memory/.github_synced.json ] && cp .state/memory/.github_synced.json ./memory/ || true
           [ -f .state/config/profile.yml ] && cp .state/config/profile.yml ./config/ || true
           [ -f .state/config/.cv_hash ] && cp .state/config/.cv_hash ./config/ || true
-          # One-time cleanup: clear stale G8 queued (22:27 IST outside) now that window is 00:00-23:59
+          # One-time cleanup: clear stale queued (old G8 window) now that window is 00:00-23:59
           if [ -f pulseops.db ]; then
-            python -c "import sqlite3; c=sqlite3.connect('pulseops.db'); c.execute('UPDATE send_queue SET status=\"skipped\" WHERE status=\"pending\" AND reason LIKE \"%G8%\"); c.commit(); print(f'cleared G8 queued: {c.total_changes}'); c.close()" || true
+            python -c "import sqlite3; c=sqlite3.connect('pulseops.db'); c.execute('UPDATE send_queue SET status=\"skipped\" WHERE status=\"pending\"'); c.commit(); print(f'cleared queued: {c.total_changes}'); c.close()" || true
           fi
 
       - name: Set up Python
