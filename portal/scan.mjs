@@ -232,7 +232,14 @@ async function scrapeGlassdoor(page, portal) {
 }
 
 async function scrapeJobHai(page, portal) {
-  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  try {
+    await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (e) {
+    if (e.message.includes("ERR_HTTP2")) {
+      console.log(`  [JobHai] HTTP2 error, retrying http://`);
+      await page.goto(portal.url.replace("https://", "http://"), { waitUntil: "domcontentloaded", timeout: 30000 }).catch(()=>{});
+    } else throw e;
+  }
   await page.waitForSelector('.job-card, [class*="job"] , body', { timeout: 10000 }).catch(() => {});
   return page.$$eval(
     'a[href*="/job/"], a[href*="/jobs/"]',
@@ -247,6 +254,22 @@ async function scrapeJobHai(page, portal) {
   );
 }
 
+async function scrapeYC(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForSelector('a[href*="/companies/"] , a[href*="/jobs/"] , body', { timeout: 12000 }).catch(() => {});
+  return page.$$eval(
+    'a[href*="/companies/"], a[href*="/jobs/"]',
+    (nodes, sourceName) =>
+      nodes.slice(0, 40).map((a) => ({
+        title: (a.textContent || "").trim() || "Startup Role",
+        company: "YC Startup",
+        link: a.href.startsWith("http") ? a.href : `https://www.workatastartup.com${a.getAttribute("href")}`,
+        description: `Source: ${sourceName} (YC).`,
+      })).filter((j) => j.title && j.title.length > 4),
+    portal.name
+  );
+}
+
 const ENGINES = {
   greenhouse: scrapeGreenhouse,
   lever: scrapeLever,
@@ -256,6 +279,7 @@ const ENGINES = {
   indeed: scrapeIndeed,
   glassdoor: scrapeGlassdoor,
   jobhai: scrapeJobHai,
+  yc: scrapeYC,
 };
 
 // ── Main ────────────────────────────────────────────────────────────────

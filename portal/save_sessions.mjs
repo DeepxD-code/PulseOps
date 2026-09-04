@@ -19,8 +19,9 @@ const SITES = [
   "https://www.naukri.com",
   "https://in.indeed.com/jobs?q=backend+developer+intern&l=India",
   "https://www.glassdoor.co.in/Job/india-backend-developer-intern-jobs-SRCH_KO0,27.htm",
-  "https://www.jobhai.com",
-  "https://wellfound.com/india/role/r/backend-engineer",
+  "https://www.jobhai.com/jobs/backend-developer-jobs",
+  "https://wellfound.com/jobs?locations=India",
+  "https://www.workatastartup.com/jobs?role=backend&type=intern",
 ];
 
 console.log("Launching browser — 5 tabs will open (Naukri, Indeed, Glassdoor, JobHai, Wellfound)");

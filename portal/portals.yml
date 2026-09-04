@@ -46,13 +46,13 @@ search_portals:
     engine: wellfound
     enabled: true
     requires_auth: false
-    url: "https://wellfound.com/india/role/r/backend-engineer"
+    url: "https://wellfound.com/jobs?locations=India"
 
   - name: "Wellfound India (Internships)"
     engine: wellfound
     enabled: true
     requires_auth: false
-    url: "https://wellfound.com/india/role/intern/backend-engineer"
+    url: "https://wellfound.com/jobs?job_types=internship&locations=India"
 
   - name: "Indeed India"
     engine: indeed
@@ -70,7 +70,13 @@ search_portals:
     engine: jobhai
     enabled: true
     requires_auth: false
-    url: "https://www.jobhai.com/search-jobs/backend-developer-jobs-in-india"
+    url: "https://www.jobhai.com/jobs/backend-developer-jobs"
+
+  - name: "YC Combinator (Work at a Startup)"
+    engine: yc
+    enabled: true
+    requires_auth: false
+    url: "https://www.workatastartup.com/jobs?role=backend&type=intern"
 
   - name: "LinkedIn (weekly deep scan)"
     engine: linkedin

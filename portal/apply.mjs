@@ -82,6 +82,7 @@ function inferATS(url) {
   if (url.includes("indeed.com")) return "indeed";
   if (url.includes("glassdoor.")) return "glassdoor";
   if (url.includes("jobhai.com")) return "jobhai";
+  if (url.includes("workatastartup.com") || url.includes("ycombinator")) return "yc";
   return "generic";
 }
 
@@ -109,6 +110,13 @@ const ATS_SELECTORS = {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[name="mobile"]', 'input[type="tel"]'], resume: ['input[type="file"]'],
     },
     submitBtn: ['button:has-text("Submit")']
+  },
+  yc: {
+    applyBtn: ['a:has-text("Apply")', 'button:has-text("Apply")', 'a[href*="/apply"]'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")', 'button:has-text("Apply")']
   },
   greenhouse: {
     applyBtn: ['a#apply_button', 'a[data-mapped-click="apply"]', 'a:has-text("Apply")', 'button:has-text("Apply")'],
