@@ -24,10 +24,23 @@ const SITES = [
   "https://www.workatastartup.com/jobs?role=backend&type=intern",
 ];
 
-console.log("Launching browser — 5 tabs will open (Naukri, Indeed, Glassdoor, JobHai, Wellfound)");
+console.log("Launching browser — 6 tabs will open (Naukri, Indeed, Glassdoor, JobHai, Wellfound, YC)");
+console.log("TIP: Use Email/Password on Indeed/Glassdoor, NOT 'Continue with Google' — Google blocks Playwright (AutomationControlled).");
 console.log("Log in to each site you want auto-apply on, solve CAPTCHA, then return here and press ENTER");
-const browser = await chromium.launch({ headless: false, channel: 'msedge' });
-const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+const browser = await chromium.launch({
+  headless: false,
+  channel: 'msedge',
+  args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-infobars'],
+});
+const context = await browser.newContext({
+  viewport: { width: 1366, height: 900 },
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+});
+await context.addInitScript(() => {
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  window.chrome = { runtime: {} };
+  delete navigator.__proto__.connection;
+});
 
 for (const url of SITES) {
   const page = await context.newPage();
