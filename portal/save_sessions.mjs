@@ -25,7 +25,7 @@ const SITES = [
 
 console.log("Launching browser — 5 tabs will open (Naukri, Indeed, Glassdoor, JobHai, Wellfound)");
 console.log("Log in to each site you want auto-apply on, solve CAPTCHA, then return here and press ENTER");
-const browser = await chromium.launch({ headless: false });
+const browser = await chromium.launch({ headless: false, channel: 'msedge' });
 const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
 
 for (const url of SITES) {
