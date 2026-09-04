@@ -273,6 +273,12 @@ def _check_g10_contact(
         except Exception as e:
             print(f"  [G10] Hunter.io failed (non-fatal): {e}")
 
+    # Fallback: when no JD/Hunter, use inferred domain (e.g. contact@domain) for auto-send
+    # This is the "jobless urgency" mode you requested — no drafts, just send
+    if domain and "." in domain and domain != "unknown.com":
+        fallback = f"contact@{domain}"
+        print(f"  [G10] fallback: {fallback} (inferred from {domain}, low-confidence but auto-send enabled)")
+        return fallback
     raise NoContactEmailError(
         f"G10: no verified email found for '{company}' domain '{domain}' "
         f"(JD: none, Hunter.io: none/low-confidence)"
