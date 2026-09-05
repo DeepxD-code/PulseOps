@@ -227,6 +227,45 @@ def _check_g9_bounce(domain: str) -> None:
         )
 
 
+import re as _re
+
+def _scrape_company_emails(domain: str, company: str = "") -> list[str]:
+    """Scrape company homepage + /contact /careers /about for info@ / careers@ / jobs@."""
+    if not domain or "." not in domain or domain == "unknown.com":
+        return []
+    candidates = []
+    for cand in [f"https://{domain}", f"https://www.{domain}", f"https://{domain}/contact", f"https://{domain}/careers", f"https://{domain}/about", f"https://{domain}/jobs"]:
+        try:
+            import requests
+            r = requests.get(cand, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and len(r.text) > 800:
+                for m in _re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", r.text, _re.IGNORECASE):
+                    m_low = m.lower()
+                    if any(k in m_low for k in ["info@", "careers@", "jobs@", "hr@", "contact@", "hiring@", "talent@", "recruit"]):
+                        candidates.append(m)
+                if candidates:
+                    break
+        except Exception:
+            continue
+    # dedupe, prefer info/careers/jobs/hr
+    seen = set()
+    ranked = []
+    for e in candidates:
+        if e.lower() not in seen:
+            seen.add(e.lower())
+            ranked.append(e)
+    # prioritize
+    def _pri(e: str) -> int:
+        e_low = e.lower()
+        if "careers@" in e_low: return 0
+        if "jobs@" in e_low: return 1
+        if "hiring@" in e_low: return 2
+        if "hr@" in e_low: return 3
+        if "info@" in e_low: return 4
+        return 5
+    ranked.sort(key=_pri)
+    return ranked
+
 def _check_g10_contact(
     contact_email: str,
     domain: str,
@@ -238,12 +277,11 @@ def _check_g10_contact(
     """
     G10: Returns the best available email address to send to.
 
-    Priority order (Council Session 1):
-      1. Explicit email from JD text (LLM-extracted) — zero cost, highest trust
-      2. Hunter.io verified lookup — uses free quota, score-gated
-      3. Raise NoContactEmailError → caller sends LinkedIn DM packet only
-
-    NEVER returns a low-confidence unverified address for auto-send.
+    Priority order (auto-send):
+      1. Explicit email from JD text (LLM-extracted)
+      2. Hunter.io verified lookup
+      3. Scrape company website for info@/careers@/jobs@/hr@
+      4. Fallback contact@domain (auto-send fallback)
     """
     # Priority 1: explicit email found in JD
     if contact_email and "@" in contact_email:
@@ -273,7 +311,13 @@ def _check_g10_contact(
         except Exception as e:
             print(f"  [G10] Hunter.io failed (non-fatal): {e}")
 
-    # Fallback: when no JD/Hunter, use inferred domain (e.g. contact@domain) for auto-send
+    # Priority 3: scrape company website for info@/careers@ etc.
+    scraped = _scrape_company_emails(domain, company)
+    if scraped:
+        print(f"  [G10] scraped company site: {scraped[0]} from {domain}")
+        return scraped[0]
+
+    # Fallback: when no JD/Hunter/scrape, use inferred domain (e.g. contact@domain) for auto-send
     # This is the "jobless urgency" mode you requested — no drafts, just send
     if domain and "." in domain and domain != "unknown.com":
         fallback = f"contact@{domain}"
