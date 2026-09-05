@@ -22,11 +22,40 @@ import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import re
+
 import requests
+from bs4 import BeautifulSoup
 
 from exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
 
 ROOT = Path(__file__).resolve().parent.parent
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
+
+def _enrich_description(link: str, base_desc: str) -> str:
+    """Fetch job link page and extract JD + contact email + how to apply."""
+    if not link or "example.com" in link or "linkedin.com/jobs/view" in link:
+        # LinkedIn view requires auth — skip fetch, keep base
+        return base_desc
+    try:
+        resp = requests.get(link, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200 or len(resp.text) < 500:
+            return base_desc
+        soup = BeautifulSoup(resp.text, "lxml")
+        text = soup.get_text(separator=" ", strip=True)
+        # Extract JD snippet + contact email
+        email_match = _EMAIL_RE.search(text)
+        snippet = text[:2000]
+        if email_match:
+            snippet += f"\n\nContact: {email_match.group(0)} — found on job page"
+            # Also scan for apply instructions
+            apply_hint = re.search(r"(apply|send|email|contact).{0,80}@" , text, re.IGNORECASE)
+            if apply_hint:
+                snippet += f" | Apply hint: {apply_hint.group(0)[:120]}"
+        return snippet[:3500]
+    except Exception:
+        return base_desc
 
 
 class PulseOpsScraper:
@@ -72,14 +101,13 @@ class PulseOpsScraper:
             for item in (raw if isinstance(raw, list) else []):
                 if not isinstance(item, dict):
                     continue
+                link = item.get("jobUrl", "")
+                base = f"LinkedIn listing: {item.get('company','')} in {item.get('location','India')}."
                 jobs.append({
                     "title":       item.get("position", "Untitled"),
                     "company":     item.get("company", "Unknown"),
-                    "link":        item.get("jobUrl", ""),
-                    "description": (
-                        f"LinkedIn listing: {item.get('company','')} "
-                        f"in {item.get('location','India')}."
-                    ),
+                    "link":        link,
+                    "description": _enrich_description(link, base),
                     "source":      "LinkedIn",
                     "posted_at":   item.get("date", ""),
                     "location_raw": item.get("location", ""),
@@ -144,7 +172,7 @@ class PulseOpsScraper:
                         "title":        title,
                         "company":      company,
                         "link":         link,
-                        "description":  item.get("description", ""),
+                        "description":  _enrich_description(link, item.get("description", "")),
                         "source":       "Google Jobs",
                         "posted_at":    item.get("detected_extensions", {}).get("posted_at", ""),
                         "location_raw": item.get("location", ""),
@@ -200,11 +228,12 @@ class PulseOpsScraper:
                 )
             jobs = []
             for item in resp.json().get("data", []):
+                link = item.get("url", "")
                 jobs.append({
                     "title":        item.get("job_title", "Untitled"),
                     "company":      item.get("company_object", {}).get("name", "Unknown"),
-                    "link":         item.get("url", ""),
-                    "description":  item.get("short_description", ""),
+                    "link":         link,
+                    "description":  _enrich_description(link, item.get("short_description", "")),
                     "source":       "TheirStack",
                     "posted_at":    item.get("date_posted", ""),
                     "location_raw": item.get("location", ""),
