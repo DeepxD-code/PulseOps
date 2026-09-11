@@ -1,0 +1,65 @@
+name: PulseOps Email Watcher
+
+# Runs every 30m — bounce auto-fix + platform job ingest
+# See notifications/email_watcher.py
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no DB writes)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pulseops-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: pulseops-state
+          path: .state
+        continue-on-error: true
+      - run: |
+          mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
+          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no DB"
+          [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt --break-system-packages
+      - env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          if [ -n "$ENV_FILE" ]; then printf '%s' "$ENV_FILE" > .env; fi
+      - run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          python -m notifications.email_watcher $ARGS
+      - if: always()
+        run: |
+          rm -rf .state
+          mkdir -p .state/logs .state/data
+          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          cp -r logs/. .state/logs/ 2>/dev/null || true
+          cd .state
+          git init -q
+          git checkout -B pulseops-state
+          git config user.name "pulseops-bot"
+          git config user.email "pulseops-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "nothing changed"; exit 0; fi
+          git commit -q -m "watcher: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:pulseops-state --force

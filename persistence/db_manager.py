@@ -713,6 +713,22 @@ def update_queue_status(queue_id: int, status: str) -> None:
         conn.close()
 
 
+def mark_outreach_bounced(outreach_id: int, bounced_email: str) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE outreach SET status='bounced', notes=? WHERE id=?",
+            (f"bounced: {bounced_email}", outreach_id),
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] mark_outreach_bounced: {e}")
+        raise DatabaseError(f"mark_outreach_bounced failed: {e}") from e
+    finally:
+        conn.close()
+
+
 def get_stale_queue_items(days: int = 3) -> list[dict]:
     conn = get_connection()
     try:

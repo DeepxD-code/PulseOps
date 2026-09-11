@@ -586,7 +586,13 @@ def main() -> None:
     # ── PHASE 9 — Reply Check + Interview Prep + Follow-ups + TSV ────────
     _header("Phase 9: Reply Check + Interview Prep + Follow-ups")
 
-    # 9a: IMAP reply check
+    # 9a: IMAP reply + bounce + platform ingest (email_watcher runs hourly too)
+    try:
+        from notifications.email_watcher import run_watcher
+        w = run_watcher(dry_run=args.simulate)
+        print(f"  [OK] Watcher: bounces_fixed {w.get('bounces_fixed',0)}, platform_jobs {w.get('platform_jobs_ingested',0)}")
+    except Exception as e:
+        print(f"  [!] Watcher failed (non-fatal): {e}")
     try:
         from notifications.reply_detector import check_for_replies
         n_replies = check_for_replies(run_id=run_id, simulate=args.simulate,
