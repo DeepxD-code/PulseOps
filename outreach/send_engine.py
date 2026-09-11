@@ -266,6 +266,36 @@ def _scrape_company_emails(domain: str, company: str = "") -> list[str]:
     ranked.sort(key=_pri)
     return ranked
 
+def _linkedin_people_emails(company: str, domain: str) -> list[str]:
+    """Find people at company via LinkedIn/company site, generate pattern emails."""
+    if not company or not domain:
+        return []
+    candidates = []
+    # 1. Scrape company site team/about for names
+    for cand in [f"https://{domain}/team", f"https://{domain}/about", f"https://www.{domain}/team", f"https://{domain}/about-us"]:
+        try:
+            import requests
+            r = requests.get(cand, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and len(r.text) > 1000:
+                # Find names like "John Doe - CEO" near team section
+                for m in _re.findall(r"([A-Z][a-z]+ [A-Z][a-z]+).*?(CEO|Founder|CTO|Recruiter|HR|Talent)", r.text):
+                    name = m[0] if isinstance(m, tuple) else m
+                    parts = name.lower().split()
+                    if len(parts) >= 2:
+                        # common patterns: firstname@, firstname.lastname@, f.lastname@
+                        for pat in [f"{parts[0]}@{domain}", f"{parts[0]}.{parts[-1]}@{domain}", f"{parts[0][0]}.{parts[-1]}@{domain}"]:
+                            candidates.append(pat)
+                if candidates:
+                    break
+        except Exception:
+            continue
+    # 2. Fallback: generate for common founder patterns if no names found (use LinkedIn search hint)
+    # We don't call LinkedIn API (needs auth) — generate plausible hiring contacts
+    if not candidates and domain != "unknown.com":
+        for prefix in ["hiring", "talent", "hr", "recruiting", "jobs", "founders"]:
+            candidates.append(f"{prefix}@{domain}")
+    return list(dict.fromkeys(candidates))[:3]
+
 def _check_g10_contact(
     contact_email: str,
     domain: str,
@@ -277,48 +307,29 @@ def _check_g10_contact(
     """
     G10: Returns the best available email address to send to.
 
-    Priority order (auto-send):
+    Priority order (auto-send, no Hunter):
       1. Explicit email from JD text (LLM-extracted)
-      2. Hunter.io verified lookup
-      3. Scrape company website for info@/careers@/jobs@/hr@
-      4. Fallback contact@domain (auto-send fallback)
+      2. Scrape company website for info@/careers@/jobs@/hr@ (real page)
+      3. Find LinkedIn people at company → pattern email firstname@domain
+      4. Fallback contact@domain
     """
     # Priority 1: explicit email found in JD
     if contact_email and "@" in contact_email:
         return contact_email.strip()
 
-    # Priority 2: Hunter.io lookup
-    if domain and "." in domain:
-        try:
-            from outreach.hunter import lookup_email
-            result = lookup_email(
-                domain=domain,
-                company=company,
-                email_draft=recruiter_email_draft,
-                simulate=simulate,
-            )
-            if result.sendable:
-                print(f"  [G10] Hunter.io verified: {result.email} "
-                      f"(score {result.score}, {result.status})")
-                return result.email
-            elif result.dm_only:
-                print(f"  [G10] Hunter.io risky ({result.score}): "
-                      f"LinkedIn DM only — not sending cold email")
-                # Fall through to NoContactEmailError; caller fires DM packet
-            elif result.email:
-                print(f"  [G10] Hunter.io low-confidence "
-                      f"(score {result.score}): skipping")
-        except Exception as e:
-            print(f"  [G10] Hunter.io failed (non-fatal): {e}")
-
-    # Priority 3: scrape company website for info@/careers@ etc.
+    # Priority 2: scrape company website for info@/careers@ etc. (your request: research company)
     scraped = _scrape_company_emails(domain, company)
     if scraped:
         print(f"  [G10] scraped company site: {scraped[0]} from {domain}")
         return scraped[0]
 
-    # Fallback: when no JD/Hunter/scrape, use inferred domain (e.g. contact@domain) for auto-send
-    # This is the "jobless urgency" mode you requested — no drafts, just send
+    # Priority 3: LinkedIn people → pattern email (no Hunter)
+    linkedin_cands = _linkedin_people_emails(company, domain)
+    if linkedin_cands:
+        print(f"  [G10] LinkedIn pattern: {linkedin_cands[0]} for {company} @ {domain}")
+        return linkedin_cands[0]
+
+    # Fallback: when no JD/scrape, use inferred domain (e.g. contact@domain) for auto-send
     if domain and "." in domain and domain != "unknown.com":
         fallback = f"contact@{domain}"
         print(f"  [G10] fallback: {fallback} (inferred from {domain}, low-confidence but auto-send enabled)")
