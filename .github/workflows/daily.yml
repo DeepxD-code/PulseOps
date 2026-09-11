@@ -107,6 +107,18 @@ jobs:
             fi
           fi
 
+      - name: Restore Naukri session (for browser auto-apply)
+        env:
+          NAUKRI_STORAGE_GZ: ${{ secrets.NAUKRI_STORAGE_GZ }}
+        run: |
+          if [ -n "$NAUKRI_STORAGE_GZ" ]; then
+            mkdir -p portal
+            echo "$NAUKRI_STORAGE_GZ" | base64 -d | gunzip > portal/storageState.json
+            echo "restored Naukri session $(wc -c < portal/storageState.json) bytes"
+          else
+            echo "::warning::NAUKRI_STORAGE_GZ not set — auto-apply will run without login (preview only)"
+          fi
+
       - name: Run daily pipeline
         run: |
           ARGS=""
