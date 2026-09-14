@@ -1,0 +1,6 @@
+{
+  "name": "@pulseops/browser-apply",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "apply": "node apply.mjs --dry-run" }
+}

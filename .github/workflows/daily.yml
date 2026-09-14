@@ -20,6 +20,10 @@ on:
         description: "Re-evaluate jobs already seen (--force)"
         type: boolean
         default: false
+      live_apply:
+        description: "Actually submit browser applications (default preview-only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # needed to push updated state back to pulseops-state
@@ -71,34 +75,56 @@ jobs:
           cache: "npm"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt --break-system-packages
+        run: |
+          pip install -r requirements.txt --break-system-packages
+          for pkg in packages/* apps/daily-pipeline apps/weekly-scan apps/dashboard; do
+            if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
+          done
 
       - name: Install Node dependencies + Playwright browser
         run: |
           npm install
           npx playwright install chromium --with-deps
 
-      - name: Write secrets to disk
+      - name: Write secrets to disk (per-secret, no ENV_FILE blob)
         env:
-          ENV_FILE: ${{ secrets.ENV_FILE }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          IMAP_EMAIL: ${{ secrets.IMAP_EMAIL }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
+          THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CV_MD: ${{ secrets.CV_MD }}
           SETTINGS_YML: ${{ secrets.SETTINGS_YML }}
           BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
           CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
         run: |
-          if [ -n "$ENV_FILE" ]; then printf '%s' "$ENV_FILE" > .env; else echo "::warning::ENV_FILE secret empty — using defaults"; fi
+          {
+            echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
+            echo "IMAP_EMAIL=${IMAP_EMAIL:-$SMTP_EMAIL}";
+            echo "GEMINI_API_KEY=${GEMINI_API_KEY:-}";
+            echo "GROQ_API_KEY=${GROQ_API_KEY:-}";
+            echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}";
+            echo "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}";
+            echo "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}";
+          } > .env
           if [ -n "$CV_MD" ]; then printf '%s' "$CV_MD" > cv.md; else echo "::warning::CV_MD secret empty — profile sync will be skipped"; fi
           if [ -n "$SETTINGS_YML" ]; then printf '%s' "$SETTINGS_YML" > config/settings.yml; else echo "::warning::SETTINGS_YML secret empty — using config/settings.yml.example"; fi
           if [ -n "$BLACKLIST_TXT" ]; then printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt; fi
           if [ -n "$CONTACTS_YML" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
 
       - name: doctor.py --check (non-blocking — informational)
-        run: python doctor.py --check || true
+        run: python -m pulseops_pipeline.doctor --check || true
 
       - name: Sync profile.yml from cv.md if changed
         run: |
           if [ -f cv.md ] && [ -s cv.md ]; then
-            python doctor.py --init || python doctor.py --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
+            python -m pulseops_pipeline.doctor --init || python -m pulseops_pipeline.doctor --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
           else
             echo "::warning::cv.md missing/empty — skipping profile sync (set CV_MD secret)"
             if [ ! -f config/profile.yml ] && [ -f config/profile.yml.example ]; then
@@ -124,7 +150,7 @@ jobs:
           ARGS=""
           if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
-          python main.py $ARGS
+          python -m pulseops_pipeline.main $ARGS
 
       - name: Browser auto-apply queued jobs (hands-off)
         if: always()
@@ -132,10 +158,13 @@ jobs:
           echo "::group::Browser auto-apply"
           if [ "${{ inputs.simulate }}" = "true" ]; then
             echo "simulate — running apply dry-run"
-            node portal/apply.mjs --dry-run || true
+            node apps/browser-apply/apply.mjs --dry-run || true
+          elif [ "${{ inputs.live_apply }}" = "true" ]; then
+            echo "live_apply=true — submitting with stored session"
+            node apps/browser-apply/apply.mjs --live --auto || echo "::warning::apply live failed (non-fatal)"
           else
-            echo "live — auto-submitting queued jobs (no prompt)"
-            node portal/apply.mjs --live --auto || echo "::warning::apply live failed (non-fatal)"
+            echo "live cron defaults to preview-only (set live_apply=true on dispatch to submit)"
+            node apps/browser-apply/apply.mjs --dry-run || true
           fi
           echo "::endgroup::"
 
@@ -165,4 +194,4 @@ jobs:
           git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
               commit -q -m "state: daily run $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
-              HEAD:pulseops-state --force
+              HEAD:pulseops-state --force-with-lease

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  structure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          for pkg in packages/* apps/daily-pipeline apps/weekly-scan apps/dashboard; do
+            if [ -f "$pkg/pyproject.toml" ]; then python -m pip install -e "$pkg"; fi
+          done
+          python -m pytest tests -q
