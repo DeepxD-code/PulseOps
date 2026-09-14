@@ -18,13 +18,12 @@ Return convention matches notifier.py:
 
 from __future__ import annotations
 
-import os
-import html
 import json
-import requests
+import os
 from datetime import datetime
 from pathlib import Path
 
+import requests
 from pulseops_core.exceptions import TelegramError
 from pulseops_store import audit_log
 
@@ -567,8 +566,9 @@ def send_discord_prep_pack(company: str, title: str, star_stories: list,
 def send_discord_weekly_digest(webhook_url: str | None = None,
                                run_id: str = "") -> bool:
     """Build and send the weekly digest to Discord."""
-    from pulseops_notify.weekly_digest import build_digest
     from datetime import timedelta
+
+    from pulseops_notify.weekly_digest import build_digest
 
     since = (datetime.now() - timedelta(days=7)).isoformat()
     message = build_digest(since)

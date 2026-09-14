@@ -130,8 +130,8 @@ def _mock_evaluation(title: str, company: str) -> dict:
 
 
 def _finish(run_id: str, stats: dict, start: float, settings: dict) -> None:
-    from pulseops_store.db_manager import save_run_stats
     from pulseops_store import audit_log
+    from pulseops_store.db_manager import save_run_stats
 
     duration = int(time.time() - start)
     stats["duration_seconds"] = duration
@@ -177,7 +177,7 @@ def main() -> None:
         run_server()
         sys.exit(0)
 
-    from pulseops_store.db_manager import init_db, set_send_paused, get_send_paused
+    from pulseops_store.db_manager import get_send_paused, init_db, set_send_paused
     init_db()
 
     if args.pause_sends:
@@ -189,15 +189,18 @@ def main() -> None:
         print("[OK] Auto-sends RESUMED.")
         sys.exit(0)
 
+    from pulseops_core.exceptions import (
+        AllEnginesFailedError,
+        EvaluationError,
+        SourceError,
+    )
     from pulseops_store import audit_log
     from pulseops_store.db_manager import (
-        save_run_stats, record_source_health, save_job,
-        is_job_processed, enqueue_send, get_send_paused, get_job,
+        enqueue_send,
+        is_job_processed,
+        record_source_health,
+        save_job,
         update_job_paths,
-    )
-    from pulseops_core.exceptions import (
-        PulseOpsError, SourceError, EvaluationError,
-        AllEnginesFailedError, PreFilterRejectedError,
     )
 
     run_id    = audit_log.generate_run_id()
@@ -547,7 +550,7 @@ def main() -> None:
 
     if telegram_token and telegram_chat_id:
         try:
-            from pulseops_notify.notifier import send_audit_summary, send_match_card, TelegramError
+            from pulseops_notify.notifier import send_audit_summary, send_match_card
             send_audit_summary(stats, new_matches, run_id, telegram_token, telegram_chat_id, settings)
             for m in new_matches:
                 try:
@@ -566,7 +569,7 @@ def main() -> None:
 
     if discord_webhook:
         try:
-            from pulseops_notify.discord import send_discord_summary, send_discord_match_card
+            from pulseops_notify.discord import send_discord_match_card, send_discord_summary
             send_discord_summary(stats, new_matches, run_id, discord_webhook, settings)
             for m in new_matches:
                 try:
@@ -630,7 +633,7 @@ def main() -> None:
 
     # 9e: Weekly digest (if Sunday 09:00 IST)
     try:
-        from pulseops_notify.weekly_digest import should_send_digest, send_weekly_digest
+        from pulseops_notify.weekly_digest import send_weekly_digest, should_send_digest
         if should_send_digest():
             print("  [OK] It's Sunday 09:00 IST — sending weekly digest…")
             send_weekly_digest(bot_token=telegram_token, chat_id=telegram_chat_id,

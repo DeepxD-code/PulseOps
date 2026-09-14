@@ -66,7 +66,7 @@ class HunterResult:
     raw: dict = field(default_factory=dict)
 
     @classmethod
-    def empty(cls, reason: str = "") -> "HunterResult":
+    def empty(cls, reason: str = "") -> HunterResult:
         return cls(source="none", raw={"reason": reason})
 
 

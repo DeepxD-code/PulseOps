@@ -15,14 +15,14 @@ Covers:
       • 0 sends after 5+ runs → send threshold may be too high
 """
 
-import os
 import html
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from pulseops_core.exceptions import TelegramError
-from pulseops_store import db_manager as db
 from pulseops_store import audit_log
+from pulseops_store import db_manager as db
+
 from pulseops_notify import notifier
 
 ROOT = Path(__file__).resolve().parent.parent

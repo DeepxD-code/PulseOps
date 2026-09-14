@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-
-import re
 
 import requests
 from bs4 import BeautifulSoup

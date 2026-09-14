@@ -12,9 +12,10 @@ Runs as part of Phase 9 in main.py after reply detection.
 """
 
 import os
+
 from pulseops_core.exceptions import TelegramError
 from pulseops_store import db_manager as db
-from pulseops_store import audit_log
+
 from pulseops_notify import notifier
 
 

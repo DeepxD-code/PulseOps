@@ -48,9 +48,18 @@ jobs:
         continue-on-error: true   # first-ever run: branch doesn't exist yet
 
       - name: Restore DB + logs + memory from state branch
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
-          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no prior DB — first run"
+          if [ -n "$STATE_KEY" ] && [ -f .state/pulseops.db.enc ]; then
+            echo "$STATE_KEY" | openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin -in .state/pulseops.db.enc -out ./pulseops.db \
+              || echo "::warning::state decrypt failed — starting fresh"
+          elif [ -f .state/pulseops.db ]; then
+            cp .state/pulseops.db ./pulseops.db
+          else
+            echo "no prior DB — first run"
+          fi
           [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
           [ -d .state/data ] && cp -r .state/data/. ./data/ || true
           [ -d .state/memory/cv_history ] && cp -r .state/memory/cv_history/. ./memory/cv_history/ || true
@@ -170,10 +179,17 @@ jobs:
 
       - name: Commit state back to pulseops-state branch
         if: always()   # persist state even if the pipeline step failed partway through
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           rm -rf .state
           mkdir -p .state/logs .state/data .state/memory/cv_history .state/config
-          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          if [ -n "$STATE_KEY" ] && [ -f pulseops.db ]; then
+            echo "$STATE_KEY" | openssl enc -aes-256-cbc -pbkdf2 -pass stdin -in pulseops.db -out .state/pulseops.db.enc \
+              || cp pulseops.db .state/pulseops.db
+          else
+            cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          fi
           cp -r logs/. .state/logs/ 2>/dev/null || true
           cp -r data/. .state/data/ 2>/dev/null || true
           cp -r memory/cv_history/. .state/memory/cv_history/ 2>/dev/null || true

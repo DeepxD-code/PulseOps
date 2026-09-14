@@ -36,14 +36,14 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_from_directory, render_template
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))  # allow `python dashboard/app.py` standalone
 
 app = Flask(__name__, template_folder="templates")
 
-_log_queue: "queue.Queue[str]" = queue.Queue(maxsize=2000)
+_log_queue: queue.Queue[str] = queue.Queue(maxsize=2000)
 _running_process: subprocess.Popen | None = None
 _process_lock = threading.Lock()
 

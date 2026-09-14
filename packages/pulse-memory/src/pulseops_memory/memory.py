@@ -26,8 +26,10 @@ sys.path.insert(0, str(ROOT))
 
 
 def _do_add(raw_text: str, simulate: bool = False) -> None:
+    from pulseops_store import audit_log
+    from pulseops_store import db_manager as db
+
     from pulseops_memory.memory_parser import parse_memory
-    from pulseops_store import db_manager as db, audit_log
 
     print(f"  Parsing: '{raw_text[:80]}…'" if len(raw_text) > 80 else f"  Parsing: '{raw_text}'")
 
@@ -69,7 +71,7 @@ def _do_add(raw_text: str, simulate: bool = False) -> None:
             print(f"  [OK] '{company}' added to config/blacklist.txt")
 
     if action == "add_cooldown" and company:
-        from pulseops_store.db_manager import normalise_company, save_outreach, get_job
+        from pulseops_store.db_manager import normalise_company, save_outreach
         # Record a synthetic outreach row so G5 cooldown fires
         existing_jobs = db.get_jobs_by_status(["Sent", "Evaluated"], limit=50)
         job_id = next((j["id"] for j in existing_jobs
@@ -82,8 +84,8 @@ def _do_add(raw_text: str, simulate: bool = False) -> None:
             print(f"  [!] No job found for '{company}' to add cooldown to — add manually if needed")
 
     if cv_cand:
-        print(f"  [NOTE] Flagged as cv_candidate — review via: python doctor.py --apply-memories")
-        print(f"  [NOTE] cv.md is NEVER auto-modified (non-negotiable #4)")
+        print("  [NOTE] Flagged as cv_candidate — review via: python doctor.py --apply-memories")
+        print("  [NOTE] cv.md is NEVER auto-modified (non-negotiable #4)")
 
 
 def _do_list(category: str | None = None) -> None:
@@ -138,8 +140,9 @@ def _do_delete(mem_id: int) -> None:
 
 
 def _do_edit(mem_id: int, new_text: str, simulate: bool = False) -> None:
-    from pulseops_memory.memory_parser import parse_memory
     from pulseops_store import db_manager as db
+
+    from pulseops_memory.memory_parser import parse_memory
     try:
         parsed = parse_memory(new_text, simulate=simulate)
     except Exception as e:

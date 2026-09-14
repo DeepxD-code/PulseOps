@@ -148,7 +148,7 @@ def run_checks() -> bool:
             from pulseops_outreach.hunter import quota_remaining
             remaining = quota_remaining()
             if remaining is not None:
-                check(f"Hunter.io quota", remaining > 0,
+                check("Hunter.io quota", remaining > 0,
                       f"{remaining} lookups remaining this month"
                       if remaining > 0 else "Quota exhausted \u2014 G10 will skip Hunter until next month",
                       warn_only=remaining < 5)
@@ -356,7 +356,6 @@ def apply_memories() -> None:
         print("This tool only flags candidates for YOUR review \u2014 it never edits cv.md.")
         print("Options: [a]cknowledge (you'll add it to cv.md yourself)  [d]ismiss  [s]kip\n")
 
-        from pulseops_store.db_manager import get_connection
 
         for mem in candidates:
             resp = input(

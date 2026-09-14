@@ -30,7 +30,8 @@ def record(company: str, title: str, stage: str, notes: str = "") -> None:
         print(f"  [Error] Invalid stage '{stage}'. Valid: {sorted(VALID_STAGES)}")
         sys.exit(1)
 
-    from pulseops_store import db_manager as db, audit_log
+    from pulseops_store import audit_log
+    from pulseops_store import db_manager as db
 
     db.init_db()
 
@@ -65,7 +66,7 @@ def record(company: str, title: str, stage: str, notes: str = "") -> None:
             action="deferred", company=company,
         )
         print(f"  [OK] Callback memory added for {company} (will inject into next eval)")
-        print(f"  [OK] Prep pack queued — will fire at next Phase 9 run (or run interview_prep manually)")
+        print("  [OK] Prep pack queued — will fire at next Phase 9 run (or run interview_prep manually)")
 
     if stage in ("rejected", "offer"):
         # add_cooldown for rejections; offer is a win — add note
@@ -103,8 +104,9 @@ def main() -> None:
     if args.command == "record":
         record(args.company, args.title, args.stage, args.notes)
     elif args.command == "list":
-        from pulseops_store import db_manager as db
         from datetime import datetime, timedelta
+
+        from pulseops_store import db_manager as db
         since = (datetime.now() - timedelta(days=args.days)).isoformat()
         outcomes = db.get_outcomes_since(since)
         if not outcomes:

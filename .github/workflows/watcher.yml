@@ -31,9 +31,18 @@ jobs:
           ref: pulseops-state
           path: .state
         continue-on-error: true
-      - run: |
+      - env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: |
           mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
-          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no DB"
+          if [ -n "$STATE_KEY" ] && [ -f .state/pulseops.db.enc ]; then
+            echo "$STATE_KEY" | openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin -in .state/pulseops.db.enc -out ./pulseops.db \
+              || echo "::warning::state decrypt failed — starting fresh"
+          elif [ -f .state/pulseops.db ]; then
+            cp .state/pulseops.db ./pulseops.db
+          else
+            echo "no DB"
+          fi
           [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
       - uses: actions/setup-python@v5
         with:
@@ -62,10 +71,17 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
           python -m pulseops_notify.email_watcher $ARGS
       - if: always()
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
           rm -rf .state
           mkdir -p .state/logs .state/data
-          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          if [ -n "$STATE_KEY" ] && [ -f pulseops.db ]; then
+            echo "$STATE_KEY" | openssl enc -aes-256-cbc -pbkdf2 -pass stdin -in pulseops.db -out .state/pulseops.db.enc \
+              || cp pulseops.db .state/pulseops.db
+          else
+            cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          fi
           cp -r logs/. .state/logs/ 2>/dev/null || true
           cd .state
           git init -q

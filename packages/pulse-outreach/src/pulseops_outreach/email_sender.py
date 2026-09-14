@@ -17,7 +17,6 @@ State:
 import os
 import smtplib
 import time
-from datetime import datetime
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
