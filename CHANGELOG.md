@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] — Boss round-3 (round-2 FAIL → close gaps)
+
+- `mark-outreach` now behind `DASHBOARD_TOKEN`; README documents `live_apply`, token, per-secret setup, G10 fail-closed.
+- `_linkedin_people_emails` deprecated to `return []` (no pattern emails).
+- Tarball history purge still TODO (BFG) — keys assumed compromised until rotated.
+
 ## [Unreleased] — Boss round-2 (audit FAIL → fixes)
 
 ### Security

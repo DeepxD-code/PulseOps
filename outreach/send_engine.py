@@ -267,7 +267,8 @@ def _scrape_company_emails(domain: str, company: str = "") -> list[str]:
     return ranked
 
 def _linkedin_people_emails(company: str, domain: str) -> list[str]:
-    """Find people at company via LinkedIn/company site, generate pattern emails."""
+    """DEPRECATED (boss round-3): pattern generation disabled — always returns []."""
+    return []
     if not company or not domain:
         return []
     candidates = []

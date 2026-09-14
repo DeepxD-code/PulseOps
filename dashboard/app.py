@@ -134,6 +134,9 @@ def mark_outreach(job_id):
     matters beyond record-keeping (G5 cooldown visibility + callback-rate
     calibration data).
     """
+    auth = _require_token()
+    if auth:
+        return auth
     try:
         db = _db()
         body = request.json or {}
