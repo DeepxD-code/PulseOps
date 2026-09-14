@@ -2,6 +2,8 @@
 
 # ── Secrets (never commit) ──────────────────────────────────
 .env
+portal/storageState.json
+portal/storageState*.json
 config/profile.yml
 config/settings.yml
 config/blacklist.txt
