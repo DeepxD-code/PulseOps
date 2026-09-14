@@ -1,8 +1,19 @@
 """Every package and app is a well-formed unit."""
-import tomllib
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parents[1]
-UNITS = sorted(p for d in ("packages", "apps") for p in (ROOT / d).glob("*") if (p / "pyproject.toml").exists())
+
+
+def _units():
+    out = []
+    for d in ("packages", "apps"):
+        for p in (ROOT / d).glob("*"):
+            if (p / "pyproject.toml").exists():
+                out.append(p)
+    return sorted(out)
+
+
+UNITS = _units()
 
 def test_units_exist():
     assert UNITS
