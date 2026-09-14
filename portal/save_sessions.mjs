@@ -54,5 +54,5 @@ await new Promise(resolve => { process.stdin.resume(); process.stdin.once('data'
 
 await context.storageState({ path: STORAGE });
 console.log(`\nSaved ${STORAGE} (${fs.statSync(STORAGE).size} bytes)`);
-console.log("To use on GitHub Actions: [Convert]::ToBase64String([IO.File]::ReadAllBytes('portal/storageState.json')) | gh secret set NAUKRI_STORAGE --repo DeepxD-code/PluseOPS");
+console.log("Local-only: keep portal/storageState.json on this machine (gitignored). CI uses NAUKRI_STORAGE_GZ (gzip+base64) — see daily.yml Restore Naukri session step.");
 await browser.close();

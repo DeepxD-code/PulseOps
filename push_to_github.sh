@@ -36,12 +36,14 @@ if [ ! -d ".git" ]; then
   echo "Git repo initialised."
 fi
 
-# ── Create .gitignore ────────────────────────────────────────
+# ── Create .gitignore (must match root .gitignore — boss round-2) ──
 cat > .gitignore << 'GITIGNORE'
 # PulseOps .gitignore
 
 # Secrets — never commit
 .env
+portal/storageState.json
+portal/storageState*.json
 config/profile.yml
 config/settings.yml
 config/blacklist.txt
@@ -49,12 +51,17 @@ config/contacts.yml
 config/.cv_hash
 
 # Generated artifacts
+*.tar.gz
+*.tgz
 output/
 data/
 logs/
 memory/cv_history/
 temp_linkedin_jobs.json
+temp_portal_jobs.json
+memory/.github_synced.json
 pulseops.db
+output/html/
 
 # Python
 __pycache__/

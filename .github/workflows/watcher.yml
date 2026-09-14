@@ -41,9 +41,18 @@ jobs:
           cache: "pip"
       - run: pip install -r requirements.txt --break-system-packages
       - env:
-          ENV_FILE: ${{ secrets.ENV_FILE }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          IMAP_EMAIL: ${{ secrets.IMAP_EMAIL }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          if [ -n "$ENV_FILE" ]; then printf '%s' "$ENV_FILE" > .env; fi
+          {
+            echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
+            echo "IMAP_EMAIL=${IMAP_EMAIL:-$SMTP_EMAIL}";
+            echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}";
+          } > .env
+          if [ -z "${SMTP_PASSWORD:-}" ]; then echo "::warning::SMTP_PASSWORD not set — sends will SKIP"; fi
       - run: |
           ARGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
@@ -62,4 +71,4 @@ jobs:
           git add -A
           if git diff --cached --quiet; then echo "nothing changed"; exit 0; fi
           git commit -q -m "watcher: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:pulseops-state --force
+          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:pulseops-state --force-with-lease

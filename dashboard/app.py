@@ -60,6 +60,16 @@ def _since(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).isoformat()
 
 
+def _require_token():
+    want = os.getenv("DASHBOARD_TOKEN", "")
+    if not want:
+        return None  # auth disabled (local-only default); run_server binds 127.0.0.1
+    got = request.headers.get("X-Token", "")
+    if got != want:
+        return jsonify({"success": False, "error": "unauthorized"}), 401
+    return None
+
+
 # ── Page ─────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -94,6 +104,9 @@ def get_jobs():
 
 @app.route("/api/jobs/<int:job_id>/status", methods=["POST"])
 def set_job_status(job_id):
+    auth = _require_token()
+    if auth:
+        return auth
     try:
         db = _db()
         new_status = (request.json or {}).get("status", "").strip()
@@ -268,6 +281,9 @@ def _enqueue_output(proc: subprocess.Popen) -> None:
 
 @app.route("/api/run", methods=["POST"])
 def run_pipeline():
+    auth = _require_token()
+    if auth:
+        return auth
     global _running_process
     with _process_lock:
         if _running_process and _running_process.poll() is None:
@@ -324,6 +340,9 @@ def stream_logs():
 
 @app.route("/api/pause", methods=["POST"])
 def pause_sends():
+    auth = _require_token()
+    if auth:
+        return auth
     try:
         db = _db()
         db.set_send_paused(True)
@@ -334,6 +353,9 @@ def pause_sends():
 
 @app.route("/api/resume", methods=["POST"])
 def resume_sends():
+    auth = _require_token()
+    if auth:
+        return auth
     try:
         db = _db()
         db.set_send_paused(False)

@@ -307,11 +307,10 @@ def _check_g10_contact(
     """
     G10: Returns the best available email address to send to.
 
-    Priority order (auto-send, no Hunter):
+    Priority order (verified-only, boss round-2):
       1. Explicit email from JD text (LLM-extracted)
       2. Scrape company website for info@/careers@/jobs@/hr@ (real page)
-      3. Find LinkedIn people at company → pattern email firstname@domain
-      4. Fallback contact@domain
+      3. Raise NoContactEmailError (no pattern/contact@ guesses)
     """
     # Priority 1: explicit email found in JD
     if contact_email and "@" in contact_email:
@@ -323,17 +322,6 @@ def _check_g10_contact(
         print(f"  [G10] scraped company site: {scraped[0]} from {domain}")
         return scraped[0]
 
-    # Priority 3: LinkedIn people → pattern email (no Hunter)
-    linkedin_cands = _linkedin_people_emails(company, domain)
-    if linkedin_cands:
-        print(f"  [G10] LinkedIn pattern: {linkedin_cands[0]} for {company} @ {domain}")
-        return linkedin_cands[0]
-
-    # Fallback: when no JD/scrape, use inferred domain (e.g. contact@domain) for auto-send
-    if domain and "." in domain and domain != "unknown.com":
-        fallback = f"contact@{domain}"
-        print(f"  [G10] fallback: {fallback} (inferred from {domain}, low-confidence but auto-send enabled)")
-        return fallback
     raise NoContactEmailError(
         f"G10: no verified email found for '{company}' domain '{domain}' "
         f"(JD: none, Hunter.io: none/low-confidence)"

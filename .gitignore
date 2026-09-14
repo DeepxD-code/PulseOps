@@ -14,6 +14,8 @@ config/.cv_hash
 cv.md
 
 # ── Generated artifacts ─────────────────────────────────────
+*.tar.gz
+*.tgz
 output/
 data/
 logs/

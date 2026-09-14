@@ -76,7 +76,7 @@ def _extract_bounced_email(subject: str, body: str, original_msg: email.message.
     if BOUNCE_BODY_RE.search(body) or BOUNCE_SUBJECT_RE.search(subject):
         emails = re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", body, re.IGNORECASE)
         # filter out our own
-        own = os.getenv("SMTP_EMAIL", "trex2004avradeep@gmail.com").lower()
+        own = (os.getenv("SMTP_EMAIL") or os.getenv("IMAP_EMAIL") or "").lower()
         for e in emails:
             if own not in e.lower() and "mailer-daemon" not in e.lower():
                 return e
@@ -92,11 +92,11 @@ def _detect_platform(from_addr: str, subject: str) -> str | None:
 
 def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
     imap_host = os.getenv("IMAP_HOST", "imap.gmail.com")
-    imap_email = os.getenv("IMAP_EMAIL") or os.getenv("SMTP_EMAIL", "trex2004avradeep@gmail.com")
+    imap_email = os.getenv("IMAP_EMAIL") or os.getenv("SMTP_EMAIL", "")
     imap_password = os.getenv("IMAP_PASSWORD") or os.getenv("SMTP_PASSWORD", "")
     if not imap_email or not imap_password:
-        print("[watcher] IMAP not configured — skipping")
-        return {"bounces_fixed": 0, "platform_jobs_ingested": 0, "skipped": True}
+        print("[watcher] IMAP_EMAIL/IMAP_PASSWORD (or SMTP_*) not set — failing loud, not silent-skip")
+        return {"bounces_fixed": 0, "platform_jobs_ingested": 0, "skipped": True, "error": "missing IMAP creds"}
 
     # Connect
     try:
@@ -176,8 +176,9 @@ def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
                             if jobs_found:
                                 print(f"[platform {platform}] {subject[:60]} — {len(jobs_found)} jobs hint")
                                 for title in jobs_found[:3]:
-                                    # Insert as sourced job for next pipeline if not already seen
-                                    link = f"https://{platform}.com/inbox/{msg_id.decode() if isinstance(msg_id, bytes) else msg_id}"
+                                    # No fabricated links: store Message-ID + subject, leave link empty for human review
+                                    mid = msg.get("Message-ID", "") or (msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id))
+                                    link = ""
                                     if not dry_run:
                                         try:
                                             # Use save_job with source=Email:{platform}
