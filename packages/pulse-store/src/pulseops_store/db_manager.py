@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from pulseops_core.exceptions import DatabaseError
 
+
 def _repo_root() -> Path:
     here = Path(__file__).resolve()
     for p in [here, *here.parents]:
@@ -616,7 +617,7 @@ def get_followup_candidates(day_threshold: int = 5, max_per_application: int = 1
         cutoff = (datetime.now() - timedelta(days=day_threshold)).isoformat()
         max_followups = 1 if max_per_application <= 1 else max_per_application
         rows = conn.execute(
-            f"""
+            """
             SELECT o.*, j.title AS job_title, j.score AS job_score,
                    j.contact_email AS job_contact_email, j.status AS job_status,
                    j.recruiter_email AS job_recruiter_email,

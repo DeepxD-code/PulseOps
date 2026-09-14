@@ -21,7 +21,7 @@ import re
 import time
 from pathlib import Path
 
-from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError, PreFilterRejectedError
+from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError
 
 ROOT        = Path(__file__).resolve().parent.parent
 PROMPT_PATH = ROOT / "prompts" / "full_evaluation.txt"

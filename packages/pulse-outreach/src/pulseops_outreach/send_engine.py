@@ -29,18 +29,22 @@ Error contract:
 
 from __future__ import annotations
 
-import os
 import re
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pulseops_core.exceptions import (
-    BlacklistMatchError, BounceThresholdReachedError, CooldownActiveError,
-    DailyCapReachedError, DomainDailyLimitError, NoContactEmailError,
-    OutsideSendWindowError, ReferralContactExistsError, ScoreBelowThresholdError,
-    SemanticDuplicateError, SendGuardrailError,
+    BlacklistMatchError,
+    BounceThresholdReachedError,
+    CooldownActiveError,
+    DailyCapReachedError,
+    DomainDailyLimitError,
+    NoContactEmailError,
+    OutsideSendWindowError,
+    ReferralContactExistsError,
+    ScoreBelowThresholdError,
+    SemanticDuplicateError,
 )
 from pulseops_store import audit_log
 from pulseops_store import db_manager as db
@@ -212,7 +216,7 @@ def _check_g8_send_window(start_str: str, end_str: str, tz_name: str) -> None:
                 f"G8: current time {now.strftime('%H:%M')} IST is outside "
                 f"send window {start_str}–{end_str}"
             )
-    except (IndexError, ValueError) as e:
+    except (IndexError, ValueError):
         pass  # malformed window config — allow send
 
 
@@ -228,6 +232,7 @@ def _check_g9_bounce(domain: str) -> None:
 
 
 import re as _re
+
 
 def _scrape_company_emails(domain: str, company: str = "") -> list[str]:
     """Scrape company homepage + /contact /careers /about for info@ / careers@ / jobs@."""

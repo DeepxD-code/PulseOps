@@ -22,9 +22,8 @@ import csv
 import json
 from pathlib import Path
 
-from pulseops_core.exceptions import DatabaseError
-from pulseops_store import db_manager as db
 from pulseops_store import audit_log
+from pulseops_store import db_manager as db
 
 ROOT    = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "data"

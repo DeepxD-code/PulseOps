@@ -57,8 +57,8 @@ def main() -> None:
     parser.add_argument("--skip-liveness", action="store_true")
     args = parser.parse_args()
 
-    from pulseops_store.db_manager import init_db, save_job, is_job_processed, enqueue_send
     from pulseops_store import audit_log
+    from pulseops_store.db_manager import enqueue_send, init_db, is_job_processed, save_job
 
     init_db()
     run_id = audit_log.generate_run_id()
@@ -184,9 +184,9 @@ def main() -> None:
 
     # ── Phase 5-7: Evaluate + Resume + Send ─────────────────────────────
     _header("Phase 5-7: Evaluate + Build + Send")
+    from pulseops_core.cv_parser import parse_cv
     from pulseops_eval.analyzer import evaluate_job, reset_circuit_breakers
     from pulseops_memory.context_loader import load_context
-    from pulseops_core.cv_parser import parse_cv
 
     reset_circuit_breakers()
     try:
@@ -372,8 +372,8 @@ def _run_scan(simulate: bool) -> tuple[list[dict], list[dict], list[dict]]:
 def _finish(run_id: str, stats: dict, start: float) -> None:
     duration = int(time.time() - start)
     stats["duration_seconds"] = duration
-    from pulseops_store.db_manager import save_run_stats
     from pulseops_store import audit_log
+    from pulseops_store.db_manager import save_run_stats
     save_run_stats(run_id, "weekly", stats)
     audit_log.write_run_end(run_id, stats)
     _header("Weekly Scan Complete")

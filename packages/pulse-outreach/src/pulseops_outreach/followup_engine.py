@@ -21,11 +21,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pulseops_core.exceptions import (
-    OutsideSendWindowError, DailyCapReachedError, BlacklistMatchError,
     BounceThresholdReachedError,
+    DailyCapReachedError,
+    OutsideSendWindowError,
 )
-from pulseops_store import db_manager as db
 from pulseops_store import audit_log
+from pulseops_store import db_manager as db
 
 ROOT = Path(__file__).resolve().parent.parent
 

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from email.header import decode_header
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from pulseops_store import db_manager as db

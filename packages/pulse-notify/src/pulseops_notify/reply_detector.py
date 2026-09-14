@@ -22,8 +22,9 @@ from datetime import datetime
 from email.header import decode_header
 
 from pulseops_core.exceptions import IMAPError
-from pulseops_store import db_manager as db
 from pulseops_store import audit_log
+from pulseops_store import db_manager as db
+
 from pulseops_notify import notifier
 
 

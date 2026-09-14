@@ -20,11 +20,11 @@ Return convention:
               continue the pipeline (audit_log records the attempt either way).
 """
 
-import os
 import html
-import requests
+import os
 from datetime import datetime
 
+import requests
 from pulseops_core.exceptions import TelegramError
 from pulseops_store import audit_log
 
@@ -183,7 +183,7 @@ def send_audit_summary(stats: dict, new_matches: list, run_id: str,
 
     if skipped_lines:
         lines.append("====================================")
-        lines.append(f"⏭ <b>Skipped this run</b>")
+        lines.append("⏭ <b>Skipped this run</b>")
         lines += skipped_lines[:8]
 
     lines.append("====================================")
@@ -406,7 +406,7 @@ def send_prep_pack(company: str, title: str, star_stories: list, comp_research: 
     token, chat = creds
 
     lines = [
-        f"🎙️ <b>Interview Prep Pack</b>",
+        "🎙️ <b>Interview Prep Pack</b>",
         f"💼 {html.escape(title)} @ <b>{html.escape(company)}</b>",
         "====================================",
     ]

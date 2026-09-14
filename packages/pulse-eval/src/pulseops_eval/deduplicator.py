@@ -14,7 +14,7 @@ Also deduplicates against already-processed jobs in the DB.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from pulseops_store.db_manager import is_job_processed, normalise_company
 

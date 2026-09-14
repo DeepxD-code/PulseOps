@@ -26,15 +26,9 @@ Raises ResumeBuildError on failure.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import subprocess
-import sys
-import tempfile
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from pulseops_core.exceptions import ResumeBuildError
 
@@ -398,7 +392,7 @@ def build_resume(
         return "", str(html_path)
 
     # ── Live: try profiles until 1-page fit ─────────────────────────────
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for i, _ in enumerate(_PROFILES):
         try:
             context  = _build_context(cv_data, eval_result, company, role,

@@ -20,10 +20,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from pulseops_core.exceptions import CVParseError
-
 
 # ── Data types ──────────────────────────────────────────────────────────────
 
@@ -187,8 +185,8 @@ def parse_cv(cv_path: str) -> CVData:
     lines = text.splitlines()
 
     current_section: str = ""
-    current_exp: Optional[CVExperience] = None
-    current_proj: Optional[CVProject] = None
+    current_exp: CVExperience | None = None
+    current_proj: CVProject | None = None
     in_summary = False
 
     for raw_line in lines:
