@@ -149,6 +149,27 @@ const ATS_SELECTORS = {
     },
     submitBtn: ['button[type="submit"]']
   },
+  linkedin: {
+    applyBtn: ['button[aria-label*="Easy Apply"]', 'button:has-text("Easy Apply")', 'button.jobs-apply-button', 'a:has-text("Easy Apply")'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button[aria-label="Submit application"]', 'button:has-text("Submit application")', 'button:has-text("Review")']
+  },
+  naukri: {
+    applyBtn: ['button:has-text("Apply")', 'a:has-text("Apply")', '#apply-button', '[id*="apply"]'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")', 'button:has-text("Apply")']
+  },
+  wellfound: {
+    applyBtn: ['button:has-text("Apply")', 'a:has-text("Apply")'],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")']
+  },
   generic: {
     applyBtn: ['a:has-text("Apply")', 'a:has-text("Apply now")', 'button:has-text("Apply")', 'button:has-text("Apply now")', '[data-testid*="apply"]'],
     fields: {
@@ -258,10 +279,15 @@ async function processJob(browser, job, profile) {
     return { company: job.company, title: job.title, link: url, ats, action: "mock-preview", pdf: resumePdf };
   }
 
+  const hasSession = fs.existsSync(path.join(ROOT, "portal", "storageState.json"));
+  if ((ats === "linkedin" || ats === "naukri") && !hasSession) {
+    console.log(`  [authwall-skip] ${ats} needs portal/storageState.json — run: node portal/save_sessions.mjs`);
+    return { company: job.company, title: job.title, link: url, ats, action: "authwall-skip", pdf: resumePdf };
+  }
   const context = await browser.newContext({
     viewport: { width: 1366, height: 900 },
     // Use headed storageState if exists for logged-in portals (Naukri/LinkedIn)
-    storageState: fs.existsSync(path.join(ROOT, "portal", "storageState.json")) ? path.join(ROOT, "portal", "storageState.json") : undefined,
+    storageState: hasSession ? path.join(ROOT, "portal", "storageState.json") : undefined,
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
