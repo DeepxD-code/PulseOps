@@ -16,6 +16,7 @@ cv.md
 # ── Generated artifacts ─────────────────────────────────────
 *.tar.gz
 *.tgz
+pulseops_complete_phases1_12_tar.gz
 output/
 data/
 logs/
