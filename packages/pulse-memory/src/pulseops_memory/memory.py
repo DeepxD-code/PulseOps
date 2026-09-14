@@ -26,8 +26,8 @@ sys.path.insert(0, str(ROOT))
 
 
 def _do_add(raw_text: str, simulate: bool = False) -> None:
-    from memory.memory_parser import parse_memory
-    from persistence import db_manager as db, audit_log
+    from pulseops_memory.memory_parser import parse_memory
+    from pulseops_store import db_manager as db, audit_log
 
     print(f"  Parsing: '{raw_text[:80]}…'" if len(raw_text) > 80 else f"  Parsing: '{raw_text}'")
 
@@ -69,7 +69,7 @@ def _do_add(raw_text: str, simulate: bool = False) -> None:
             print(f"  [OK] '{company}' added to config/blacklist.txt")
 
     if action == "add_cooldown" and company:
-        from persistence.db_manager import normalise_company, save_outreach, get_job
+        from pulseops_store.db_manager import normalise_company, save_outreach, get_job
         # Record a synthetic outreach row so G5 cooldown fires
         existing_jobs = db.get_jobs_by_status(["Sent", "Evaluated"], limit=50)
         job_id = next((j["id"] for j in existing_jobs
@@ -87,7 +87,7 @@ def _do_add(raw_text: str, simulate: bool = False) -> None:
 
 
 def _do_list(category: str | None = None) -> None:
-    from persistence import db_manager as db
+    from pulseops_store import db_manager as db
     memories = db.get_active_memories(category=category, limit=50)
     if not memories:
         print("  No active memories found.")
@@ -101,7 +101,7 @@ def _do_list(category: str | None = None) -> None:
 
 
 def _do_pending() -> None:
-    from persistence import db_manager as db
+    from pulseops_store import db_manager as db
     pending = db.get_cv_candidates()
     if not pending:
         print("  No pending cv_candidate memories.")
@@ -117,7 +117,7 @@ def _do_pending() -> None:
 
 
 def _do_context(company: str = "") -> None:
-    from memory.context_loader import load_context
+    from pulseops_memory.context_loader import load_context
     ctx = load_context(company=company)
     if ctx:
         print(ctx)
@@ -127,7 +127,7 @@ def _do_context(company: str = "") -> None:
 
 
 def _do_delete(mem_id: int) -> None:
-    from persistence import db_manager as db
+    from pulseops_store import db_manager as db
     conn = db.get_connection()
     try:
         conn.execute("UPDATE memories SET active=0 WHERE id=?", (mem_id,))
@@ -138,8 +138,8 @@ def _do_delete(mem_id: int) -> None:
 
 
 def _do_edit(mem_id: int, new_text: str, simulate: bool = False) -> None:
-    from memory.memory_parser import parse_memory
-    from persistence import db_manager as db
+    from pulseops_memory.memory_parser import parse_memory
+    from pulseops_store import db_manager as db
     try:
         parsed = parse_memory(new_text, simulate=simulate)
     except Exception as e:
@@ -187,7 +187,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    from persistence.db_manager import init_db
+    from pulseops_store.db_manager import init_db
     init_db()
 
     if args.command == "add":

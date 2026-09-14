@@ -27,7 +27,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-from exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
+from pulseops_core.exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
 
 ROOT = Path(__file__).resolve().parent.parent
 

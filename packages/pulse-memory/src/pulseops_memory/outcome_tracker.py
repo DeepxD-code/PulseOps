@@ -30,7 +30,7 @@ def record(company: str, title: str, stage: str, notes: str = "") -> None:
         print(f"  [Error] Invalid stage '{stage}'. Valid: {sorted(VALID_STAGES)}")
         sys.exit(1)
 
-    from persistence import db_manager as db, audit_log
+    from pulseops_store import db_manager as db, audit_log
 
     db.init_db()
 
@@ -53,7 +53,7 @@ def record(company: str, title: str, stage: str, notes: str = "") -> None:
     # phone_screen → add deferred memory + queue prep pack
     if stage == "phone_screen":
         # Add a callback memory so it shows up in future evals for this company
-        from memory.memory_parser import parse_memory
+        from pulseops_memory.memory_parser import parse_memory
         raw = f"Got interview callback from {company} for {title} role."
         parsed = parse_memory(raw, simulate=True)
         parsed["action"]   = "deferred"
@@ -97,13 +97,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    from persistence.db_manager import init_db
+    from pulseops_store.db_manager import init_db
     init_db()
 
     if args.command == "record":
         record(args.company, args.title, args.stage, args.notes)
     elif args.command == "list":
-        from persistence import db_manager as db
+        from pulseops_store import db_manager as db
         from datetime import datetime, timedelta
         since = (datetime.now() - timedelta(days=args.days)).isoformat()
         outcomes = db.get_outcomes_since(since)

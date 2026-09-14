@@ -25,8 +25,8 @@ import html
 import requests
 from datetime import datetime
 
-from exceptions import TelegramError
-from persistence import audit_log
+from pulseops_core.exceptions import TelegramError
+from pulseops_store import audit_log
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MESSAGE_LEN = 4000
@@ -138,7 +138,7 @@ def send_audit_summary(stats: dict, new_matches: list, run_id: str,
         return False
     token, chat = creds
 
-    from persistence import db_manager as db
+    from pulseops_store import db_manager as db
 
     daily_cap = 5
     if settings:

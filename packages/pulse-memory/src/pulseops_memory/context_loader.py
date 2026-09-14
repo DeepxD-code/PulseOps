@@ -13,7 +13,7 @@ is called by the analyzer separately.
 
 from __future__ import annotations
 
-from persistence import db_manager as db
+from pulseops_store import db_manager as db
 
 
 def load_context(company: str = "", limit: int = 5) -> str:

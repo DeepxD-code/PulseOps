@@ -25,8 +25,8 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-from exceptions import TelegramError
-from persistence import audit_log
+from pulseops_core.exceptions import TelegramError
+from pulseops_store import audit_log
 
 DISCORD_API = "https://discord.com/api/webhooks/{webhook_id}/{webhook_token}"
 MAX_EMBED_DESCRIPTION = 4000
@@ -182,7 +182,7 @@ def send_discord_summary(stats: dict, new_matches: list, run_id: str,
         return False
     webhook_id, webhook_token = creds
 
-    from persistence import db_manager as db
+    from pulseops_store import db_manager as db
 
     daily_cap = 5
     if settings:
@@ -567,7 +567,7 @@ def send_discord_prep_pack(company: str, title: str, star_stories: list,
 def send_discord_weekly_digest(webhook_url: str | None = None,
                                run_id: str = "") -> bool:
     """Build and send the weekly digest to Discord."""
-    from notifications.weekly_digest import build_digest
+    from pulseops_notify.weekly_digest import build_digest
     from datetime import timedelta
 
     since = (datetime.now() - timedelta(days=7)).isoformat()

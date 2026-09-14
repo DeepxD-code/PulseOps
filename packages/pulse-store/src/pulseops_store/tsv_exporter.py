@@ -12,7 +12,7 @@ needed. Files are always overwritten (not appended) so they stay current.
 
 Called at the end of main.py Phase 9:
     try:
-        from persistence.tsv_exporter import export
+        from pulseops_store.tsv_exporter import export
         export()
     except Exception:
         pass   # never block the pipeline
@@ -22,9 +22,9 @@ import csv
 import json
 from pathlib import Path
 
-from exceptions import DatabaseError
-from persistence import db_manager as db
-from persistence import audit_log
+from pulseops_core.exceptions import DatabaseError
+from pulseops_store import db_manager as db
+from pulseops_store import audit_log
 
 ROOT    = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "data"

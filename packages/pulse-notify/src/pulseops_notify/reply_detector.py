@@ -21,10 +21,10 @@ import os
 from datetime import datetime
 from email.header import decode_header
 
-from exceptions import IMAPError
-from persistence import db_manager as db
-from persistence import audit_log
-from notifications import notifier
+from pulseops_core.exceptions import IMAPError
+from pulseops_store import db_manager as db
+from pulseops_store import audit_log
+from pulseops_notify import notifier
 
 
 def decode_mime_words(s: str | None) -> str:
@@ -92,7 +92,7 @@ def _notify_and_record(reply: dict, run_id: str, bot_token: str | None, chat_id:
     # Discord notification
     if webhook_url:
         try:
-            from notifications.discord import send_discord_reply_alert
+            from pulseops_notify.discord import send_discord_reply_alert
             send_discord_reply_alert(reply, webhook_url=webhook_url, run_id=run_id)
         except Exception as e:
             print(f"  [!] Reply alert failed (Discord): {e}")

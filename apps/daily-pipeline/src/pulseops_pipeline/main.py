@@ -130,8 +130,8 @@ def _mock_evaluation(title: str, company: str) -> dict:
 
 
 def _finish(run_id: str, stats: dict, start: float, settings: dict) -> None:
-    from persistence.db_manager import save_run_stats
-    from persistence import audit_log
+    from pulseops_store.db_manager import save_run_stats
+    from pulseops_store import audit_log
 
     duration = int(time.time() - start)
     stats["duration_seconds"] = duration
@@ -177,7 +177,7 @@ def main() -> None:
         run_server()
         sys.exit(0)
 
-    from persistence.db_manager import init_db, set_send_paused, get_send_paused
+    from pulseops_store.db_manager import init_db, set_send_paused, get_send_paused
     init_db()
 
     if args.pause_sends:
@@ -189,13 +189,13 @@ def main() -> None:
         print("[OK] Auto-sends RESUMED.")
         sys.exit(0)
 
-    from persistence import audit_log
-    from persistence.db_manager import (
+    from pulseops_store import audit_log
+    from pulseops_store.db_manager import (
         save_run_stats, record_source_health, save_job,
         is_job_processed, enqueue_send, get_send_paused, get_job,
         update_job_paths,
     )
-    from exceptions import (
+    from pulseops_core.exceptions import (
         PulseOpsError, SourceError, EvaluationError,
         AllEnginesFailedError, PreFilterRejectedError,
     )
@@ -240,7 +240,7 @@ def main() -> None:
     github_username = os.getenv("GITHUB_USERNAME", "")
     if github_username and not args.simulate:
         try:
-            from github.github_sync import sync_github
+            from pulseops_github.github_sync import sync_github
             ok, msg = sync_github(github_username)
             print(f"  [{'OK' if ok else '!'}] {msg}")
             audit_log.write(action="GITHUB_SYNC", run_id=run_id, extra={"ok": ok, "msg": msg})
@@ -254,7 +254,7 @@ def main() -> None:
     raw_jobs: list[dict] = []
 
     try:
-        from core.scraper import PulseOpsScraper
+        from pulseops_core.scraper import PulseOpsScraper
         scraper = PulseOpsScraper()
     except ImportError:
         # Scraper not yet built — use inline mock
@@ -297,13 +297,13 @@ def main() -> None:
                 audit_log.write_source_health(run_id, source_name, len(jobs), consecutive)
                 if consecutive >= 3:
                     try:
-                        from notifications.notifier import send_source_health_alert
+                        from pulseops_notify.notifier import send_source_health_alert
                         send_source_health_alert(source_name, consecutive, run_id=run_id)
                     except Exception as e:
                         print(f"  [!] Source health alert failed (Telegram): {e}")
                     if discord_webhook:
                         try:
-                            from notifications.discord import send_discord_source_health_alert
+                            from pulseops_notify.discord import send_discord_source_health_alert
                             send_discord_source_health_alert(source_name, consecutive,
                                                               webhook_url=discord_webhook, run_id=run_id)
                         except Exception as e:
@@ -322,7 +322,7 @@ def main() -> None:
     # ── PHASE 2 — Dedup + Location ───────────────────────────────────────
     _header("Phase 2: Dedup + Location Filter")
     try:
-        from evaluation.deduplicator import deduplicate
+        from pulseops_eval.deduplicator import deduplicate
         deduped = deduplicate(raw_jobs, run_id=run_id)
     except ImportError:
         # Dedup not yet built — pass through with basic exact dedup
@@ -336,7 +336,7 @@ def main() -> None:
     print(f"  After dedup:    {len(deduped)} (dropped {stats['sourced'] - len(deduped)})")
 
     try:
-        from evaluation.location_filter import filter_by_location
+        from pulseops_eval.location_filter import filter_by_location
         located = filter_by_location(deduped, settings.get("sourcing", {}))
     except ImportError:
         located = deduped  # pass through
@@ -349,7 +349,7 @@ def main() -> None:
     hard_passed: list[dict] = []
 
     try:
-        from evaluation.domain_filter import hard_filter
+        from pulseops_eval.domain_filter import hard_filter
         for job in located:
             result = hard_filter(job, profile)
             if result.passed:
@@ -382,7 +382,7 @@ def main() -> None:
         print(f"  [~] Simulation: all {len(hard_passed)} pass soft filter")
     else:
         try:
-            from evaluation.domain_filter import soft_filter
+            from pulseops_eval.domain_filter import soft_filter
             for job in hard_passed:
                 result = soft_filter(job, profile)
                 if result.passed:
@@ -405,20 +405,20 @@ def main() -> None:
     _header("Phase 5–7: Evaluate + Resume + Send Engine")
 
     try:
-        from evaluation.analyzer import evaluate_job, reset_circuit_breakers
+        from pulseops_eval.analyzer import evaluate_job, reset_circuit_breakers
         reset_circuit_breakers()
         has_evaluator = True
     except ImportError:
         has_evaluator = False
 
     try:
-        from memory.context_loader import load_context
+        from pulseops_memory.context_loader import load_context
         has_context_loader = True
     except ImportError:
         has_context_loader = False
 
     try:
-        from core.cv_parser import parse_cv
+        from pulseops_core.cv_parser import parse_cv
         cv_data = parse_cv(str(ROOT / "cv.md")) if (ROOT / "cv.md").exists() else None
     except (ImportError, Exception):
         cv_data = None
@@ -494,7 +494,7 @@ def main() -> None:
         if score >= pdf_threshold:
             stats["matched_pdf"] += 1
             try:
-                from core.resume_builder import build_resume
+                from pulseops_core.resume_builder import build_resume
                 pdf_path, report_path = build_resume(
                     cv_data=cv_data, eval_result=eval_result,
                     company=company, role=title, simulate=args.simulate,
@@ -508,7 +508,7 @@ def main() -> None:
         send_decision: dict | None = None
         if score >= notify_threshold and not get_send_paused():
             try:
-                from outreach.send_engine import decide_send
+                from pulseops_outreach.send_engine import decide_send
                 send_decision = decide_send(
                     job_id=job_id, job=job, eval_result=eval_result,
                     settings=settings, run_id=run_id, simulate=args.simulate,
@@ -547,7 +547,7 @@ def main() -> None:
 
     if telegram_token and telegram_chat_id:
         try:
-            from notifications.notifier import send_audit_summary, send_match_card, TelegramError
+            from pulseops_notify.notifier import send_audit_summary, send_match_card, TelegramError
             send_audit_summary(stats, new_matches, run_id, telegram_token, telegram_chat_id, settings)
             for m in new_matches:
                 try:
@@ -566,7 +566,7 @@ def main() -> None:
 
     if discord_webhook:
         try:
-            from notifications.discord import send_discord_summary, send_discord_match_card
+            from pulseops_notify.discord import send_discord_summary, send_discord_match_card
             send_discord_summary(stats, new_matches, run_id, discord_webhook, settings)
             for m in new_matches:
                 try:
@@ -588,13 +588,13 @@ def main() -> None:
 
     # 9a: IMAP reply + bounce + platform ingest (email_watcher runs hourly too)
     try:
-        from notifications.email_watcher import run_watcher
+        from pulseops_notify.email_watcher import run_watcher
         w = run_watcher(dry_run=args.simulate)
         print(f"  [OK] Watcher: bounces_fixed {w.get('bounces_fixed',0)}, platform_jobs {w.get('platform_jobs_ingested',0)}")
     except Exception as e:
         print(f"  [!] Watcher failed (non-fatal): {e}")
     try:
-        from notifications.reply_detector import check_for_replies
+        from pulseops_notify.reply_detector import check_for_replies
         n_replies = check_for_replies(run_id=run_id, simulate=args.simulate,
                                        bot_token=telegram_token, chat_id=telegram_chat_id,
                                        webhook_url=discord_webhook)
@@ -604,7 +604,7 @@ def main() -> None:
 
     # 9b: Interview prep auto-trigger
     try:
-        from notifications.interview_prep import check_and_send_prep_packs
+        from pulseops_notify.interview_prep import check_and_send_prep_packs
         n_prep = check_and_send_prep_packs(run_id=run_id, bot_token=telegram_token,
                                             chat_id=telegram_chat_id,
                                             webhook_url=discord_webhook)
@@ -615,7 +615,7 @@ def main() -> None:
     # 9c: Day-5 follow-ups
     if settings.get("followup", {}).get("enabled", True):
         try:
-            from outreach.followup_engine import process_followups
+            from pulseops_outreach.followup_engine import process_followups
             n_fu = process_followups(run_id=run_id, settings=settings, simulate=args.simulate)
             print(f"  [OK] Follow-ups sent: {n_fu}")
         except Exception as e:
@@ -623,14 +623,14 @@ def main() -> None:
 
     # 9d: TSV export
     try:
-        from persistence.tsv_exporter import export
+        from pulseops_store.tsv_exporter import export
         export(run_id=run_id)
     except Exception as e:
         print(f"  [!] TSV export failed (non-fatal): {e}")
 
     # 9e: Weekly digest (if Sunday 09:00 IST)
     try:
-        from notifications.weekly_digest import should_send_digest, send_weekly_digest
+        from pulseops_notify.weekly_digest import should_send_digest, send_weekly_digest
         if should_send_digest():
             print("  [OK] It's Sunday 09:00 IST — sending weekly digest…")
             send_weekly_digest(bot_token=telegram_token, chat_id=telegram_chat_id,

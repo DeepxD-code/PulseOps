@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from exceptions import ResumeBuildError
+from pulseops_core.exceptions import ResumeBuildError
 
 ROOT        = Path(__file__).resolve().parent.parent
 TEMPLATE    = ROOT / "templates" / "resume.html.jinja2"
@@ -147,7 +147,7 @@ def _apply_bullet_adjustments(cv_data, eval_result: dict):
         for exp in cv_data.experience
     ]
     # Rebuild as dataclass instances properly
-    from core.cv_parser import CVExperience, CVProject
+    from pulseops_core.cv_parser import CVExperience, CVProject
     experience = [
         CVExperience(title=e.title, company=e.company, date_range=e.date_range,
                       location=e.location, bullets=replace_bullets(e.bullets))

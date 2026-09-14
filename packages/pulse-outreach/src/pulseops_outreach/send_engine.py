@@ -36,14 +36,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from exceptions import (
+from pulseops_core.exceptions import (
     BlacklistMatchError, BounceThresholdReachedError, CooldownActiveError,
     DailyCapReachedError, DomainDailyLimitError, NoContactEmailError,
     OutsideSendWindowError, ReferralContactExistsError, ScoreBelowThresholdError,
     SemanticDuplicateError, SendGuardrailError,
 )
-from persistence import audit_log
-from persistence import db_manager as db
+from pulseops_store import audit_log
+from pulseops_store import db_manager as db
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -407,7 +407,7 @@ def decide_send(
             (c for c in contacts if _normalise(c.get("company","")) == norm), {}
         )
         try:
-            from notifications.notifier import send_referral_alert
+            from pulseops_notify.notifier import send_referral_alert
             send_referral_alert(company, title, contact_match, run_id=run_id)
         except Exception as te:
             print(f"  [!] Referral alert failed (non-fatal): {te}")
@@ -474,7 +474,7 @@ def decide_send(
 
     # Live send
     try:
-        from outreach.email_sender import send_cold_email
+        from pulseops_outreach.email_sender import send_cold_email
         sent = send_cold_email(
             to_email=actual_to,
             email_text=recruiter_email_text,

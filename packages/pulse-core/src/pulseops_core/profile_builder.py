@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml  # type: ignore
 
-from exceptions import ProfileBuildError
+from pulseops_core.exceptions import ProfileBuildError
 
 ROOT         = Path(__file__).resolve().parent.parent
 PROFILE_PATH = ROOT / "config" / "profile.yml"

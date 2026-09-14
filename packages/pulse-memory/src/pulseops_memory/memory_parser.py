@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from exceptions import MemoryParseError
+from pulseops_core.exceptions import MemoryParseError
 
 ROOT        = Path(__file__).resolve().parent.parent
 PROMPT_PATH = ROOT / "prompts" / "memory_parser.txt"

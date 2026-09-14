@@ -161,7 +161,7 @@ def sync_github(username: str, max_repos: int = 3) -> tuple[bool, str]:
         return False, "No GITHUB_USERNAME configured."
 
     try:
-        from persistence.db_manager import add_memory
+        from pulseops_store.db_manager import add_memory
     except Exception as e:
         return False, f"Could not import db_manager: {e}"
 

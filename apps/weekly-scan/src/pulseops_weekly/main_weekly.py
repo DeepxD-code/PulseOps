@@ -57,8 +57,8 @@ def main() -> None:
     parser.add_argument("--skip-liveness", action="store_true")
     args = parser.parse_args()
 
-    from persistence.db_manager import init_db, save_job, is_job_processed, enqueue_send
-    from persistence import audit_log
+    from pulseops_store.db_manager import init_db, save_job, is_job_processed, enqueue_send
+    from pulseops_store import audit_log
 
     init_db()
     run_id = audit_log.generate_run_id()
@@ -99,7 +99,7 @@ def main() -> None:
             for d in dead:
                 print(f"      - {d['name']}: {d['url']}")
             if telegram_token and telegram_chat_id:
-                from notifications.notifier import send_telegram_summary
+                from pulseops_notify.notifier import send_telegram_summary
                 msg = "⚠️ <b>PulseOps Weekly Scan — Dead Portals</b>\n" + "\n".join(
                     f"• {d['name']}: {d['url']}" for d in dead
                 )
@@ -118,12 +118,12 @@ def main() -> None:
     print(f"  Auth-skipped:  {len(skipped_portals)} portal(s)")
     print(f"  Failed:        {len(failed_portals)} portal(s)")
 
-    from persistence.db_manager import record_source_health
+    from pulseops_store.db_manager import record_source_health
     for f in failed_portals:
         record_source_health(f"Portal:{f['name']}", run_id, 0, f.get("error", ""))
 
     if skipped_portals and telegram_token and telegram_chat_id:
-        from notifications.notifier import send_telegram_summary
+        from pulseops_notify.notifier import send_telegram_summary
         msg = "🔒 <b>PulseOps Weekly Scan — Auth Required</b>\nThese portals need a logged-in session; scan them by hand:\n" + "\n".join(
             f"• {s['name']}: {s['url']}" for s in skipped_portals
         )
@@ -136,8 +136,8 @@ def main() -> None:
 
     # ── Phase 2: Dedup + Location (same modules as the daily pipeline) ──
     _header("Phase 2: Dedup + Location Filter")
-    from evaluation.deduplicator import deduplicate
-    from evaluation.location_filter import filter_by_location
+    from pulseops_eval.deduplicator import deduplicate
+    from pulseops_eval.location_filter import filter_by_location
 
     deduped = deduplicate(raw_jobs, run_id=run_id)
     stats["after_dedup"] = len(deduped)
@@ -149,7 +149,7 @@ def main() -> None:
 
     # ── Phase 3-4: Domain filter ─────────────────────────────────────────
     _header("Phase 3: Domain Hard Filter (Stage 1)")
-    from evaluation.domain_filter import hard_filter, soft_filter
+    from pulseops_eval.domain_filter import hard_filter, soft_filter
     profile = _load_profile()
     hard_passed = []
     for job in located:
@@ -184,9 +184,9 @@ def main() -> None:
 
     # ── Phase 5-7: Evaluate + Resume + Send ─────────────────────────────
     _header("Phase 5-7: Evaluate + Build + Send")
-    from evaluation.analyzer import evaluate_job, reset_circuit_breakers
-    from memory.context_loader import load_context
-    from core.cv_parser import parse_cv
+    from pulseops_eval.analyzer import evaluate_job, reset_circuit_breakers
+    from pulseops_memory.context_loader import load_context
+    from pulseops_core.cv_parser import parse_cv
 
     reset_circuit_breakers()
     try:
@@ -250,13 +250,13 @@ def main() -> None:
             if score >= pdf_threshold:
                 stats["matched_pdf"] += 1
                 try:
-                    from core.resume_builder import build_resume
+                    from pulseops_core.resume_builder import build_resume
                     pdf_path, html_path = build_resume(
                         cv_data=cv_data, eval_result=eval_result, company=company,
                         role=title, simulate=args.simulate,
                     )
                     print(f"    [PDF] {pdf_path or html_path}")
-                    from persistence.db_manager import update_job_paths
+                    from pulseops_store.db_manager import update_job_paths
                     update_job_paths(job_id, pdf_path=pdf_path, report_path=html_path)
                 except Exception as e:
                     print(f"    [!] Resume build failed: {e}")
@@ -264,7 +264,7 @@ def main() -> None:
             send_decision = None
             if score >= notify_threshold:
                 try:
-                    from outreach.send_engine import decide_send
+                    from pulseops_outreach.send_engine import decide_send
                     send_decision = decide_send(job_id=job_id, job=job, eval_result=eval_result,
                                                 settings=settings, run_id=run_id, simulate=args.simulate)
                     action, reason = send_decision["action"], send_decision.get("reason", "")
@@ -293,7 +293,7 @@ def main() -> None:
     _header("Phase 8: Telegram Notifications")
     if telegram_token and telegram_chat_id:
         try:
-            from notifications.notifier import send_audit_summary, send_match_card
+            from pulseops_notify.notifier import send_audit_summary, send_match_card
             send_audit_summary(stats, new_matches, run_id, telegram_token, telegram_chat_id)
             for m in new_matches:
                 send_match_card(job=m["job"], eval_result=m["eval_result"], send_decision=m["send_decision"],
@@ -307,7 +307,7 @@ def main() -> None:
     _finish(run_id, stats, run_start)
 
     try:
-        from persistence.tsv_exporter import export
+        from pulseops_store.tsv_exporter import export
         export()
     except Exception:
         pass
@@ -372,8 +372,8 @@ def _run_scan(simulate: bool) -> tuple[list[dict], list[dict], list[dict]]:
 def _finish(run_id: str, stats: dict, start: float) -> None:
     duration = int(time.time() - start)
     stats["duration_seconds"] = duration
-    from persistence.db_manager import save_run_stats
-    from persistence import audit_log
+    from pulseops_store.db_manager import save_run_stats
+    from pulseops_store import audit_log
     save_run_stats(run_id, "weekly", stats)
     audit_log.write_run_end(run_id, stats)
     _header("Weekly Scan Complete")

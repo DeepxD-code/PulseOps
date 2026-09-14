@@ -51,7 +51,7 @@ _process_lock = threading.Lock()
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _db():
-    from persistence import db_manager
+    from pulseops_store import db_manager
     db_manager.init_db()
     return db_manager
 
@@ -114,7 +114,7 @@ def set_job_status(job_id):
             return jsonify({"success": False, "error": "Missing 'status'"}), 400
         db.update_job_status(job_id, new_status)
         try:
-            from persistence import audit_log
+            from pulseops_store import audit_log
             audit_log.write("DASHBOARD_STATUS_OVERRIDE", extra={
                 "job_id": job_id, "new_status": new_status,
             })
@@ -153,7 +153,7 @@ def mark_outreach(job_id):
             domain=job.get("inferred_domain", ""),
         )
         try:
-            from persistence import audit_log
+            from pulseops_store import audit_log
             audit_log.write("MANUAL_OUTREACH_LOGGED", extra={
                 "job_id": job_id, "channel": channel,
             })
@@ -263,7 +263,7 @@ def get_audit():
 @app.route("/api/digest", methods=["GET"])
 def get_digest():
     try:
-        from notifications.weekly_digest import build_digest
+        from pulseops_notify.weekly_digest import build_digest
         text = build_digest(_since(7))
         return jsonify({"success": True, "digest": text})
     except Exception as e:

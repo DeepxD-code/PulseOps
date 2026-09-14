@@ -20,10 +20,10 @@ import html
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from exceptions import TelegramError
-from persistence import db_manager as db
-from persistence import audit_log
-from notifications import notifier
+from pulseops_core.exceptions import TelegramError
+from pulseops_store import db_manager as db
+from pulseops_store import audit_log
+from pulseops_notify import notifier
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -207,7 +207,7 @@ def send_weekly_digest(
     # Discord digest
     if webhook_url:
         try:
-            from notifications.discord import send_discord_weekly_digest
+            from pulseops_notify.discord import send_discord_weekly_digest
             send_discord_weekly_digest(webhook_url=webhook_url, run_id=run_id)
         except Exception as e:
             print(f"  [!] Discord weekly digest failed (non-fatal): {e}")

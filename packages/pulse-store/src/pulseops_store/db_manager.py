@@ -13,16 +13,24 @@ Error handling contract:
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from exceptions import DatabaseError
+from pulseops_core.exceptions import DatabaseError
 
-ROOT       = Path(__file__).resolve().parent.parent
-DB_PATH    = ROOT / "pulseops.db"
-MIGRATIONS = ROOT / "migrations"
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for p in [here, *here.parents]:
+        if (p / ".git").exists():
+            return p
+    return here.parents[4]  # packages/pulse-store/src/pulseops_store -> repo root
+
+ROOT       = _repo_root()
+DB_PATH    = Path(os.getenv("PULSEOPS_DB", str(ROOT / "pulseops.db")))
+MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 
 _IST = ZoneInfo("Asia/Kolkata")
 

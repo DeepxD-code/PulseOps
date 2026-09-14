@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from exceptions import CVParseError
+from pulseops_core.exceptions import CVParseError
 
 
 # ── Data types ──────────────────────────────────────────────────────────────

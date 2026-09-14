@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from exceptions import CVParseError
+from pulseops_core.exceptions import CVParseError
 
 ROOT        = Path(__file__).resolve().parent.parent
 CV_PATH     = ROOT / "cv.md"

@@ -75,7 +75,11 @@ jobs:
           cache: "npm"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt --break-system-packages
+        run: |
+          pip install -r requirements.txt --break-system-packages
+          for pkg in packages/* apps/daily-pipeline apps/weekly-scan apps/dashboard; do
+            if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
+          done
 
       - name: Install Node dependencies + Playwright browser
         run: |
@@ -115,12 +119,12 @@ jobs:
           if [ -n "$CONTACTS_YML" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
 
       - name: doctor.py --check (non-blocking — informational)
-        run: python doctor.py --check || true
+        run: python -m pulseops_pipeline.doctor --check || true
 
       - name: Sync profile.yml from cv.md if changed
         run: |
           if [ -f cv.md ] && [ -s cv.md ]; then
-            python doctor.py --init || python doctor.py --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
+            python -m pulseops_pipeline.doctor --init || python -m pulseops_pipeline.doctor --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
           else
             echo "::warning::cv.md missing/empty — skipping profile sync (set CV_MD secret)"
             if [ ! -f config/profile.yml ] && [ -f config/profile.yml.example ]; then
@@ -146,7 +150,7 @@ jobs:
           ARGS=""
           if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
           if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
-          python main.py $ARGS
+          python -m pulseops_pipeline.main $ARGS
 
       - name: Browser auto-apply queued jobs (hands-off)
         if: always()
@@ -154,13 +158,13 @@ jobs:
           echo "::group::Browser auto-apply"
           if [ "${{ inputs.simulate }}" = "true" ]; then
             echo "simulate — running apply dry-run"
-            node portal/apply.mjs --dry-run || true
+            node apps/browser-apply/apply.mjs --dry-run || true
           elif [ "${{ inputs.live_apply }}" = "true" ]; then
             echo "live_apply=true — submitting with stored session"
-            node portal/apply.mjs --live --auto || echo "::warning::apply live failed (non-fatal)"
+            node apps/browser-apply/apply.mjs --live --auto || echo "::warning::apply live failed (non-fatal)"
           else
             echo "live cron defaults to preview-only (set live_apply=true on dispatch to submit)"
-            node portal/apply.mjs --dry-run || true
+            node apps/browser-apply/apply.mjs --dry-run || true
           fi
           echo "::endgroup::"
 

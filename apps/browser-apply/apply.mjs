@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..");
+const ROOT = path.resolve(__dirname, "../..");
 
 const DRY_RUN = !process.argv.includes("--live");
 const HEADED = process.argv.includes("--headed");

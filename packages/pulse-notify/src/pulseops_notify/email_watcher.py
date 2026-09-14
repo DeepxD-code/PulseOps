@@ -23,7 +23,7 @@ from email.header import decode_header
 from dotenv import load_dotenv
 load_dotenv()
 
-from persistence import db_manager as db
+from pulseops_store import db_manager as db
 
 BOUNCE_SUBJECT_RE = re.compile(r"(delivery status notification|undeliverable|address not found|mail delivery failed|returned mail|bounced|550 5\.1\.1|550 5\.4\.1)", re.IGNORECASE)
 BOUNCE_BODY_RE = re.compile(r"(550 5\.1\.1|address not found|recipient rejected|user unknown|mailbox unavailable|delivery has failed)", re.IGNORECASE)

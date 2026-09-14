@@ -20,12 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from exceptions import (
+from pulseops_core.exceptions import (
     OutsideSendWindowError, DailyCapReachedError, BlacklistMatchError,
     BounceThresholdReachedError,
 )
-from persistence import db_manager as db
-from persistence import audit_log
+from pulseops_store import db_manager as db
+from pulseops_store import audit_log
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -114,7 +114,7 @@ def _send_followup_email(to_email: str, subject: str, body: str,
     Returns True on success, raises on failure.
     """
     try:
-        from outreach.email_sender import send_smtp
+        from pulseops_outreach.email_sender import send_smtp
         sent = send_smtp(to_email=to_email, subject=subject, body=body)
         if sent:
             db.mark_followup_sent(outreach_id)

@@ -65,7 +65,11 @@ jobs:
           cache: "npm"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt --break-system-packages
+        run: |
+          pip install -r requirements.txt --break-system-packages
+          for pkg in packages/* apps/daily-pipeline apps/weekly-scan apps/dashboard; do
+            if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
+          done
 
       - name: Install Node dependencies + Playwright browser
         run: |
@@ -89,7 +93,7 @@ jobs:
       - name: Sync profile.yml from cv.md if changed
         run: |
           if [ -f cv.md ] && [ -s cv.md ]; then
-            python doctor.py --init || python doctor.py --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
+            python -m pulseops_pipeline.doctor --init || python -m pulseops_pipeline.doctor --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
           else
             echo "::warning::cv.md missing/empty — skipping profile sync (set CV_MD secret)"
             if [ ! -f config/profile.yml ] && [ -f config/profile.yml.example ]; then
@@ -103,7 +107,7 @@ jobs:
           ARGS=""
           if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
           if [ "${{ inputs.skip_liveness }}" = "true" ]; then ARGS="$ARGS --skip-liveness"; fi
-          python main_weekly.py $ARGS
+          python -m pulseops_weekly.main_weekly $ARGS
 
       - name: Commit state back to pulseops-state branch
         if: always()

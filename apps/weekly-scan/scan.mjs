@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..");
+const ROOT = path.resolve(__dirname, "../..");
 const PORTALS_PATH = path.join(__dirname, "portals.yml");
 const OUTPUT_PATH = path.join(ROOT, "temp_portal_jobs.json");
 

@@ -21,7 +21,7 @@ import re
 import time
 from pathlib import Path
 
-from exceptions import AllEnginesFailedError, EvaluationError, PreFilterRejectedError
+from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError, PreFilterRejectedError
 
 ROOT        = Path(__file__).resolve().parent.parent
 PROMPT_PATH = ROOT / "prompts" / "full_evaluation.txt"
@@ -71,7 +71,7 @@ def _build_prompt(job: dict, cv_data, memory_context: str,
     # Feedback loop context (non-negotiable #10: phone_screen+ only)
     feedback_context = ""
     try:
-        from persistence.db_manager import get_successful_bullets
+        from pulseops_store.db_manager import get_successful_bullets
         prev_bullets = get_successful_bullets()
         if prev_bullets:
             seen, uniq = set(), []

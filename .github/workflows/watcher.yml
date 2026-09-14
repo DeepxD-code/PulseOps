@@ -39,7 +39,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-      - run: pip install -r requirements.txt --break-system-packages
+      - run: |
+          pip install -r requirements.txt --break-system-packages
+          for pkg in packages/*; do
+            if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
+          done
       - env:
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
@@ -56,7 +60,7 @@ jobs:
       - run: |
           ARGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
-          python -m notifications.email_watcher $ARGS
+          python -m pulseops_notify.email_watcher $ARGS
       - if: always()
         run: |
           rm -rf .state

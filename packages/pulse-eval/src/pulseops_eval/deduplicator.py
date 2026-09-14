@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from persistence.db_manager import is_job_processed, normalise_company
+from pulseops_store.db_manager import is_job_processed, normalise_company
 
 SOURCE_PRIORITY = {"TheirStack": 3, "Google Jobs": 2, "LinkedIn": 1, "Mock": 0}
 

@@ -26,7 +26,7 @@ Environment variables:
   HUNTER_API_KEY     Your Hunter.io API key (free tier works)
 
 Usage (called by send_engine.py before G10):
-  from outreach.hunter import lookup_email
+  from pulseops_outreach.hunter import lookup_email
   result = lookup_email(domain="stripe.com", company="Stripe",
                         recruiter_name="Sarah Chen")  # name optional
   if result.email and result.sendable:
@@ -156,7 +156,7 @@ def _cache_result(company: str, result: HunterResult) -> None:
     if not result.email:
         return
     try:
-        from persistence.db_manager import cache_recruiter_profiles
+        from pulseops_store.db_manager import cache_recruiter_profiles
         cache_recruiter_profiles(company, [{
             "name": "",
             "title": "HR/Recruiting (Hunter.io)",
@@ -172,7 +172,7 @@ def _cache_result(company: str, result: HunterResult) -> None:
 def _check_cache(company: str, domain: str) -> HunterResult | None:
     """Return a cached result if one exists within the 14-day TTL."""
     try:
-        from persistence.db_manager import get_cached_recruiter_profiles
+        from pulseops_store.db_manager import get_cached_recruiter_profiles
         cached = get_cached_recruiter_profiles(company, ttl_days=14)
         if not cached:
             return None

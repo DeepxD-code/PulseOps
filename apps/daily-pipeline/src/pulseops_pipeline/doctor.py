@@ -145,7 +145,7 @@ def run_checks() -> bool:
           warn_only=True)
     if hunter_key:
         try:
-            from outreach.hunter import quota_remaining
+            from pulseops_outreach.hunter import quota_remaining
             remaining = quota_remaining()
             if remaining is not None:
                 check(f"Hunter.io quota", remaining > 0,
@@ -289,8 +289,8 @@ def init_profile() -> None:
 
     print(f"{INFO}Parsing cv.md...")
     try:
-        from core.cv_parser import parse_cv
-        from core.profile_builder import build_profile
+        from pulseops_core.cv_parser import parse_cv
+        from pulseops_core.profile_builder import build_profile
 
         cv_data = parse_cv(str(cv_path))
         n_projects = len(getattr(cv_data, "projects", []) or [])
@@ -315,9 +315,9 @@ def sync_profile() -> None:
 
     print(f"{INFO}Detecting cv.md changes...")
     try:
-        from core.cv_diff import compute_diff
-        from core.cv_parser import parse_cv
-        from core.profile_builder import build_profile
+        from pulseops_core.cv_diff import compute_diff
+        from pulseops_core.cv_parser import parse_cv
+        from pulseops_core.profile_builder import build_profile
 
         diff = compute_diff(str(cv_path))
         cv_data = parse_cv(str(cv_path))
@@ -338,7 +338,7 @@ def sync_profile() -> None:
 def apply_memories() -> None:
     """Review cv_candidate memories. Never auto-writes cv.md (Non-negotiable #4)."""
     try:
-        from persistence.db_manager import get_cv_candidates
+        from pulseops_store.db_manager import get_cv_candidates
 
         candidates = get_cv_candidates()
         if not candidates:
@@ -356,7 +356,7 @@ def apply_memories() -> None:
         print("This tool only flags candidates for YOUR review \u2014 it never edits cv.md.")
         print("Options: [a]cknowledge (you'll add it to cv.md yourself)  [d]ismiss  [s]kip\n")
 
-        from persistence.db_manager import get_connection
+        from pulseops_store.db_manager import get_connection
 
         for mem in candidates:
             resp = input(
@@ -396,7 +396,7 @@ def _is_send_paused() -> bool:
     if not (ROOT / "pulseops.db").exists():
         return False
     try:
-        from persistence.db_manager import get_send_paused
+        from pulseops_store.db_manager import get_send_paused
         return get_send_paused()
     except Exception:
         return False
@@ -404,7 +404,7 @@ def _is_send_paused() -> bool:
 
 def _check_migrations() -> None:
     try:
-        from persistence.db_manager import get_connection
+        from pulseops_store.db_manager import get_connection
         conn = get_connection()
         applied = {r[0] for r in conn.execute(
             "SELECT filename FROM migrations_applied").fetchall()}
@@ -426,7 +426,7 @@ def _get_pending_cv_candidates() -> list:
     if not (ROOT / "pulseops.db").exists():
         return []
     try:
-        from persistence.db_manager import get_cv_candidates
+        from pulseops_store.db_manager import get_cv_candidates
         return get_cv_candidates()
     except Exception:
         return []
@@ -436,14 +436,14 @@ def _get_stale_queue_items() -> list:
     if not (ROOT / "pulseops.db").exists():
         return []
     try:
-        from persistence.db_manager import get_stale_queue_items
+        from pulseops_store.db_manager import get_stale_queue_items
         return get_stale_queue_items(days=3)
     except Exception:
         return []
 
 
 def _clear_cv_candidate_flag(memory_id: int) -> None:
-    from persistence.db_manager import get_connection
+    from pulseops_store.db_manager import get_connection
     conn = get_connection()
     try:
         conn.execute("UPDATE memories SET cv_candidate=0 WHERE id=?", (memory_id,))
@@ -453,7 +453,7 @@ def _clear_cv_candidate_flag(memory_id: int) -> None:
 
 
 def _deactivate_memory(memory_id: int) -> None:
-    from persistence.db_manager import get_connection
+    from pulseops_store.db_manager import get_connection
     conn = get_connection()
     try:
         conn.execute("UPDATE memories SET active=0 WHERE id=?", (memory_id,))

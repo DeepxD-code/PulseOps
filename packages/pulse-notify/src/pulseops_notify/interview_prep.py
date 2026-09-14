@@ -12,10 +12,10 @@ Runs as part of Phase 9 in main.py after reply detection.
 """
 
 import os
-from exceptions import TelegramError
-from persistence import db_manager as db
-from persistence import audit_log
-from notifications import notifier
+from pulseops_core.exceptions import TelegramError
+from pulseops_store import db_manager as db
+from pulseops_store import audit_log
+from pulseops_notify import notifier
 
 
 def check_and_send_prep_packs(
@@ -70,7 +70,7 @@ def check_and_send_prep_packs(
         # Discord notification
         if webhook_url:
             try:
-                from notifications.discord import send_discord_prep_pack
+                from pulseops_notify.discord import send_discord_prep_pack
                 send_discord_prep_pack(
                     company=company, title=title,
                     star_stories=star_stories, comp_research=comp_research,
