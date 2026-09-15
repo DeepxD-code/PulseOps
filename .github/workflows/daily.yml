@@ -97,6 +97,7 @@ jobs:
 
       - name: Write secrets to disk (per-secret, no ENV_FILE blob)
         env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
           AUTO_SEND_EMAILS: ${{ secrets.AUTO_SEND_EMAILS }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
@@ -114,6 +115,13 @@ jobs:
           BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
           CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
         run: |
+          # Legacy fallback: old ENV_FILE blob still holds SMTP creds until migrated.
+          if [ -z "${SMTP_PASSWORD:-}" ] && [ -n "${ENV_FILE:-}" ]; then
+            SMTP_PASSWORD="$(printf '%s' "$ENV_FILE" | grep -m1 '^SMTP_PASSWORD=' | cut -d= -f2-)"
+            IMAP_PASSWORD="${IMAP_PASSWORD:-$(printf '%s' "$ENV_FILE" | grep -m1 '^IMAP_PASSWORD=' | cut -d= -f2-)}"
+            SMTP_EMAIL="${SMTP_EMAIL:-$(printf '%s' "$ENV_FILE" | grep -m1 '^SMTP_EMAIL=' | cut -d= -f2-)}"
+            echo "::notice::SMTP creds restored from legacy ENV_FILE blob — migrate to per-secret"
+          fi
           {
             echo "AUTO_SEND_EMAILS=${AUTO_SEND_EMAILS:-false}";
             echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
