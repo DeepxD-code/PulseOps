@@ -84,11 +84,16 @@ jobs:
           fi
           cp -r logs/. .state/logs/ 2>/dev/null || true
           cd .state
+          STATE_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git init -q
           git checkout -B pulseops-state
           git config user.name "pulseops-bot"
           git config user.email "pulseops-bot@users.noreply.github.com"
+          git remote add origin "$STATE_URL" 2>/dev/null || true
+          git fetch -q origin pulseops-state 2>/dev/null || true
           git add -A
           if git diff --cached --quiet; then echo "nothing changed"; exit 0; fi
           git commit -q -m "watcher: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:pulseops-state --force-with-lease
+          git push -q "$STATE_URL" HEAD:pulseops-state --force-with-lease \
+            || git push -q "$STATE_URL" HEAD:pulseops-state --force \
+            || echo "::warning::state push failed (non-fatal)"
