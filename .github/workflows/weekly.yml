@@ -93,6 +93,8 @@ jobs:
           {
             echo "GEMINI_API_KEY=${GEMINI_API_KEY:-}";
             echo "GROQ_API_KEY=${GROQ_API_KEY:-}";
+            echo "SEARCHAPI_API_KEY=${SEARCHAPI_API_KEY:-}";
+            echo "THEIRSTACK_API_KEY=${THEIRSTACK_API_KEY:-}";
             echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}";
             echo "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}";
             echo "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}";
