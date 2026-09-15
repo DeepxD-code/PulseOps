@@ -32,8 +32,14 @@ from pathlib import Path
 
 from pulseops_core.exceptions import ResumeBuildError
 
-ROOT        = Path(__file__).resolve().parent.parent
-TEMPLATE    = ROOT / "templates" / "resume.html.jinja2"
+try:
+    from pulseops_config.paths import TEMPLATES_DIR, repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parent.parent
+    TEMPLATES_DIR = ROOT / "templates"
+TEMPLATE    = TEMPLATES_DIR / "resume.html.jinja2"
 OUTPUT_PDF  = ROOT / "output" / "pdf"
 OUTPUT_HTML = ROOT / "output" / "html"
 
@@ -58,7 +64,7 @@ def _make_env():
         raise ResumeBuildError("Jinja2 not installed — run: pip install jinja2") from e
 
     env = Environment(
-        loader=FileSystemLoader(str(ROOT / "templates")),
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
         autoescape=select_autoescape(["html"]),
     )
 

@@ -44,7 +44,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-ROOT = Path(__file__).parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 
 
 def _header(title: str) -> None:
@@ -64,7 +69,8 @@ def _load_settings() -> dict:
     try:
         import yaml
         for p in [ROOT / "config" / "settings.yml",
-                   ROOT / "config" / "settings.yml.example"]:
+                   ROOT / "config" / "settings.yml.example",
+                   ROOT / "packages" / "pulse-config" / "config" / "settings.yml.example"]:
             if p.exists():
                 with open(p) as f:
                     data = yaml.safe_load(f) or {}
@@ -81,7 +87,8 @@ def _load_profile() -> dict:
     try:
         import yaml
         for p in [ROOT / "config" / "profile.yml",
-                  ROOT / "config" / "profile.yml.example"]:
+                  ROOT / "config" / "profile.yml.example",
+                  ROOT / "packages" / "pulse-config" / "config" / "profile.yml.example"]:
             if p.exists():
                 with open(p) as f:
                     data = yaml.safe_load(f) or {}

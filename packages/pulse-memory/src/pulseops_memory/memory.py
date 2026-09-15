@@ -21,7 +21,12 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 
 

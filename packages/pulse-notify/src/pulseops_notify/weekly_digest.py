@@ -25,7 +25,12 @@ from pulseops_store import db_manager as db
 
 from pulseops_notify import notifier
 
-ROOT = Path(__file__).resolve().parent.parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 
 
 def _format_rate(d: dict) -> str:

@@ -35,7 +35,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-ROOT = Path(__file__).parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 TEMP_PORTAL_JSON = ROOT / "temp_portal_jobs.json"
 
 
@@ -390,7 +395,8 @@ def _finish(run_id: str, stats: dict, start: float) -> None:
 
 def _load_settings() -> dict:
     import yaml
-    for p in [ROOT / "config" / "settings.yml", ROOT / "config" / "settings.yml.example"]:
+    for p in [ROOT / "config" / "settings.yml", ROOT / "config" / "settings.yml.example",
+                ROOT / "packages" / "pulse-config" / "config" / "settings.yml.example"]:
         if p.exists():
             try:
                 with open(p) as f:
@@ -406,7 +412,8 @@ def _load_settings() -> dict:
 def _load_profile() -> dict:
     import yaml
     for p in [ROOT / "config" / "profile.yml",
-              ROOT / "config" / "profile.yml.example"]:
+              ROOT / "config" / "profile.yml.example",
+              ROOT / "packages" / "pulse-config" / "config" / "profile.yml.example"]:
         if p.exists():
             try:
                 with open(p) as f:

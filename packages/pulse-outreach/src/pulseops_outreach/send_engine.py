@@ -49,7 +49,12 @@ from pulseops_core.exceptions import (
 from pulseops_store import audit_log
 from pulseops_store import db_manager as db
 
-ROOT = Path(__file__).resolve().parent.parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

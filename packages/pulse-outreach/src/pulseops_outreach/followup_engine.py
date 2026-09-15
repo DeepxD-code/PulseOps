@@ -28,11 +28,17 @@ from pulseops_core.exceptions import (
 from pulseops_store import audit_log
 from pulseops_store import db_manager as db
 
-ROOT = Path(__file__).resolve().parent.parent
+try:
+    from pulseops_config.paths import PROMPTS_DIR, repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parent.parent
+    PROMPTS_DIR = ROOT / "prompts"
 
 
 def _load_prompt_template() -> str:
-    p = ROOT / "prompts" / "followup.txt"
+    p = PROMPTS_DIR / "followup.txt"
     if p.exists():
         return p.read_text(encoding="utf-8")
     # Inline fallback so the engine works even before prompts/ is populated

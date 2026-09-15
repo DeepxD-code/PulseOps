@@ -26,9 +26,15 @@ import yaml  # type: ignore
 
 from pulseops_core.exceptions import ProfileBuildError
 
-ROOT         = Path(__file__).resolve().parent.parent
+try:
+    from pulseops_config.paths import PROMPTS_DIR, repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parent.parent
+    PROMPTS_DIR = ROOT / "prompts"
 PROFILE_PATH = ROOT / "config" / "profile.yml"
-PROMPT_PATH  = ROOT / "prompts" / "profile_builder.txt"
+PROMPT_PATH = PROMPTS_DIR / "profile_builder.txt"
 
 # Hard-coded domain config (spec: candidate domain, pre-configured, do not change)
 _DOMAIN_BASE = {
