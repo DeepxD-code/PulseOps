@@ -23,8 +23,14 @@ from pathlib import Path
 
 from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError
 
-ROOT        = Path(__file__).resolve().parent.parent
-PROMPT_PATH = ROOT / "prompts" / "full_evaluation.txt"
+try:
+    from pulseops_config.paths import PROMPTS_DIR, repo_root
+
+    ROOT = repo_root()
+    PROMPT_PATH = PROMPTS_DIR / "full_evaluation.txt"
+except ImportError:  # source-tree fallback without installed packages
+    ROOT = Path(__file__).resolve().parent.parent
+    PROMPT_PATH = ROOT / "prompts" / "full_evaluation.txt"
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
 

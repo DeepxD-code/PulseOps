@@ -22,7 +22,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ROOT = Path(__file__).parent
+try:
+    from pulseops_config.paths import repo_root
+
+    ROOT = repo_root()
+except ImportError:
+    ROOT = Path(__file__).resolve().parents[4]
 
 REQUIRED_DIRS = [
     "output/pdf", "output/html", "output/prep",

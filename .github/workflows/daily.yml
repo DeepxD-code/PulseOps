@@ -115,7 +115,9 @@ jobs:
         run: |
           {
             echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
+            echo "SMTP_PASSWORD=${SMTP_PASSWORD:-}";
             echo "IMAP_EMAIL=${IMAP_EMAIL:-$SMTP_EMAIL}";
+            echo "IMAP_PASSWORD=${IMAP_PASSWORD:-}";
             echo "GEMINI_API_KEY=${GEMINI_API_KEY:-}";
             echo "GROQ_API_KEY=${GROQ_API_KEY:-}";
             echo "SEARCHAPI_API_KEY=${SEARCHAPI_API_KEY:-}";
@@ -128,6 +130,11 @@ jobs:
           if [ -n "$SETTINGS_YML" ]; then printf '%s' "$SETTINGS_YML" > config/settings.yml; else echo "::warning::SETTINGS_YML secret empty — using config/settings.yml.example"; fi
           if [ -n "$BLACKLIST_TXT" ]; then printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt; fi
           if [ -n "$CONTACTS_YML" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
+          for f in profile.yml.example settings.yml.example blacklist.txt.example contacts.yml.example; do
+            if [ ! -f "config/$f" ] && [ -f "packages/pulse-config/config/$f" ]; then
+              cp "packages/pulse-config/config/$f" "config/$f"
+            fi
+          done
 
       - name: doctor.py --check (non-blocking — informational)
         run: python -m pulseops_pipeline.doctor --check || true

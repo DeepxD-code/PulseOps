@@ -233,7 +233,7 @@ class PulseOpsScraper:
                     "job_title_or":        titles,
                     "posted_at_gte":       posted_since,
                     "job_country_code_or": [country_code],
-                    "limit":               50,
+                    "limit":               25,  # free plan caps at 25/page (E-020)
                     "order_by": [{"desc": True, "field": "date_posted"}],
                 },
                 timeout=20,

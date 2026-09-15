@@ -20,8 +20,14 @@ from typing import Any
 
 from pulseops_core.exceptions import MemoryParseError
 
-ROOT        = Path(__file__).resolve().parent.parent
-PROMPT_PATH = ROOT / "prompts" / "memory_parser.txt"
+try:
+    from pulseops_config.paths import PROMPTS_DIR, repo_root
+
+    ROOT = repo_root()
+    PROMPT_PATH = PROMPTS_DIR / "memory_parser.txt"
+except ImportError:
+    ROOT = Path(__file__).resolve().parent.parent
+    PROMPT_PATH = ROOT / "prompts" / "memory_parser.txt"
 
 # The valid action values (spec)
 VALID_ACTIONS = frozenset(
