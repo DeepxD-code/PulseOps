@@ -97,6 +97,7 @@ jobs:
 
       - name: Write secrets to disk (per-secret, no ENV_FILE blob)
         env:
+          AUTO_SEND_EMAILS: ${{ secrets.AUTO_SEND_EMAILS }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           IMAP_EMAIL: ${{ secrets.IMAP_EMAIL }}
@@ -114,6 +115,7 @@ jobs:
           CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
         run: |
           {
+            echo "AUTO_SEND_EMAILS=${AUTO_SEND_EMAILS:-false}";
             echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
             echo "SMTP_PASSWORD=${SMTP_PASSWORD:-}";
             echo "IMAP_EMAIL=${IMAP_EMAIL:-$SMTP_EMAIL}";

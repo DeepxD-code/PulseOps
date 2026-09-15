@@ -300,11 +300,6 @@ def _linkedin_people_emails(company: str, domain: str) -> list[str]:
                     break
         except Exception:
             continue
-    # 2. Fallback: generate for common founder patterns if no names found (use LinkedIn search hint)
-    # We don't call LinkedIn API (needs auth) — generate plausible hiring contacts
-    if not candidates and domain != "unknown.com":
-        for prefix in ["hiring", "talent", "hr", "recruiting", "jobs", "founders"]:
-            candidates.append(f"{prefix}@{domain}")
     return list(dict.fromkeys(candidates))[:3]
 
 def _check_g10_contact(
@@ -335,7 +330,7 @@ def _check_g10_contact(
 
     raise NoContactEmailError(
         f"G10: no verified email found for '{company}' domain '{domain}' "
-        f"(JD: none, Hunter.io: none/low-confidence)"
+        f"(JD: none, company-site scrape: none)"
     )
 
 
