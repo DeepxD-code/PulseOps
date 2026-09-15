@@ -27,6 +27,35 @@ def test_g1_blocks_low_score():
     assert r["action"] == "SKIP" and r["guardrail"] == "G1"
 
 
+def test_searchapi_lookup_keeps_only_domain_matched(monkeypatch):
+    import os
+    from unittest.mock import MagicMock
+
+    from pulseops_outreach import send_engine as se
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "organic_results": [
+            {"title": "Contact us", "snippet": "Mail us at careers@acme.com for jobs"},
+            {"title": "Random", "snippet": "Write to boss@evil.com instead"},
+        ]
+    }
+    monkeypatch.setenv("SEARCHAPI_API_KEY", "test-key")
+    monkeypatch.setattr("requests.get", lambda *a, **k: resp)
+    out = se._searchapi_company_emails("acme.com", "Acme")
+    assert out == ["careers@acme.com"], out
+
+
+def test_searchapi_lookup_no_key_returns_empty(monkeypatch):
+    import os
+
+    from pulseops_outreach import send_engine as se
+
+    monkeypatch.delenv("SEARCHAPI_API_KEY", raising=False)
+    assert se._searchapi_company_emails("acme.com", "Acme") == []
+
+
 def test_g10_no_unverified_fallback():
     from pulseops_outreach.send_engine import decide_send
     from pulseops_store import db_manager as db
