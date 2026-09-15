@@ -2,5 +2,10 @@
   "name": "@pulseops/browser-apply",
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "apply": "node apply.mjs --dry-run" }
+  "scripts": {
+    "apply": "node apply.mjs --dry-run",
+    "apply:live": "node apply.mjs --live --headed --auto",
+    "find": "node linkedin_outreach.mjs --dry-run",
+    "find:live": "node linkedin_outreach.mjs --live --headed"
+  }
 }
