@@ -28,7 +28,24 @@ from bs4 import BeautifulSoup
 
 from pulseops_core.exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
 
-ROOT = Path(__file__).resolve().parent.parent
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for p in [here, *here.parents]:
+        if (p / ".git").exists():
+            return p
+    return here.parents[4]  # installed layout fallback: <root>/packages/pulse-core/src
+
+
+ROOT = _repo_root()
+# New Tier-2 location first, old flat layout as fallback.
+_BRIDGE_CANDIDATES = [
+    ROOT / "apps" / "weekly-scan" / "linkedin_bridge.js",
+    ROOT / "linkedin_bridge.js",
+]
+_TEMP_CANDIDATES = [
+    ROOT / "apps" / "weekly-scan" / "temp_linkedin_jobs.json",
+    ROOT / "temp_linkedin_jobs.json",
+]
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
 
@@ -68,10 +85,10 @@ class PulseOpsScraper:
     # ── LinkedIn (Node.js bridge) ─────────────────────────────────────────
 
     def fetch_linkedin(self) -> list[dict]:
-        bridge    = ROOT / "linkedin_bridge.js"
-        temp_json = ROOT / "temp_linkedin_jobs.json"
+        bridge = next((p for p in _BRIDGE_CANDIDATES if p.exists()), None)
+        temp_json = next((p for p in _TEMP_CANDIDATES if p.exists()), _TEMP_CANDIDATES[0])
 
-        if not bridge.exists():
+        if not bridge:
             print("  [!] linkedin_bridge.js not found — skipping LinkedIn source")
             return []
 
