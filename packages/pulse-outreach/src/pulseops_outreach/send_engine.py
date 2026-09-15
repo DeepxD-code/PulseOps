@@ -276,6 +276,71 @@ def _scrape_company_emails(domain: str, company: str = "") -> list[str]:
     ranked.sort(key=_pri)
     return ranked
 
+def _searchapi_company_emails(domain: str, company: str = "") -> list[str]:
+    """Web-search the company for REAL published contact emails (never fabricated).
+
+    Uses SearchApi web search to find the company's contact/careers pages,
+    then keeps only addresses actually published on pages of that domain.
+    """
+    import os
+
+    api_key = os.getenv("SEARCHAPI_API_KEY", "")
+    if not api_key or not domain or "." not in domain or domain == "unknown.com":
+        return []
+    try:
+        import requests
+
+        texts: list[str] = []
+        queries = [f"site:{domain} contact OR email OR careers"]
+        if company:
+            queries.append(f'"{company}" (info@ OR careers@ OR jobs@ OR hr@)')
+        for q in queries[:2]:
+            try:
+                r = requests.get(
+                    "https://www.searchapi.io/api/v1/search",
+                    params={"engine": "google", "q": q, "api_key": api_key},
+                    timeout=15,
+                )
+                if r.status_code != 200:
+                    continue
+                for item in (r.json().get("organic_results", []) or [])[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    texts.append(f"{item.get('title', '')} {item.get('snippet', '')}")
+            except Exception:
+                continue
+        dom_low = domain.lower()
+        found: list[str] = []
+        for t in texts:
+            for m in _re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", t):
+                _tld = m.rsplit(".", 1)[-1]
+                if len(_tld) < 2 or not _tld.isalpha():
+                    continue
+                # Only addresses published for THIS company's domain — never guesses.
+                if m.lower().endswith("@" + dom_low) and any(
+                    k in m.lower()
+                    for k in ["info@", "careers@", "jobs@", "hr@", "contact@", "hiring@", "talent@"]
+                ):
+                    found.append(m)
+        seen: set[str] = set()
+        ranked = [e for e in found if not (e.lower() in seen or seen.add(e.lower()))]
+
+        def _pri(e: str) -> int:
+            e_low = e.lower()
+            for i, k in enumerate(["careers@", "jobs@", "hiring@", "hr@", "info@"]):
+                if k in e_low:
+                    return i
+            return 5
+
+        ranked.sort(key=_pri)
+        if ranked:
+            print(f"  [G10] SearchApi found published: {ranked[0]} for {company}")
+        return ranked
+    except Exception as e:
+        print(f"  [G10] SearchApi lookup failed (non-fatal): {e}")
+        return []
+
+
 def _linkedin_people_emails(company: str, domain: str) -> list[str]:
     """DEPRECATED (boss round-3): pattern generation disabled — always returns []."""
     return []
@@ -313,10 +378,11 @@ def _check_g10_contact(
     """
     G10: Returns the best available email address to send to.
 
-    Priority order (verified-only, boss round-2):
+    Priority order (verified-only, boss round-2 + SearchApi lookup):
       1. Explicit email from JD text (LLM-extracted)
       2. Scrape company website for info@/careers@/jobs@/hr@ (real page)
-      3. Raise NoContactEmailError (no pattern/contact@ guesses)
+      3. SearchApi web lookup for published company emails (real, domain-matched)
+      4. Raise NoContactEmailError (no pattern/contact@ guesses)
     """
     # Priority 1: explicit email found in JD
     if contact_email and "@" in contact_email:
@@ -328,9 +394,14 @@ def _check_g10_contact(
         print(f"  [G10] scraped company site: {scraped[0]} from {domain}")
         return scraped[0]
 
+    # Priority 3: SearchApi web lookup for published company emails (real only)
+    searched = _searchapi_company_emails(domain, company)
+    if searched:
+        return searched[0]
+
     raise NoContactEmailError(
         f"G10: no verified email found for '{company}' domain '{domain}' "
-        f"(JD: none, company-site scrape: none)"
+        f"(JD: none, company-site scrape: none, web lookup: none)"
     )
 
 
