@@ -68,28 +68,37 @@ async function findPeople(page, company) {
     const a = document.querySelector('a[href*="/company/"]');
     return a ? a.getAttribute("href") : null;
   });
-  if (!companyHref) return { error: "company-not-found", people: [] };
+  if (!companyHref) {
+    console.log(`  [debug] search URL now: ${page.url().slice(0, 100)}`);
+    return { error: "company-not-found", people: [] };
+  }
+  console.log(`  [debug] company page: ${companyHref}`);
   const slug = companyHref.split("/company/")[1].split("/")[0];
-  // 2. People tab
+  // 2. People tab — scroll to load the employee list, ignore "follows" cards
   await page.goto(`https://www.linkedin.com/company/${slug}/people/`, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page.waitForTimeout(2500);
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(() => window.scrollBy(0, 1200));
+    await page.waitForTimeout(1200);
+  }
   const people = await page.evaluate(() => {
     const out = [];
-    for (const a of document.querySelectorAll('a[href*="/in/"]')) {
+    const scope = document.querySelector("main") || document;
+    for (const a of scope.querySelectorAll('a[href*="/in/"]')) {
       const href = a.getAttribute("href").split("?")[0];
       const text = (a.textContent || "").trim().replace(/\s+/g, " ");
       if (!href || !text || text.length < 3 || text.length > 80) continue;
+      if (/follow/i.test(text)) continue;
       if (out.some((p) => p.url === href)) continue;
-      // headline: nearest subtitle element
       let head = "";
-      const card = a.closest("div");
-      const sub = card?.parentElement?.querySelector("div[class*='subtitle'], div[class*='headline'], p");
-      if (sub) head = (sub.textContent || "").trim().slice(0, 120);
+      const card = a.closest("li, div");
+      const sub = card?.parentElement?.querySelector("div[class*='subtitle'], div[class*='headline'], p.t-14");
+      if (sub && sub !== a) head = (sub.textContent || "").trim().slice(0, 120);
       out.push({ name: text, url: href.startsWith("http") ? href : `https://www.linkedin.com${href}`, headline: head });
       if (out.length >= 12) break;
     }
     return out;
   });
+  console.log(`  [debug] raw people cards: ${people.length}`);
   // 3. Prefer hiring-adjacent titles, else first two
   const scored = people.map((p) => ({
     ...p,
@@ -100,18 +109,133 @@ async function findPeople(page, company) {
 
 async function sendDM(page, person, text) {
   await page.goto(person.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(800);
+  const firstName = (person.name || "").split(" ")[0];
+  // Click a header-scoped button by exact label. The header is the SECTION
+  // containing the "Contact info" link (right-rail cards never have it).
+  // Returns true if clicked, false if not found. Never touches right rail.
+  async function clickHeaderButton(label) {
+    return await page.evaluate((labelText) => {
+      const ci = Array.from(document.querySelectorAll("a")).find(
+        (a) => (a.textContent || "").trim() === "Contact info"
+      );
+      if (!ci) return false;
+      let sec = ci;
+      for (let i = 0; i < 10 && sec; i++) {
+        sec = sec.parentElement;
+        if (sec && sec.tagName === "SECTION") break;
+      }
+      if (!sec || sec.tagName !== "SECTION") return false;
+      const btn = Array.from(sec.querySelectorAll("a, button")).find(
+        (el) => (el.innerText || "").trim() === labelText
+      );
+      if (!btn) return false;
+      btn.scrollIntoView({ block: "center" });
+      btn.click();
+      return true;
+    }, label);
+  }
+  const msgClicked = await clickHeaderButton("Message");
+  if (!msgClicked) return { sent: false, reason: "no-message-button (not a connection / InMail only)" };
   await page.waitForTimeout(2000);
-  const msgBtn = page.locator('button:has-text("Message"), a:has-text("Message")').first();
-  if ((await msgBtn.count()) === 0) return { sent: false, reason: "no-message-button (not a connection / InMail only)" };
-  await msgBtn.click({ timeout: 5000 }).catch(() => {});
-  await page.waitForTimeout(1500);
-  const box = page.locator('div[role="dialog"] div[contenteditable="true"], div[role="dialog"] textarea, div.msg-form__contenteditable').first();
-  if ((await box.count()) === 0) return { sent: false, reason: "message-box-not-found" };
+  console.log(`  [debug] after Message click: ${page.url().slice(0, 110)}`);
+  // Wait for the messaging overlay (right-side pane), not a modal dialog
+  const boxSel = [
+    "aside div.msg-form__contenteditable[contenteditable='true']",
+    "div.msg-overlay div[contenteditable='true']",
+    "div[role='dialog'] div[contenteditable='true']",
+    "div[role='dialog'] textarea",
+    "div.msg-form__contenteditable",
+  ].join(", ");
+  let box = null;
+  for (let i = 0; i < 8; i++) {
+    await page.waitForTimeout(1000);
+    const cand = page.locator(boxSel).first();
+    if ((await cand.count()) > 0) {
+      box = cand;
+      break;
+    }
+  }
+  // Dismiss Premium upsell if Message click opened that instead of a composer
+  const premium = page.locator("div[role='dialog']:has-text('Start 1 month free trial'), div[role='dialog']:has-text('Invest in your career')").first();
+  if ((await premium.count()) > 0) {
+    console.log("  [dm] Premium paywall — direct Message needs Premium; closing modal");
+    await page.locator("div[role='dialog'] button[aria-label='Dismiss']").first().click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+  }
+  if (!box) {
+    // 3rd-degree profiles: Message won't open — fall back to Connect with a note (300 chars)
+    console.log("  [dm] no message overlay — trying Connect with note");
+    let connected = await clickHeaderButton("Connect");
+    if (!connected) {
+      // Connect often hides under the "..." overflow menu (header "More actions")
+      const moreClicked = await clickHeaderButton("More");
+      if (moreClicked) {
+        await page.waitForTimeout(1200);
+        const inMenu = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll("div[role='dialog'] button, div.artdeco-dropdown button, div[role='menu'] div[role='menuitem']"));
+          const c = items.find((el) => (el.innerText || "").trim() === "Connect");
+          if (!c) return false;
+          c.click();
+          return true;
+        });
+        connected = inMenu;
+      }
+    }
+    if (!connected) {
+      // Creator mode: no Connect at all — Follow is free and keeps us on their radar
+      if (await clickHeaderButton("Follow")) {
+        await page.waitForTimeout(1000);
+        return { sent: false, reason: "premium-required-no-connect (followed instead)", followed: true };
+      }
+      return { sent: false, reason: "premium-required-no-connect" };
+    }
+    await page.waitForTimeout(2500);
+    await page.screenshot({ path: path.join(ROOT, "output", `connect-modal-${Date.now()}.png`), fullPage: false }).catch(() => {});
+    const addNote = page.locator('button[aria-label="Add a note"], button:has-text("Add a note")').first();
+    if ((await addNote.count()) === 0) {
+      // No note option — plain connect invite
+      const sendInv = page.locator('button[aria-label="Send without a note"], button:has-text("Send without a note"), button[aria-label="Send now"], button:has-text("Send now"), button[aria-label="Send invitation"]').first();
+      if ((await sendInv.count()) > 0 && !DRY_RUN) {
+        // Safety: modal must name THIS person, never a right-rail stranger
+        const modalText = await page.locator("div[role='dialog']").first().innerText().catch(() => "");
+        if (!modalText.toLowerCase().includes(firstName.toLowerCase())) {
+          console.log(`  [dm] modal is not for ${firstName} — aborting click`);
+          return { sent: false, reason: "modal-person-mismatch" };
+        }
+        await sendInv.click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+        return { sent: true, via: "connect-invite-no-note" };
+      }
+      return { sent: false, reason: "connect-no-note-option" };
+    }
+    await addNote.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    const noteBox = page.locator('textarea[name="message"], div[role="dialog"] textarea').first();
+    if ((await noteBox.count()) === 0) return { sent: false, reason: "note-box-not-found" };
+    await noteBox.fill(text.slice(0, 290), { timeout: 8000 }).catch(() => null);
+    await page.waitForTimeout(500);
+    if (DRY_RUN) return { sent: false, reason: "dry-run" };
+    const sendBtn = page.locator('button[aria-label="Send invitation"], button:has-text("Send invitation")').first();
+    if ((await sendBtn.count()) === 0) return { sent: false, reason: "invite-send-not-found" };
+    const modalText2 = await page.locator("div[role='dialog']").first().innerText().catch(() => "");
+    if (!modalText2.toLowerCase().includes(firstName.toLowerCase())) {
+      console.log(`  [dm] modal is not for ${firstName} — aborting click`);
+      return { sent: false, reason: "modal-person-mismatch" };
+    }
+    await sendBtn.click({ timeout: 5000 });
+    await page.waitForTimeout(1500);
+    return { sent: true, via: "connect-with-note" };
+  }
   await box.click({ timeout: 5000 }).catch(() => {});
-  await box.fill(text.slice(0, 700), { timeout: 10000 }).catch(() => null);
+  await page.keyboard.type(text.slice(0, 700), { delay: 10 }).catch(() => null);
   await page.waitForTimeout(800);
   if (DRY_RUN) return { sent: false, reason: "dry-run" };
-  const send = page.locator('div[role="dialog"] button:has-text("Send"), button.msg-form__send-button').first();
+  const send = page.locator(
+    "aside button.msg-form__send-button:not([disabled]), div[role='dialog'] button:has-text('Send'), button.msg-form__send-button"
+  ).first();
   if ((await send.count()) === 0) return { sent: false, reason: "send-button-not-found" };
   const disabled = await send.isDisabled().catch(() => false);
   if (disabled) return { sent: false, reason: "send-disabled" };
@@ -215,8 +339,8 @@ async function main() {
           dm = { sent: false, reason: e.message.slice(0, 80) };
         }
       }
-      console.log(`  [dm] sent=${dm.sent} ${dm.reason || ""}`);
-      lines.push(`• **${person.name}** (${person.headline || "member"})\n  <${person.url}>\n  Draft: ${draft.slice(0, 200)}${dm.sent ? "\n  ✅ **Message sent via LinkedIn**" : `\n  ⏳ Not sent (${dm.reason}) — draft above, please send by hand`}`);
+      console.log(`  [dm] sent=${dm.sent} ${dm.via || dm.reason || ""}`);
+      lines.push(`• **${person.name}** (${person.headline || "member"})\n  <${person.url}>\n  Draft: ${draft.slice(0, 200)}${dm.sent ? `\n  ✅ **Sent via LinkedIn (${dm.via || "dm"})**` : `\n  ⏳ Not sent (${dm.reason}) — draft above, please send by hand`}`);
       results.push({ job, person, dm: dm.sent, reason: dm.reason });
     }
     await notifyDiscord(lines);

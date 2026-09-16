@@ -12,10 +12,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..");
-const STORAGE = path.join(__dirname, "storageState.json");
+const ROOT = path.resolve(__dirname, "../..");
+const STORAGE = path.join(ROOT, "portal", "storageState.json");
 
 const SITES = [
+  "https://www.linkedin.com/login",
   "https://www.naukri.com",
   "https://in.indeed.com/jobs?q=backend+developer+intern&l=India",
   "https://www.glassdoor.co.in/Job/india-backend-developer-intern-jobs-SRCH_KO0,27.htm",
@@ -52,6 +53,7 @@ console.log("\n>>> Log in now in the opened windows (keep them open)");
 console.log(">>> When done, press ENTER here to save session to portal/storageState.json");
 await new Promise(resolve => { process.stdin.resume(); process.stdin.once('data', ()=>resolve()); });
 
+fs.mkdirSync(path.dirname(STORAGE), { recursive: true });
 await context.storageState({ path: STORAGE });
 console.log(`\nSaved ${STORAGE} (${fs.statSync(STORAGE).size} bytes)`);
 console.log("Local-only: keep portal/storageState.json on this machine (gitignored). CI uses NAUKRI_STORAGE_GZ (gzip+base64) — see daily.yml Restore Naukri session step.");
