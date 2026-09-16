@@ -221,9 +221,25 @@ async function detectAndClickApply(page, ats) {
     const el = page.locator(sel).first();
     if (await el.count() > 0) {
       const href = await el.getAttribute("href").catch(()=>null);
-      console.log(`    [found] Apply → ${sel} href=${href?.slice(0,80)}`);
-      // If it's a link to actual application form, navigate; if button, click
-      if (href && href.startsWith("http")) {
+      const label = ((await el.innerText().catch(()=> "")) || "").trim().slice(0, 40);
+      console.log(`    [found] Apply → ${sel} "${label}" href=${href?.slice(0,80)}`);
+      // Easy Apply / modal triggers must be CLICKED (their href is a search URL, not the form).
+      // LinkedIn: use the DETAIL pane button, never a list-card anchor (those navigate away).
+      if (/easy apply/i.test(label + " " + sel)) {
+        if (ats === "linkedin") {
+          const detail = page.locator("div.jobs-details button:has-text('Easy Apply'), div.jobs-search__job-details button:has-text('Easy Apply'), button.jobs-apply-button").first();
+          if ((await detail.count()) > 0) {
+            console.log("    [easy-apply] clicking detail-pane button");
+            await detail.click({ timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(2500);
+          } else {
+            console.log("    [easy-apply] detail button not found — skipping click (would navigate away)");
+          }
+        } else {
+          await el.click({ timeout: 5000 }).catch(()=>{});
+          await page.waitForTimeout(2500);
+        }
+      } else if (href && href.startsWith("http")) {
         await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
       } else if (href && href.startsWith("/")) {
         await el.click({ timeout: 5000 }).catch(()=>{});
@@ -296,6 +312,16 @@ async function processJob(browser, job, profile) {
     console.log(`  [nav] goto ${url.slice(0,90)}`);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(1500);
+    // Dead-listing guard: never attempt submits on 404/expired job pages
+    const deadHit = await page.evaluate(() => {
+      const t = (document.body?.innerText || "").slice(0, 2000);
+      return /404|no longer exists|no longer available|job (has )?expired|position (has been )?filled|this job is no longer/i.test(t);
+    }).catch(() => false);
+    if (deadHit) {
+      console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
+      await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
+    }
 
     // Detect Cloudflare / CAPTCHA
     const captchaSel = 'iframe[src*="captcha"] , [data-testid="captcha"], .cf-challenge';
@@ -322,6 +348,20 @@ async function processJob(browser, job, profile) {
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
     console.log(`  [preview] screenshot → ${path.relative(ROOT, screenshotPath)}`);
     console.log(`  [preview] form URL: ${page.url().slice(0,120)}`);
+
+    // LinkedIn Easy Apply is multi-step: Next (x N) → Review → Submit. Walk it.
+    if (ats === "linkedin") {
+      for (let step = 0; step < 5; step++) {
+        const next = page.locator("div[role='dialog'] button[aria-label='Continue to next step'], div[role='dialog'] button:has-text('Next'), button:has-text('Review your application')").first();
+        if ((await next.count()) === 0) break;
+        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
+        // Fill any visible inputs on this step before advancing
+        await fillCommonFields(page, ats, profile, job);
+        console.log(`  [easy-apply] step ${step + 1}: clicking "${label}"`);
+        await next.click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+      }
+    }
 
     // Detect submit button
     const submitSels = ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn;

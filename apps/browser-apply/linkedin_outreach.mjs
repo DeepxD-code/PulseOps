@@ -69,8 +69,43 @@ async function findPeople(page, company) {
     return a ? a.getAttribute("href") : null;
   });
   if (!companyHref) {
-    console.log(`  [debug] search URL now: ${page.url().slice(0, 100)}`);
-    return { error: "company-not-found", people: [] };
+    // No company page (small firms) — search people directly by company name
+    console.log("  [info] no company page — trying people search");
+    await page.goto(`https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(company)}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(2500);
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => window.scrollBy(0, 1000));
+      await page.waitForTimeout(1000);
+    }
+    const direct = await page.evaluate((co) => {
+      const out = [];
+      const scope = document.querySelector("main") || document;
+      for (const a of scope.querySelectorAll('a[href*="/in/"]')) {
+        const href = a.getAttribute("href").split("?")[0];
+        const card = a.closest("div");
+        const ctx = (card?.parentElement?.innerText || "").slice(0, 200);
+        const text = (a.textContent || "").trim().replace(/\s+/g, " ");
+        if (!href || !text || text.length < 3 || text.length > 80) continue;
+        if (/follow/i.test(text)) continue;
+        if (out.some((p) => p.url === href)) continue;
+        const first = co.split(" ")[0].toLowerCase();
+        const match = ctx.toLowerCase().includes(first) || text.length > 0;
+        out.push({ name: text, url: href.startsWith("http") ? href : `https://www.linkedin.com${href}`, headline: ctx.slice(0, 120), match });
+        if (out.length >= 8) break;
+      }
+      return out;
+    }, company);
+    console.log(`  [debug] people-search cards: ${direct.length}`);
+    const first = company.split(" ")[0].toLowerCase();
+    const relevant = direct.filter((p) => p.headline.toLowerCase().includes(first));
+    if (!relevant.length) {
+      console.log(`  [info] no search results work at ${company} — skipping (no guessing)`);
+      return { error: "no-relevant-people", people: [] };
+    }
+    const ranked = relevant
+      .map((p) => ({ ...p, hire: /recruit|talent|hiring|hr |human resources|founder|ceo|cto|people/i.test(`${p.name} ${p.headline}`) ? 0 : 1 }))
+      .sort((a, b) => a.hire - b.hire);
+    return { slug: null, people: ranked.slice(0, 2) };
   }
   console.log(`  [debug] company page: ${companyHref}`);
   const slug = companyHref.split("/company/")[1].split("/")[0];
@@ -163,7 +198,10 @@ async function sendDM(page, person, text) {
   if ((await premium.count()) > 0) {
     console.log("  [dm] Premium paywall — direct Message needs Premium; closing modal");
     await page.locator("div[role='dialog'] button[aria-label='Dismiss']").first().click({ timeout: 3000 }).catch(() => {});
-    await page.waitForTimeout(1000);
+    for (let i = 0; i < 5; i++) {
+      await page.waitForTimeout(800);
+      if ((await page.locator("div[role='dialog']").count()) === 0) break;
+    }
   }
   if (!box) {
     // 3rd-degree profiles: Message won't open — fall back to Connect with a note (300 chars)
@@ -199,10 +237,11 @@ async function sendDM(page, person, text) {
       // No note option — plain connect invite
       const sendInv = page.locator('button[aria-label="Send without a note"], button:has-text("Send without a note"), button[aria-label="Send now"], button:has-text("Send now"), button[aria-label="Send invitation"]').first();
       if ((await sendInv.count()) > 0 && !DRY_RUN) {
-        // Safety: modal must name THIS person, never a right-rail stranger
-        const modalText = await page.locator("div[role='dialog']").first().innerText().catch(() => "");
+        // Safety: the CONNECT dialog must name THIS person, never a right-rail stranger.
+        // (A stale Premium modal may also be open — only inspect connect dialogs.)
+        const modalText = await page.locator("div[role='dialog']:has-text('Connect'), div[role='dialog']:has-text('invitation')").first().innerText().catch(() => "");
         if (!modalText.toLowerCase().includes(firstName.toLowerCase())) {
-          console.log(`  [dm] modal is not for ${firstName} — aborting click`);
+          console.log(`  [dm] connect dialog is not for ${firstName} — aborting click`);
           return { sent: false, reason: "modal-person-mismatch" };
         }
         await sendInv.click({ timeout: 5000 }).catch(() => {});
