@@ -429,10 +429,33 @@ async function loadJobsFromDB() {
   ];
 }
 
+function isMockJob(j) {
+  return !j?.link || j.link.includes("example.com") || (j.source || "").startsWith("mock");
+}
+
 async function main() {
   const profile = loadProfile();
   console.log(`[Profile] ${profile.candidate?.name} <${profile.candidate?.email}> — ${profile.domain?.title || ""}`);
-  const jobs = await loadJobsFromDB();
+  if (!DRY_RUN) {
+    // Hard guardrails: never submit as a fallback identity or to mock listings.
+    const who = `${profile.candidate?.name || ""}`.trim().toLowerCase();
+    const mail = `${profile.candidate?.email || ""}`.trim().toLowerCase();
+    if (who === "test user" || !mail || !mail.includes("@") || mail === "test@example.com") {
+      console.error("[FATAL] --live refused: no real profile (config/profile.yml missing). Sync your CV first.");
+      process.exit(3);
+    }
+  }
+  let jobs = await loadJobsFromDB();
+  if (!DRY_RUN) {
+    const real = jobs.filter((j) => !isMockJob(j));
+    const dropped = jobs.length - real.length;
+    if (dropped > 0) console.log(`[guard] dropped ${dropped} mock/fallback listing(s) — live never submits mocks`);
+    jobs = real;
+    if (!jobs.length) {
+      console.error("[FATAL] --live refused: zero real jobs (queue empty, no --job-url). Nothing submitted.");
+      process.exit(4);
+    }
+  }
   console.log(`[Jobs] ${jobs.length} to process (dry-run=${DRY_RUN}, headed=${HEADED})`);
 
   const { chromium } = await import("playwright");
@@ -460,8 +483,9 @@ async function main() {
       for (const r of results.filter(x=>x.action==="submitted")) {
         const msg = `✅ Applied to ${r.company} — ${r.title} via ${r.ats}`;
         try {
-          await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: msg }) });
-          console.log(`  [Discord] confirmation sent: ${msg}`);
+          const resp = await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: msg }) });
+          if (resp.ok) console.log(`  [Discord] confirmation sent: ${msg}`);
+          else console.log(`  [Discord] REJECTED (HTTP ${resp.status}) — did NOT deliver: ${msg}`);
         } catch (e) { console.log(`  [Discord] confirm failed: ${e.message.slice(0,80)}`); }
       }
     }
