@@ -252,8 +252,9 @@ async function notifyDiscord(lines) {
   }
   const content = `${MENTION}\n` + lines.join("\n").slice(0, 1900);
   try {
-    await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) });
-    console.log("[Discord] tagged notification sent");
+    const resp = await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) });
+    if (resp.ok) console.log("[Discord] tagged notification sent");
+    else console.log(`[Discord] REJECTED (HTTP ${resp.status}) — message did NOT deliver`);
   } catch (e) {
     console.log(`[Discord] failed: ${e.message?.slice(0, 80)}`);
   }
