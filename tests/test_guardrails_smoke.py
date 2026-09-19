@@ -56,6 +56,17 @@ def test_searchapi_lookup_no_key_returns_empty(monkeypatch):
     assert se._searchapi_company_emails("acme.com", "Acme") == []
 
 
+def test_domain_cache_hit_skips_lookup(monkeypatch):
+    from pulseops_outreach import send_engine as se
+    from pulseops_store import db_manager as db
+
+    db.init_db()
+    db.save_domain_contact("cached.com", "hr@cached.com", "site-scrape")
+    monkeypatch.delenv("SEARCHAPI_API_KEY", raising=False)
+    out = se._check_g10_contact("", "cached.com", "low", company="Cached")
+    assert out == "hr@cached.com", out
+
+
 def test_g10_no_unverified_fallback():
     from pulseops_outreach.send_engine import decide_send
     from pulseops_store import db_manager as db

@@ -722,6 +722,59 @@ def update_queue_status(queue_id: int, status: str) -> None:
         conn.close()
 
 
+def get_domain_contact(domain: str) -> dict | None:
+    """Cached verified contact for a domain (bounce_count < 2 only)."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT domain, email, source FROM domain_contacts "
+            "WHERE lower(domain)=? AND bounce_count < 2",
+            (domain.lower(),),
+        ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        return None  # table may not exist yet (pre-008 DBs)
+    finally:
+        conn.close()
+
+
+def save_domain_contact(domain: str, email: str, source: str) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO domain_contacts (domain, email, source, found_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(domain) DO UPDATE SET "
+            "email=excluded.email, source=excluded.source, found_at=excluded.found_at",
+            (domain.lower(), email, source, _now()),
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] save_domain_contact: {e}")
+    finally:
+        conn.close()
+
+
+def bump_domain_contact(domain: str, bounced: bool) -> None:
+    conn = get_connection()
+    try:
+        if bounced:
+            conn.execute(
+                "UPDATE domain_contacts SET bounce_count=bounce_count+1 WHERE lower(domain)=?",
+                (domain.lower(),),
+            )
+        else:
+            conn.execute(
+                "UPDATE domain_contacts SET send_count=send_count+1 WHERE lower(domain)=?",
+                (domain.lower(),),
+            )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def mark_outreach_bounced(outreach_id: int, bounced_email: str) -> None:
     conn = get_connection()
     try:
@@ -729,6 +782,12 @@ def mark_outreach_bounced(outreach_id: int, bounced_email: str) -> None:
             "UPDATE outreach SET status='bounced', notes=? WHERE id=?",
             (f"bounced: {bounced_email}", outreach_id),
         )
+        if "@" in bounced_email:
+            conn.execute(
+                "UPDATE domain_contacts SET bounce_count=bounce_count+1 "
+                "WHERE lower(domain)=?",
+                (bounced_email.rsplit("@", 1)[-1].lower(),),
+            )
         conn.commit()
     except sqlite3.Error as e:
         conn.rollback()
