@@ -379,11 +379,21 @@ def _check_g10_contact(
     G10: Returns the best available email address to send to.
 
     Priority order (verified-only, boss round-2 + SearchApi lookup):
+      0. Cached verified contact for this domain (lookup once, reuse forever)
       1. Explicit email from JD text (LLM-extracted)
       2. Scrape company website for info@/careers@/jobs@/hr@ (real page)
       3. SearchApi web lookup for published company emails (real, domain-matched)
       4. Raise NoContactEmailError (no pattern/contact@ guesses)
     """
+    # Priority 0: domain cache (survives SearchApi quota outages)
+    try:
+        hit = db.get_domain_contact(domain)
+        if hit:
+            print(f"  [G10] cache hit: {hit['email']} ({hit['source']})")
+            return hit["email"]
+    except Exception:
+        pass
+
     # Priority 1: explicit email found in JD
     if contact_email and "@" in contact_email:
         return contact_email.strip()
@@ -392,11 +402,19 @@ def _check_g10_contact(
     scraped = _scrape_company_emails(domain, company)
     if scraped:
         print(f"  [G10] scraped company site: {scraped[0]} from {domain}")
+        try:
+            db.save_domain_contact(domain, scraped[0], "site-scrape")
+        except Exception:
+            pass
         return scraped[0]
 
     # Priority 3: SearchApi web lookup for published company emails (real only)
     searched = _searchapi_company_emails(domain, company)
     if searched:
+        try:
+            db.save_domain_contact(domain, searched[0], "web-search")
+        except Exception:
+            pass
         return searched[0]
 
     raise NoContactEmailError(
