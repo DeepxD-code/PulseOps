@@ -337,6 +337,14 @@ async function processJob(browser, job, profile) {
       }
     }
 
+    if (ats === "naukri") {
+      // Cookie banner overlaps the Apply button — clear it first
+      const cookie = page.locator("button:has-text('Accept all')").first();
+      if ((await cookie.count()) > 0) {
+        await cookie.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+      }
+    }
     await detectAndClickApply(page, ats);
     await page.waitForTimeout(1500);
 
@@ -348,6 +356,71 @@ async function processJob(browser, job, profile) {
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
     console.log(`  [preview] screenshot → ${path.relative(ROOT, screenshotPath)}`);
     console.log(`  [preview] form URL: ${page.url().slice(0,120)}`);
+
+    // Naukri chat apply: cookie banner + bot questionnaire (bot types first — wait for it).
+    if (ats === "naukri") {
+      const cookie = page.locator("button:has-text('Accept all')").first();
+      if ((await cookie.count()) > 0) {
+        await cookie.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+      }
+      const PICK = ["Fresher", "Continue", "Submit", "Apply now", "Confirm", "Yes", "Bengaluru", "Bangalore", "Remote", "Okay"];
+      // Naukri renders chat options as div.chatbot_Chip (not <button>)
+      const OPT = (label) => `:is(div.chatbot_Chip, button, a, [role='button']):has-text('${label}')`;
+      for (let step = 0; step < 14; step++) {
+        // Wait for the bot to finish typing (typing dots present = still thinking)
+        for (let w = 0; w < 6; w++) {
+          const typing = await page.evaluate(() => {
+            const t = document.body?.innerText || "";
+            return t.includes("is typing");
+          }).catch(() => false);
+          if (!typing) break;
+          await page.waitForTimeout(1500);
+        }
+        await page.waitForTimeout(1500);
+        // Answer whatever option button the bot offers, by priority
+        let clicked = null;
+        for (const label of PICK) {
+          const btn = page.locator(OPT(label)).first();
+          if ((await btn.count()) === 0) continue;
+          try {
+            await btn.waitFor({ state: "visible", timeout: 2000 });
+            await btn.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+            await btn.click({ timeout: 5000 });
+          } catch {
+            // Fallback: in-page click (overlays intercept synthetic clicks)
+            await page.evaluate((t) => {
+              const els = Array.from(document.querySelectorAll("button, a, [role='button'], div"));
+              const el = els.find((e) => (e.innerText || "").trim() === t && e.offsetParent !== null);
+              if (el) el.click();
+            }, label).catch(() => {});
+          }
+          await page.waitForTimeout(2500);
+          // Verify the chat advanced (option gone); else retry next loop
+          const stillThere = await page.locator(OPT(label)).first().count().catch(() => 1);
+          clicked = label + (stillThere ? " (retry?)" : "");
+          break;
+        }
+        if (clicked) {
+          console.log(`  [naukri-chat] step ${step + 1}: answered "${clicked}"`);
+          continue;
+        }
+        // No options: either done or bot still working — check success, else wait more
+        const doneEarly = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+        if (doneEarly) break;
+        const chatGone = await page.locator("button:has-text('Fresher'), button:has-text('Continue')").first().count().catch(() => 0);
+        if (step > 4 && chatGone === 0) break;
+        await page.waitForTimeout(2000);
+      }
+      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+      if (done) {
+        console.log("  [naukri-chat] SUCCESS — application submitted");
+        await page.screenshot({ path: screenshotPath.replace("preview", "submitted"), fullPage: true }).catch(() => {});
+        await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "submitted", pdf: resumePdf };
+      }
+      console.log("  [naukri-chat] no success confirmation detected");
+    }
 
     // LinkedIn Easy Apply is multi-step: Next (x N) → Review → Submit. Walk it.
     if (ats === "linkedin") {
@@ -361,6 +434,14 @@ async function processJob(browser, job, profile) {
         await next.click({ timeout: 5000 }).catch(() => {});
         await page.waitForTimeout(2000);
       }
+    }
+
+    // Naukri chat flow already attempted submit above — don't re-click the covered Apply button
+    if (ats === "naukri") {
+      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+      await page.screenshot({ path: screenshotPath.replace("preview", "final"), fullPage: false }).catch(() => {});
+      await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: done ? "submitted" : "chat-incomplete", pdf: resumePdf };
     }
 
     // Detect submit button
