@@ -320,11 +320,19 @@ def main() -> None:
 
 # ── Portal scan subprocess wiring ───────────────────────────────────────
 
+def _portal_script(name: str) -> Path:
+    """New Tier-2 location first, old flat layout as fallback."""
+    for cand in [ROOT / "apps" / "weekly-scan" / name, ROOT / "portal" / name]:
+        if cand.exists():
+            return cand
+    return ROOT / "apps" / "weekly-scan" / name
+
+
 def _run_liveness_check() -> list[dict]:
     """Runs check_liveness.mjs --json, returns the list of dead+enabled+non-auth portals."""
     try:
         result = subprocess.run(
-            ["node", str(ROOT / "portal" / "check_liveness.mjs"), "--json"],
+            ["node", str(_portal_script("check_liveness.mjs")), "--json"],
             capture_output=True, text=True, cwd=str(ROOT), timeout=120,
         )
         out = result.stdout.strip()
@@ -338,7 +346,7 @@ def _run_liveness_check() -> list[dict]:
 
 def _run_scan(simulate: bool) -> tuple[list[dict], list[dict], list[dict]]:
     """Runs portal/scan.mjs (live or --mock), returns (jobs, skipped_auth, failed)."""
-    cmd = ["node", str(ROOT / "portal" / "scan.mjs")]
+    cmd = ["node", str(_portal_script("scan.mjs"))]
     if simulate:
         cmd.append("--mock")
 
