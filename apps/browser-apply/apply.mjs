@@ -63,6 +63,7 @@ function findResumePdf(company, title) {
     path.join(ROOT, "output", "pdf", `${company} - ${title}.pdf`),
     path.join(ROOT, "output", "pdf", `${company}.pdf`),
     ...fs.existsSync(path.join(ROOT, "output", "pdf")) ? fs.readdirSync(path.join(ROOT, "output", "pdf")).map(f=>path.join(ROOT,"output","pdf",f)).filter(f=>f.endsWith(".pdf")).slice(0,1) : [],
+    path.join(ROOT, "output", "resume.pdf"), // base CV fallback (local demo)
   ];
   for (const p of candidates) if (p && fs.existsSync(p)) return p;
   return null;
@@ -347,11 +348,36 @@ async function processJob(browser, job, profile) {
     }
     await detectAndClickApply(page, ats);
     await page.waitForTimeout(1500);
+    if (ats === "naukri") {
+      // Verify the chat actually opened; retry the Apply click (banners intercept it)
+      let opened = false;
+      for (let r = 0; r < 3; r++) {
+        opened = await page.evaluate(() => {
+          const t = document.body?.innerText || "";
+          return /type message here|are you a fresher|kindly answer all/i.test(t);
+        }).catch(() => false);
+        if (opened) break;
+        console.log(`  [naukri-chat] chat not open — retrying Apply (${r + 1}/3)`);
+        const retry = page.locator("button#apply-button").first();
+        if ((await retry.count()) > 0) {
+          await retry.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+          await retry.click({ timeout: 5000, force: true }).catch(() => {});
+          await page.waitForTimeout(3000);
+        } else break;
+      }
+      if (!opened) {
+        const appliedNow = await page.evaluate(() => /successfully applied|you have successfully applied/i.test(document.body?.innerText || ""));
+        console.log(appliedNow ? "  [naukri-chat] already applied" : "  [naukri-chat] chat did not open — aborting");
+        await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: appliedNow ? "submitted" : "chat-not-opened", pdf: resumePdf };
+      }
+    }
 
     await fillCommonFields(page, ats, profile, job);
     await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf);
 
     const screenshotPath = path.join(ROOT, "output", `apply-preview-${job.company.replace(/\W/g,"_")}-${Date.now()}.png`);
+    let chatNeedsUser = [];
     fs.mkdirSync(path.join(ROOT, "output"), { recursive: true });
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
     console.log(`  [preview] screenshot → ${path.relative(ROOT, screenshotPath)}`);
@@ -365,9 +391,128 @@ async function processJob(browser, job, profile) {
         await page.waitForTimeout(1000);
       }
       const PICK = ["Fresher", "Continue", "Submit", "Apply now", "Confirm", "Yes", "Bengaluru", "Bangalore", "Remote", "Okay"];
+      // Factual text answers only — never invent salary expectations etc.
+      const TEXT_ANSWERS = [
+        [/how many years.*experience|years of experience/i, "0"],
+        [/notice period/i, "Immediate"],
+        [/current ctc|current salary/i, "0"],
+        [/total experience/i, "0"],
+        [/relevant experience/i, "0"],
+      ];
       // Naukri renders chat options as div.chatbot_Chip (not <button>)
       const OPT = (label) => `:is(div.chatbot_Chip, button, a, [role='button']):has-text('${label}')`;
+      const OPT_SCOPED = (label) => `[class*='chatbot'] :is(div.chatbot_Chip, button, a, [role='button']):has-text('${label}')`;
+      // Gate: only click when the chat panel is actually open (else we'd hit page chips)
+      async function chatOpen() {
+        return await page.evaluate(() => {
+          const t = document.body?.innerText || "";
+          return /type message here|are you a fresher|kindly answer all/i.test(t);
+        }).catch(() => false);
+      }
+      const seenQuestions = [];
       for (let step = 0; step < 14; step++) {
+        // Harvest every visible question for the transcript (deduped)
+        try {
+          const qs = await page.evaluate(() => {
+            const out = [];
+            document.querySelectorAll("div").forEach((d) => {
+              const t = (d.innerText || "").trim().replace(/\s+/g, " ");
+              if (t.length > 15 && t.length < 250 && /\?/.test(t) && d.children.length <= 2) out.push(t);
+            });
+            return [...new Set(out)].slice(0, 8);
+          });
+          for (const q of qs || []) {
+            if (!seenQuestions.includes(q)) {
+              seenQuestions.push(q);
+              console.log(`  [naukri-chat] Q: ${q.slice(0, 110)}`);
+            }
+          }
+        } catch {}
+        if (!(await chatOpen())) {
+          console.log(`  [naukri-chat] step ${step + 1}: waiting for chat…`);
+          await page.waitForTimeout(2500);
+          continue;
+        }
+        // Naukri modal free-text box ("Type message here...") + Save — highest priority
+        const freeText = await page.evaluate((patterns) => {
+          const rules = patterns.map((s) => new RegExp(s, "i"));
+          const boxes = [];
+          document.querySelectorAll("input[type='text'], input:not([type]), input[type='number'], input[type='tel'], textarea, div[contenteditable='true']").forEach((el) => {
+            const r = el.getBoundingClientRect();
+            const cur = ((el.value || el.innerText) || "").trim();
+            if (r.width < 100 || el.offsetParent === null || cur) return;
+            if (/search jobs|enter keyword|enter location/i.test(el.placeholder || "")) return;
+            boxes.push(true);
+          });
+          if (!boxes.length) return { dbg: true, nInputs: document.querySelectorAll("input, textarea").length, nEdit: document.querySelectorAll("div[contenteditable]").length };
+          const body = (document.body?.innerText || "").replace(/\s+/g, " ");
+          const qm = body.match(/How many years of experience[^?]*\?|notice period[^?]*\?|current ctc[^?]*\?|total experience[^?]*\?|relevant experience[^?]*\?/i);
+          const q = qm ? qm[0] : body.slice(-400);
+          const ri = rules.findIndex((re) => re.test(q));
+          return ri < 0 ? { q: q.slice(0, 90), noRule: true } : { q: q.slice(0, 90), ans: ["0", "Immediate", "0", "0", "0"][ri] };
+        }, TEXT_ANSWERS.map(([re]) => re.source));
+        if (freeText && freeText.dbg) console.log(`  [naukri-chat] dbg boxes=0 inputs=${freeText.nInputs} editables=${freeText.nEdit}`);
+        if (freeText && !freeText.noRule) {
+          // Playwright fill() handles React/contenteditable editors reliably.
+          let typedOk = false;
+          const candSel = "div[contenteditable='true'], input[type='text'], input:not([type]), input[type='number'], textarea";
+          const n = await page.locator(candSel).count().catch(() => 0);
+          for (let bi = 0; bi < Math.min(n, 8); bi++) {
+            const el = page.locator(candSel).nth(bi);
+            const info = await el.evaluate((node) => {
+              const r = node.getBoundingClientRect();
+              const cur = ((node.value || node.innerText) || "").trim();
+              const ph = node.placeholder || "";
+              return { w: Math.round(r.width), cur: cur.slice(0, 20), ph: ph.slice(0, 30), vis: node.offsetParent !== null };
+            }).catch(() => null);
+            if (!info || info.w < 100 || !info.vis || info.cur) continue;
+            if (/search jobs|enter keyword|enter location/i.test(info.ph)) continue;
+            try {
+              await el.click({ timeout: 3000 });
+              await el.fill(freeText.ans, { timeout: 5000 });
+              const got = ((await el.innerText().catch(() => "")) || (await el.inputValue().catch(() => "")) || "").trim();
+              console.log(`  [naukri-chat] type-debug: box shows "${got}"`);
+              if (got === freeText.ans) {
+                typedOk = true;
+                break;
+              }
+            } catch (e) {
+              console.log(`  [naukri-chat] fill failed on candidate ${bi}: ${String(e).slice(0, 60)}`);
+            }
+          }
+          if (typedOk) {
+            console.log(`  [naukri-chat] typed "${freeText.ans}" for: ${freeText.q.slice(0, 70)}`);
+            await page.waitForTimeout(1200);
+            let saved = false;
+            for (let s = 0; s < 4; s++) {
+              const save = page.locator("button:has-text('Save')").first();
+              if ((await save.count()) === 0) break;
+              const dis = await save.isDisabled().catch(() => true);
+              if (!dis) {
+                await save.click({ timeout: 4000 }).catch(() => {});
+                saved = true;
+                break;
+              }
+              await page.waitForTimeout(1200);
+            }
+            if (saved) await page.waitForTimeout(2500);
+            else console.log("  [naukri-chat] Save stayed disabled — answer may not have registered");
+            continue;
+          }
+        } else if (freeText && freeText.noRule) {
+          const short = freeText.q.slice(0, 90);
+          if (!chatNeedsUser.includes(short)) {
+            chatNeedsUser.push(short);
+            console.log(`  [naukri-chat] NEEDS-YOU (won't guess): ${short}`);
+          }
+        }
+        if (step % 3 === 0) {
+          const transcript = await page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll("div")).filter((d) => /fresher or experienced|how many years|notice period|current ctc|expected ctc|gender|location|authorized|visa|willing to relocate/i.test(d.innerText || "") && (d.innerText || "").length < 400);
+            return els.slice(0, 6).map((d) => d.innerText.trim().replace(/\s+/g, " ").slice(0, 200));
+          }).catch(() => []);
+          if (transcript.length) console.log(`  [naukri-chat] sees: ${JSON.stringify(transcript).slice(0, 500)}`);
+        }
         // Wait for the bot to finish typing (typing dots present = still thinking)
         for (let w = 0; w < 6; w++) {
           const typing = await page.evaluate(() => {
@@ -378,10 +523,74 @@ async function processJob(browser, job, profile) {
           await page.waitForTimeout(1500);
         }
         await page.waitForTimeout(1500);
-        // Answer whatever option button the bot offers, by priority
+        // Answer text inputs first (experience years, notice period, current CTC).
+        // Single evaluate: find empty field + matching rule + fill, atomically.
+        const rules = TEXT_ANSWERS.map(([re]) => re.source);
+        const filled = await page.evaluate((patterns) => {
+          const rules = patterns.map((s) => new RegExp(s, "i"));
+          const fields = [];
+          // Scope to the question container (walking up from known question phrases),
+          // falling back to the chatbot panel — page search boxes are decoys.
+          let scope = document.querySelector("[class*='chatbot']") || document;
+          const qmark = Array.from(document.querySelectorAll("div, p, span")).find((d) => {
+            const t = (d.innerText || "").trim();
+            return t.length > 20 && t.length < 300 && /how many years|notice period|current ctc|expected|experience|location|authorized|relocate|gender/i.test(t) && d.children.length <= 3;
+          });
+          if (qmark) {
+            let n = qmark;
+            for (let i = 0; i < 8 && n; i++) {
+              n = n.parentElement;
+              if (n && n.querySelector && n.querySelector("input, textarea, select, button")) {
+                scope = n;
+                break;
+              }
+            }
+          }
+          scope.querySelectorAll("input[type='text'], input:not([type]), input[type='number'], input[type='tel'], textarea").forEach((el) => {
+            const r = el.getBoundingClientRect();
+            if (r.width < 20 || el.offsetParent === null || (el.value || "")) return;
+            if (/search|keyword/i.test(el.placeholder || "")) return;
+            let ctx = el;
+            let q = "";
+            for (let d = 0; d < 6 && ctx; d++) {
+              ctx = ctx.parentElement;
+              const t = (ctx?.innerText || "").replace(/\s+/g, " ");
+              if (t.length > 40) {
+                q = t.slice(0, 220);
+                break;
+              }
+            }
+            fields.push({ el, q });
+          });
+          for (const f of fields) {
+            const ri = rules.findIndex((re) => re.test(f.q));
+            if (ri < 0) continue;
+            f.el.focus();
+            document.execCommand("selectAll", false, null);
+            document.execCommand("insertText", false, ["0", "Immediate", "0", "0", "0"][ri]);
+            f.el.dispatchEvent(new Event("input", { bubbles: true }));
+            f.el.dispatchEvent(new Event("change", { bubbles: true }));
+            return { ans: ["0", "Immediate", "0", "0", "0"][ri], q: f.q.slice(0, 80) };
+          }
+          return null;
+        }, rules).catch(() => null);
+        if (filled) {
+          console.log(`  [naukri-chat] typed "${filled.ans}" for: ${filled.q}`);
+          await page.waitForTimeout(1200);
+          const save = page.locator("button:has-text('Save')").first();
+          if ((await save.count()) > 0) {
+            await save.click({ timeout: 4000 }).catch(() => {});
+            await page.waitForTimeout(2500);
+          }
+          console.log(`  [naukri-chat] step ${step + 1}: typed ${filled.ans}`);
+          continue;
+        }
+        // Answer whatever option button the bot offers, by priority.
+        // Scope to the chatbot panel first — page-level chips (location filters) are decoys.
         let clicked = null;
         for (const label of PICK) {
-          const btn = page.locator(OPT(label)).first();
+          const scoped = page.locator(OPT_SCOPED(label)).first();
+          const btn = ((await scoped.count()) > 0) ? scoped : page.locator(OPT(label)).first();
           if ((await btn.count()) === 0) continue;
           try {
             await btn.waitFor({ state: "visible", timeout: 2000 });
@@ -403,6 +612,17 @@ async function processJob(browser, job, profile) {
         }
         if (clicked) {
           console.log(`  [naukri-chat] step ${step + 1}: answered "${clicked}"`);
+          // After any chip answer, hit Save/Send if showing (chat often waits on it)
+          await page.waitForTimeout(1500);
+          const postSave = page.locator("button:has-text('Save'), button:has-text('Send'), button:has-text('Submit')").first();
+          if ((await postSave.count()) > 0) {
+            const dis = await postSave.isDisabled().catch(() => true);
+            if (!dis) {
+              await postSave.click({ timeout: 4000 }).catch(() => {});
+              console.log("  [naukri-chat] clicked post-answer Save/Send");
+              await page.waitForTimeout(2500);
+            }
+          }
           continue;
         }
         // No options: either done or bot still working — check success, else wait more
@@ -420,6 +640,40 @@ async function processJob(browser, job, profile) {
         return { company: job.company, title: job.title, link: url, ats, action: "submitted", pdf: resumePdf };
       }
       console.log("  [naukri-chat] no success confirmation detected");
+    }
+
+    // Indeed smartapply: Continue through steps → Review (100%) → Submit application.
+    if (ats === "indeed") {
+      for (let step = 0; step < 6; step++) {
+        await fillCommonFields(page, ats, profile, job);
+        await page.evaluate(() => window.scrollBy(0, 900));
+        await page.waitForTimeout(1000);
+        const next = page.locator("button:has-text('Continue'), button:has-text('Review your application'), button:has-text('Submit your application'), button:has-text('Submit application')").first();
+        if ((await next.count()) === 0) {
+          const all = await page.evaluate(() => {
+            const out = [];
+            document.querySelectorAll("button, a").forEach((el) => {
+              const t = ((el.innerText || el.value) || "").trim().replace(/\s+/g, " ");
+              if (t && t.length < 40 && el.offsetParent !== null) out.push(t);
+            });
+            return [...new Set(out)].slice(0, 20);
+          }).catch(() => []);
+          console.log(`  [indeed] step ${step + 1}: no nav button; visible: ${JSON.stringify(all).slice(0, 200)}`);
+          break;
+        }
+        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
+        const dis = await next.isDisabled().catch(() => true);
+        if (dis) {
+          console.log(`  [indeed] "${label}" disabled — missing required input, stopping`);
+          break;
+        }
+        console.log(`  [indeed] step ${step + 1}: clicking "${label}"`);
+        await next.scrollIntoViewIfNeeded().catch(() => {});
+        await next.click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(2500);
+        const done = await page.evaluate(() => /application submitted|you applied|application received|thank you for applying/i.test(document.body?.innerText || ""));
+        if (done) break;
+      }
     }
 
     // LinkedIn Easy Apply is multi-step: Next (x N) → Review → Submit. Walk it.
@@ -441,7 +695,7 @@ async function processJob(browser, job, profile) {
       const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
       await page.screenshot({ path: screenshotPath.replace("preview", "final"), fullPage: false }).catch(() => {});
       await context.close();
-      return { company: job.company, title: job.title, link: url, ats, action: done ? "submitted" : "chat-incomplete", pdf: resumePdf };
+      return { company: job.company, title: job.title, link: url, ats, action: done ? "submitted" : "chat-incomplete", pdf: resumePdf, needsUser: chatNeedsUser };
     }
 
     // Detect submit button
