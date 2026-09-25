@@ -24,7 +24,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: pulseops-weekly
+  # GitHub concurrency groups are repository-wide across workflows. Simulations
+  # deliberately join this same group: separate groups do not exclude each other,
+  # so only a shared group guarantees they never overlap a live state run.
+  group: pulseops-state-runs
   cancel-in-progress: false
 
 jobs:
@@ -36,19 +39,64 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout persistent state (pulseops-state branch)
+        if: ${{ inputs.simulate != true }}
+        id: state_checkout
         uses: actions/checkout@v4
         with:
           ref: pulseops-state
           path: .state
-        continue-on-error: true
+          fetch-depth: 1
+
+      # Simulations use a separate ephemeral database and never read or write
+      # the live pulseops-state branch.
+      - name: Capture exact state commit for the save lease
+        if: ${{ inputs.simulate != true && steps.state_checkout.outcome == 'success' }}
+        id: state_base
+        run: |
+          set -euo pipefail
+          STATE_BASE_SHA="$(git -C .state rev-parse --verify 'HEAD^{commit}')"
+          if ! [[ "${STATE_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not capture the exact pulseops-state commit"
+            exit 1
+          fi
+          echo "base_sha=${STATE_BASE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Restore DB + logs + memory from state branch
+        if: ${{ inputs.simulate != true && steps.state_checkout.outcome == 'success' && steps.state_base.outcome == 'success' }}
+        id: state_restore
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
-          [ -f .state/pulseops.db ] && cp .state/pulseops.db ./pulseops.db || echo "no prior DB — first run"
+          rm -f pulseops.db
+          if ! git -C .state rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "::error::state checkout is unavailable; refusing to bootstrap"
+            exit 1
+          fi
+          if [ -f .state/pulseops.db.enc ]; then
+            if [ -z "${STATE_KEY:-}" ]; then
+              echo "::error::encrypted state exists but STATE_KEY is empty; refusing to continue"
+              exit 1
+            fi
+            if ! printf '%s' "$STATE_KEY" | openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin \
+              -in .state/pulseops.db.enc -out pulseops.db; then
+              rm -f pulseops.db
+              echo "::error::encrypted state decrypt failed; refusing to continue"
+              exit 1
+            fi
+          elif [ -n "${STATE_KEY:-}" ]; then
+            echo "::error::STATE_KEY is configured but no encrypted state artifact exists; refusing to start with empty state"
+            exit 1
+          elif [ -f .state/pulseops.db ]; then
+            cp .state/pulseops.db pulseops.db
+          else
+            echo "::notice::successful state checkout contains no prior DB; bootstrapping plaintext state"
+          fi
           [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
           [ -d .state/data ] && cp -r .state/data/. ./data/ || true
           [ -d .state/memory/cv_history ] && cp -r .state/memory/cv_history/. ./memory/cv_history/ || true
+          [ -f .state/memory/.github_synced.json ] && cp .state/memory/.github_synced.json ./memory/ || true
           [ -f .state/config/profile.yml ] && cp .state/config/profile.yml ./config/ || true
           [ -f .state/config/.cv_hash ] && cp .state/config/.cv_hash ./config/ || true
 
@@ -71,18 +119,27 @@ jobs:
             if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
           done
 
-      - name: Install Node dependencies + Playwright browser
-        run: |
-          npm install
-          npx playwright install chromium --with-deps
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Install Playwright browser (live only)
+        if: ${{ inputs.simulate != true }}
+        run: npx playwright install chromium --with-deps
 
       - name: Write secrets to disk (per-secret, no ENV_FILE blob)
+        if: ${{ inputs.simulate != true }}
         env:
+          AUTO_SEND_EMAILS: ${{ secrets.AUTO_SEND_EMAILS }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
           THEIRSTACK_API_KEY: ${{ secrets.THEIRSTACK_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_REVIEW_WEBHOOK_URL: ${{ secrets.DISCORD_REVIEW_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CV_MD: ${{ secrets.CV_MD }}
@@ -90,27 +147,54 @@ jobs:
           BLACKLIST_TXT: ${{ secrets.BLACKLIST_TXT }}
           CONTACTS_YML: ${{ secrets.CONTACTS_YML }}
         run: |
+          set -euo pipefail
           {
+            echo "AUTO_SEND_EMAILS=${AUTO_SEND_EMAILS:-false}";
+            echo "SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}";
+            echo "SMTP_PORT=${SMTP_PORT:-587}";
+            echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
+            echo "SMTP_PASSWORD=${SMTP_PASSWORD:-}";
             echo "GEMINI_API_KEY=${GEMINI_API_KEY:-}";
             echo "GROQ_API_KEY=${GROQ_API_KEY:-}";
             echo "SEARCHAPI_API_KEY=${SEARCHAPI_API_KEY:-}";
             echo "THEIRSTACK_API_KEY=${THEIRSTACK_API_KEY:-}";
             echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}";
+            echo "DISCORD_REVIEW_WEBHOOK_URL=${DISCORD_REVIEW_WEBHOOK_URL:-}";
             echo "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}";
             echo "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}";
           } > .env
-          if [ -n "$CV_MD" ]; then printf '%s' "$CV_MD" > cv.md; else echo "::warning::CV_MD secret empty — profile sync will be skipped"; fi
-          if [ -n "$SETTINGS_YML" ]; then printf '%s' "$SETTINGS_YML" > config/settings.yml; else echo "::warning::SETTINGS_YML secret empty — using config/settings.yml.example"; fi
-          if [ -n "$BLACKLIST_TXT" ]; then printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt; fi
-          if [ -n "$CONTACTS_YML" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
+          if [ -n "${CV_MD:-}" ]; then printf '%s' "$CV_MD" > cv.md; else echo "::warning::CV_MD secret empty — profile sync will be skipped"; fi
+          if [ -n "${SETTINGS_YML:-}" ]; then printf '%s' "$SETTINGS_YML" > config/settings.yml; else echo "::warning::SETTINGS_YML secret empty — using config/settings.yml.example"; fi
+          if [ -n "${BLACKLIST_TXT:-}" ]; then printf '%s' "$BLACKLIST_TXT" > config/blacklist.txt; fi
+          if [ -n "${CONTACTS_YML:-}" ]; then printf '%s' "$CONTACTS_YML" > config/contacts.yml; fi
           for f in profile.yml.example settings.yml.example blacklist.txt.example contacts.yml.example; do
             if [ ! -f "config/$f" ] && [ -f "packages/pulse-config/config/$f" ]; then
               cp "packages/pulse-config/config/$f" "config/$f"
             fi
           done
 
-      - name: Sync profile.yml from cv.md if changed
+      - name: Prepare simulation environment (no secrets)
+        if: ${{ inputs.simulate == true }}
         run: |
+          set -euo pipefail
+          mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
+          cat > .env <<'EOF'
+          AUTO_SEND_EMAILS=false
+          PULSEOPS_SIMULATION_DB=data/pulseops-simulation.db
+          EOF
+          for f in profile.yml.example settings.yml.example blacklist.txt.example contacts.yml.example; do
+            if [ ! -f "config/$f" ] && [ -f "packages/pulse-config/config/$f" ]; then
+              cp "packages/pulse-config/config/$f" "config/$f"
+            fi
+          done
+          if [ ! -f config/profile.yml ] && [ -f config/profile.yml.example ]; then
+            cp config/profile.yml.example config/profile.yml
+          fi
+
+      - name: Sync profile.yml from cv.md if changed
+        if: ${{ inputs.simulate != true }}
+        run: |
+          set -euo pipefail
           if [ -f cv.md ] && [ -s cv.md ]; then
             python -m pulseops_pipeline.doctor --init || python -m pulseops_pipeline.doctor --sync-profile || echo "::warning::profile sync failed — check CV_MD secret"
           else
@@ -123,20 +207,47 @@ jobs:
 
       - name: Run weekly portal scan
         run: |
+          set -euo pipefail
           ARGS=""
           if [ "${{ inputs.simulate }}" = "true" ]; then ARGS="$ARGS --simulate"; fi
           if [ "${{ inputs.skip_liveness }}" = "true" ]; then ARGS="$ARGS --skip-liveness"; fi
           python -m pulseops_weekly.main_weekly $ARGS
 
       - name: Commit state back to pulseops-state branch
-        if: always()
+        if: ${{ always() && inputs.simulate != true && steps.state_checkout.outcome == 'success' && steps.state_base.outcome == 'success' && steps.state_restore.outcome == 'success' }}
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          STATE_BASE_SHA: ${{ steps.state_base.outputs.base_sha }}
         run: |
+          set -euo pipefail
+          if [ -z "${STATE_BASE_SHA:-}" ] || ! [[ "${STATE_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::missing exact state commit captured during checkout; refusing to save"
+            exit 1
+          fi
           rm -rf .state
           mkdir -p .state/logs .state/data .state/memory/cv_history .state/config
-          cp pulseops.db .state/pulseops.db 2>/dev/null || true
+          if [ -n "${STATE_KEY:-}" ]; then
+            if [ ! -f pulseops.db ]; then
+              echo "::error::pulseops.db is missing; refusing to save encrypted state"
+              exit 1
+            fi
+            if ! printf '%s' "$STATE_KEY" | openssl enc -aes-256-cbc -pbkdf2 -pass stdin \
+              -in pulseops.db -out .state/pulseops.db.enc; then
+              rm -f .state/pulseops.db.enc
+              echo "::error::encrypted state save failed; refusing plaintext fallback"
+              exit 1
+            fi
+          else
+            if [ ! -f pulseops.db ]; then
+              echo "::error::pulseops.db is missing; refusing to save plaintext state"
+              exit 1
+            fi
+            cp pulseops.db .state/pulseops.db
+          fi
           cp -r logs/. .state/logs/ 2>/dev/null || true
           cp -r data/. .state/data/ 2>/dev/null || true
           cp -r memory/cv_history/. .state/memory/cv_history/ 2>/dev/null || true
+          cp memory/.github_synced.json .state/memory/ 2>/dev/null || true
           cp config/profile.yml .state/config/ 2>/dev/null || true
           cp config/.cv_hash .state/config/ 2>/dev/null || true
 
@@ -146,15 +257,16 @@ jobs:
           git checkout -B pulseops-state
           git config user.name "pulseops-bot"
           git config user.email "pulseops-bot@users.noreply.github.com"
-          git remote add origin "$STATE_URL" 2>/dev/null || true
-          git fetch -q origin pulseops-state 2>/dev/null || true
+          # The mandatory checkout proved the branch existed. Never infer an
+          # empty lease from a save-time remote lookup failure or recreate a deleted
+          # branch implicitly; the captured checkout SHA remains authoritative.
           git add -A
           if git diff --cached --quiet; then
             echo "nothing changed — skipping push"
             exit 0
           fi
           git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
-              commit -q -m "state: weekly scan $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -q "$STATE_URL" HEAD:pulseops-state --force-with-lease \
-            || git push -q "$STATE_URL" HEAD:pulseops-state --force \
-            || echo "::warning::state push failed (non-fatal)"
+            commit -q -m "state: weekly scan $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # A lease conflict is a failed state-push step; never replace a
+          # concurrently updated branch with an unconditional force push.
+          git push -q "$STATE_URL" HEAD:pulseops-state --force-with-lease="refs/heads/pulseops-state:${STATE_BASE_SHA}"

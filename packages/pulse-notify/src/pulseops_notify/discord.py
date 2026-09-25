@@ -362,6 +362,97 @@ def send_discord_match_card(job: dict, eval_result: dict, send_decision: dict | 
         raise
 
 
+def send_discord_review_card(job: dict, eval_result: dict, reason: str,
+                             pdf_path: str = "",
+                             webhook_url: str | None = None,
+                             run_id: str = "") -> bool:
+    """Post a G10 no-verified-email lead to the human-review Discord channel.
+
+    This function never fabricates a contact. It sends the JD, analysis, source
+    link, and any tailored PDF so a human can find the recruiter or use the
+    portal directly.
+    """
+    url = webhook_url if webhook_url is not None else os.getenv("DISCORD_REVIEW_WEBHOOK_URL", "")
+    if not url:
+        print("  [discord:pending] set DISCORD_REVIEW_WEBHOOK_URL to deliver G10 review cards")
+        return False
+    creds = _parse_webhook_url(url)
+    if not creds:
+        print("  [discord:pending] invalid DISCORD_REVIEW_WEBHOOK_URL format")
+        return False
+    webhook_id, webhook_token = creds
+
+    title = job.get("title", "Unknown")
+    company = job.get("company", "Unknown")
+    link = job.get("link", "")
+    score = eval_result.get("match_percentage", 0)
+    grade = eval_result.get("letter_grade", "")
+    summary = eval_result.get("text_summary", "")
+    skill_gap = eval_result.get("skill_gap", []) or []
+    if isinstance(skill_gap, str):
+        try:
+            skill_gap = json.loads(skill_gap)
+        except ValueError:
+            skill_gap = [skill_gap]
+    recruiter_message = eval_result.get("recruiter_message", "")
+    contact_email = eval_result.get("contact_email", "")
+
+    fields = [
+        {"name": "🧑‍💼 Human action", "value": (
+            "No verified email was found. Find the recruiter/contact manually, "
+            "use the listing, or apply through the portal."
+        ), "inline": False},
+        {"name": "🏢 Company", "value": (
+            f"**{company}** — [Open listing]({link})" if link else f"**{company}**"
+        ), "inline": False},
+        {"name": "🎯 Match", "value": f"**{score}% · Grade {grade or '?'}**", "inline": True},
+        {"name": "🔎 Source", "value": str(job.get("source", "Portal"))[:1024], "inline": True},
+        {"name": "🚧 Why queued", "value": _truncate(reason or "G10: no verified email", MAX_FIELD_VALUE), "inline": False},
+    ]
+    if summary:
+        fields.append({"name": "📝 Analysis", "value": _truncate(summary, MAX_FIELD_VALUE), "inline": False})
+    if skill_gap:
+        gap = "\n".join(f"• {item}" for item in skill_gap[:6])
+        fields.append({"name": "⚠️ Skill gap", "value": _truncate(gap, MAX_FIELD_VALUE), "inline": False})
+    fields.append({
+        "name": "📧 Verified contact",
+        "value": contact_email or "None found (do not guess)",
+        "inline": False,
+    })
+    if recruiter_message:
+        draft = _truncate(_strip_html(recruiter_message), MAX_FIELD_VALUE)
+        fields.append({"name": "💬 Outreach draft", "value": f"```\n{draft}\n```", "inline": False})
+
+    embed = {
+        "title": _truncate(f"🧑‍💼 Review: {title} — {company}", 256),
+        "url": link or None,
+        "color": COLOR_WARN,
+        "fields": fields[:MAX_FIELDS],
+        "footer": {"text": f"PulseOps G10 review • Job #{job.get('job_id', '?')} • {score}% match"},
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    try:
+        _post_webhook(webhook_id, webhook_token, {"embeds": [embed]})
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                with open(pdf_path, "rb") as resume:
+                    _post_webhook(
+                        webhook_id,
+                        webhook_token,
+                        {"content": f"📄 **{company} — {title}** tailored resume:"},
+                        files={"file": (os.path.basename(pdf_path), resume, "application/pdf")},
+                    )
+            except Exception as e:
+                print(f"  [Discord] review PDF attachment failed (non-fatal): {e}")
+        audit_log.write_discord_message(run_id, "review_card", True, f"{company}/{title}")
+        print(f"  [discord:review-posted] {company} — {title}")
+        return True
+    except TelegramError as e:
+        print(f"  [Discord Error] review card for {company}/{title}: {e}")
+        audit_log.write_discord_message(run_id, "review_card", False, str(e))
+        raise
+
+
 # ── Source health alert (non-negotiable #6) ────────────────────────────────
 
 def send_discord_source_health_alert(source_name: str, consecutive: int,

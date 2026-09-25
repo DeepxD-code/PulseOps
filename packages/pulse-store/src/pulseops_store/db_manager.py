@@ -12,11 +12,15 @@ Error handling contract:
     not a failure signal.
 """
 
+import ipaddress
 import json
 import os
+import re
+import socket
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pulseops_core.exceptions import DatabaseError
@@ -142,6 +146,154 @@ def _jload(v: str):
         return []
 
 
+# ── Email/domain validation ───────────────────────────────────────────────────
+# These helpers intentionally live in the persistence package as well as the
+# send engine.  The cache is a security boundary: a caller must not be able to
+# turn a malformed or third-party address into a persistent "verified" value.
+
+_EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+")
+_DOMAIN_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+_LOCAL_DOMAIN_NAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "local",
+    "internal",
+})
+_LOCAL_DOMAIN_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def _is_ip_literal_hostname(value: str) -> bool:
+    """Return true for IP-literal spellings accepted by common URL clients."""
+    if ":" in value:
+        # A colon cannot occur in a DNS hostname.  Treat malformed and
+        # zone-qualified IPv6 values as literals rather than passing them on.
+        return True
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9]+|0[xX][0-9a-fA-F]+", value):
+        return True
+    try:
+        socket.inet_aton(value)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def normalise_domain(domain: str) -> str:
+    """Return a conservative, non-local ASCII hostname or ``""``.
+
+    This is the persistence-layer boundary used by both the contact cache and
+    the send engine.  It accepts a hostname or an HTTP(S) URL, but rejects
+    credentials, non-web schemes, IP literals, and local/internal names before
+    any caller can use the result for discovery or delivery.  DNS address
+    classification is performed by the shared public URL policy immediately
+    before an HTTP request; normalising a domain does not perform network I/O.
+    """
+    if not isinstance(domain, str):
+        return ""
+    value = domain.strip().lower()
+    if not value:
+        return ""
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return ""
+    if "\\" in value or "@" in value:
+        return ""
+
+    # Accept either a hostname or an HTTP(S) URL, but never retain a
+    # path/port/query and never silently discard URL credentials.
+    if "://" in value:
+        try:
+            parsed = urlsplit(value)
+            scheme = parsed.scheme.lower()
+            # Accessing ``port`` catches malformed/out-of-range ports.
+            _ = parsed.port
+            hostname = parsed.hostname
+        except ValueError:
+            return ""
+        if scheme not in {"http", "https"}:
+            return ""
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or "@" in parsed.netloc
+            or not hostname
+        ):
+            return ""
+        value = hostname.lower()
+    else:
+        value = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if value.count(":") == 1:
+            host, possible_port = value.rsplit(":", 1)
+            if not possible_port.isdigit():
+                return ""
+            value = host
+        elif ":" in value:
+            return ""
+
+    value = value.rstrip(".")
+    if not value or _is_ip_literal_hostname(value):
+        return ""
+
+    try:
+        value = value.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+
+    if value in _LOCAL_DOMAIN_NAMES or value.endswith(_LOCAL_DOMAIN_SUFFIXES):
+        return ""
+
+    labels = value.split(".")
+    if len(labels) < 2 or any(not _DOMAIN_LABEL_RE.fullmatch(label) for label in labels):
+        return ""
+    if len(value) > 253 or any(len(label) > 63 for label in labels):
+        return ""
+    # A normal public hostname has an alphabetic TLD or an IDNA A-label.  This
+    # rejects IP-like/local-only values while retaining valid .com/.co.in etc.
+    tld = labels[-1]
+    if not ((len(tld) >= 2 and tld.isalpha()) or tld.startswith("xn--")):
+        return ""
+    return ".".join(labels)
+
+
+def normalise_email(email: str) -> str:
+    """Return a syntactically valid address, normalised for comparison.
+
+    This is deliberately stricter than ``email.utils.parseaddr`` (which accepts
+    display-name forms and malformed separators).  Company-domain matching is
+    performed separately by :func:`email_matches_domain`.
+    """
+    if not isinstance(email, str):
+        return ""
+    value = email.strip()
+    if not value or len(value) > 254 or any(ch.isspace() or ord(ch) < 32 for ch in value):
+        return ""
+    if value.count("@") != 1:
+        return ""
+
+    local, domain_part = value.rsplit("@", 1)
+    if not local or len(local) > 64 or local.startswith(".") or local.endswith("."):
+        return ""
+    if ".." in local or not _EMAIL_LOCAL_RE.fullmatch(local):
+        return ""
+
+    domain = normalise_domain(domain_part)
+    if not domain:
+        return ""
+    return f"{local}@{domain}"
+
+
+def email_matches_domain(email: str, domain: str) -> bool:
+    """True only when *email* is valid and its domain exactly equals *domain*."""
+    normalised_email = normalise_email(email)
+    normalised_domain = normalise_domain(domain)
+    if not normalised_email or not normalised_domain:
+        return False
+    return normalised_email.rsplit("@", 1)[1] == normalised_domain
+
+
 def normalise_company(name: str) -> str:
     """Strip common corporate suffixes for fuzzy dedup / cooldown matching."""
     suffixes = [' inc', ' ltd', ' llc', ' corp', ' limited',
@@ -184,7 +336,22 @@ def set_setting(key: str, value: str) -> None:
 
 
 def get_send_paused() -> bool:
-    return get_setting("send_paused", "0") == "1"
+    """Return the kill-switch state, accepting the persisted text variants.
+
+    The setting is written by several clients and may be edited by hand, so
+    comparison must be case-insensitive and whitespace-tolerant.  An unknown
+    value is not an invitation to send: raise a database-domain error so the
+    caller can fail closed and keep the send pipeline stopped.
+    """
+    raw = get_setting("send_paused", "0")
+    if raw is None:
+        raw = ""
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off", ""}:
+        return False
+    raise DatabaseError(f"Invalid send_paused setting: {raw!r}")
 
 
 def set_send_paused(paused: bool) -> None:
@@ -202,6 +369,85 @@ _JOB_FIELDS = [
     "inferred_domain", "domain_confidence", "email_variant_used", "eval_engine",
     "eval_tokens", "eval_duration_ms", "pdf_path", "report_path", "processed_at",
 ]
+
+# These states represent an action already taken, a human gate, or an
+# intentionally paused/simulated row.  Re-running a scraper/evaluator must not
+# turn one of them back into Evaluated/Sourced and make it eligible for a
+# second browser action.  ``update_job_status`` remains the explicit,
+# human/worker-owned transition seam; ``save_job`` is an upsert and never uses
+# that seam to change a protected state.
+PROTECTED_JOB_STATUSES = frozenset({
+    "Applied", "Sent", "FollowupSent", "Verified", "NeedsReview",
+    "NeedsVerification", "Expired", "Skipped", "Simulated", "SendPaused",
+    "EmailQueued", "Applying", "Replied", "phone_screen", "technical",
+    "final", "offer", "accepted", "rejected",
+})
+# Backwards/forwards-compatible alias for callers that used the shorter name.
+PROTECTED_STATUSES = PROTECTED_JOB_STATUSES
+_PROTECTED_STATUS_KEYS = frozenset(
+    re.sub(r"[\s_-]+", "", value).lower() for value in PROTECTED_JOB_STATUSES
+)
+
+
+def _status_key(status: object) -> str:
+    return re.sub(r"[\s_-]+", "", str(status or "").strip()).lower()
+
+
+def is_protected_job_status(status: object) -> bool:
+    """Return whether *status* must be preserved by an upsert/re-evaluation."""
+    return _status_key(status) in _PROTECTED_STATUS_KEYS
+
+
+# Short alias for integrations that already use the generic name.
+is_protected_status = is_protected_job_status
+
+
+def _find_job_row(cur: sqlite3.Cursor, title: str, company: str, link: str = ""):
+    """Find the same identity save_job uses, preferring protected rows.
+
+    The link match is exact because it is the database's unique job key.  The
+    title/company fallback is retained for legacy rows, but a protected match
+    wins over a stale non-protected duplicate.
+    """
+    clean_link = str(link or "").strip()
+    exact_row = None
+    if clean_link:
+        exact_row = cur.execute("SELECT * FROM jobs WHERE link=? LIMIT 1", (clean_link,)).fetchone()
+        if exact_row and is_protected_job_status(exact_row["status"]):
+            return exact_row
+    rows = cur.execute(
+        "SELECT * FROM jobs WHERE LOWER(title)=? AND LOWER(company)=? ORDER BY id ASC",
+        (str(title or "").lower().strip(), str(company or "").lower().strip()),
+    ).fetchall()
+    # Even when a non-protected row has the exact incoming link, prefer a
+    # protected legacy row with the same title/company.  This prevents a
+    # second URL variant from bypassing a terminal application.
+    for row in rows:
+        if is_protected_job_status(row["status"]):
+            return row
+    if exact_row:
+        return exact_row
+    return rows[0] if rows else None
+
+
+def get_job_for_identity(title: str, company: str, link: str = "") -> dict | None:
+    """Return the existing row for an exact link or legacy title/company key.
+
+    Live orchestrators use this to avoid re-evaluating protected rows even when
+    ``--force`` is set.  It is read-only; status changes must go through an
+    explicit transition function.
+    """
+    conn = get_connection()
+    try:
+        row = _find_job_row(conn.cursor(), title, company, link)
+        return _row(row)
+    except sqlite3.Error as e:
+        print(f"  [DB Error] get_job_for_identity: {e}")
+        raise DatabaseError(
+            f"get_job_for_identity failed for '{title}'@'{company}': {e}"
+        ) from e
+    finally:
+        conn.close()
 
 
 def _letter_grade(score: int) -> str:
@@ -224,29 +470,27 @@ def save_job(
     eval_duration_ms: int = 0, pdf_path: str = "", report_path: str = "",
     status: str = "Sourced", letter_grade: str = "",
 ) -> int:
-    """Upsert by link, falling back to (title, company). Returns job_id."""
+    """Upsert a job while preserving terminal/protected state.
+
+    The lookup and update run in one ``BEGIN IMMEDIATE`` transaction.  A
+    protected existing row keeps its status (and identity/provenance fields),
+    even when a force re-evaluation supplies ``status='Evaluated'``.  Callers
+    that intentionally change state must use :func:`update_job_status` (or the
+    worker-specific explicit transition), never this ingestion upsert.
+    """
     conn = get_connection()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
-        existing_id = None
-        if link:
-            row = cur.execute("SELECT id FROM jobs WHERE link=?", (link,)).fetchone()
-            if row:
-                existing_id = row["id"]
-        if existing_id is None:
-            row = cur.execute(
-                "SELECT id FROM jobs WHERE LOWER(title)=? AND LOWER(company)=?",
-                (title.lower().strip(), company.lower().strip()),
-            ).fetchone()
-            if row:
-                existing_id = row["id"]
+        existing = _find_job_row(cur, title, company, link)
+        requested_status = str(status or "Sourced").strip() or "Sourced"
 
         values = {
-            "title": title.strip(), "company": company.strip(),
-            "company_normalised": normalise_company(company),
-            "link": (link or "").strip() or None, "source": source, "run_id": run_id,
+            "title": str(title or "").strip(), "company": str(company or "").strip(),
+            "company_normalised": normalise_company(str(company or "")),
+            "link": str(link or "").strip() or None, "source": source, "run_id": run_id,
             "score": score, "letter_grade": letter_grade or _letter_grade(score),
-            "status": status, "posted_at": posted_at, "location_raw": location_raw,
+            "status": requested_status, "posted_at": posted_at, "location_raw": location_raw,
             "location_resolved": location_resolved, "text_summary": text_summary,
             "skill_gap": _jdump(skill_gap_list), "bullet_adjustments": _jdump(bullet_adjustments_list),
             "tailored_skills": _jdump(tailored_skills), "star_stories": _jdump(star_stories),
@@ -259,15 +503,36 @@ def save_job(
             "pdf_path": pdf_path, "report_path": report_path, "processed_at": _now(),
         }
 
-        if existing_id:
+        if existing:
+            job_id = int(existing["id"])
+            if is_protected_job_status(existing["status"]):
+                # Keep the exact row and its identity intact.  Updating the
+                # analytical fields is safe, but replacing title/company/link
+                # could make a terminal application appear to be a new job.
+                values["status"] = existing["status"]
+                for field in ("title", "company", "company_normalised", "link", "source", "run_id"):
+                    values[field] = existing[field]
+
+                # Browser claims use processed_at as the durable owner marker
+                # (browser-apply-claim|timestamp|owner).  A force re-evaluation
+                # must not replace that field: doing so would make the current
+                # owner lose its lease and could allow a second application.
+                # Preserve the complete marker, including its timestamp, byte
+                # for byte as stored in SQLite.
+                existing_marker = existing["processed_at"]
+                if (
+                    _status_key(existing["status"]) == "applying"
+                    and isinstance(existing_marker, str)
+                    and existing_marker.startswith("browser-apply-claim|")
+                ):
+                    values["processed_at"] = existing_marker
             set_clause = ", ".join(f"{k}=?" for k in values)
-            cur.execute(f"UPDATE jobs SET {set_clause} WHERE id=?", (*values.values(), existing_id))
-            job_id = existing_id
+            cur.execute(f"UPDATE jobs SET {set_clause} WHERE id=?", (*values.values(), job_id))
         else:
             cols = ", ".join(values.keys())
             placeholders = ", ".join("?" for _ in values)
             cur.execute(f"INSERT INTO jobs ({cols}) VALUES ({placeholders})", tuple(values.values()))
-            job_id = cur.lastrowid
+            job_id = int(cur.lastrowid)
 
         conn.commit()
         return job_id
@@ -447,7 +712,45 @@ def get_successful_bullets() -> list[dict]:
 def save_outreach(job_id: int, company: str, contact_email: str, subject: str,
                    body: str = "", status: str = "sent", email_variant: str = "",
                    domain: str = "") -> int:
-    """Auto cold-email path (outreach/send_engine.py). Always channel='email'."""
+    """Persist an auto-email row only with an exact, valid recipient domain.
+
+    Empty-recipient rows are retained for synthetic cooldown records, but any
+    row that contains an email address must name the same company domain.  The
+    send engine and the transport repeat this check; keeping it here prevents a
+    future caller from turning a third-party address into a persisted send.
+    """
+    if not isinstance(contact_email, str):
+        if contact_email:
+            raise DatabaseError("save_outreach requires a string recipient address")
+        contact_email = ""
+    raw_email = contact_email.strip()
+    raw_domain = domain.strip() if isinstance(domain, str) else ""
+    normalised_domain = normalise_domain(raw_domain) if raw_domain else ""
+    if raw_domain and not normalised_domain:
+        raise DatabaseError(
+            f"save_outreach refused invalid company domain: {domain!r}"
+        )
+    if str(status or "").strip().lower() == "sent" and not raw_email:
+        raise DatabaseError(
+            "save_outreach refused a sent row without a verified recipient address"
+        )
+
+    if raw_email:
+        normalised_email = normalise_email(raw_email)
+        if not normalised_email or not email_matches_domain(
+            normalised_email, normalised_domain
+        ):
+            raise DatabaseError(
+                "save_outreach refused an email outside the exact company domain"
+            )
+        contact_email = normalised_email
+        domain = normalised_domain
+    else:
+        # Keep synthetic/non-email rows (for example memory cooldowns) valid,
+        # but do not preserve an unsafe domain string supplied alongside them.
+        contact_email = ""
+        domain = normalised_domain
+
     conn = get_connection()
     try:
         cur = conn.execute(
@@ -455,7 +758,7 @@ def save_outreach(job_id: int, company: str, contact_email: str, subject: str,
             "(job_id, company, company_normalised, domain, contact_email, subject, "
             " body, email_variant, sent_at, status, channel) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, company.strip(), normalise_company(company), domain,
-             contact_email.strip(), subject.strip(), body, email_variant, _now(), status,
+             contact_email, subject.strip(), body, email_variant, _now(), status,
              "email"),
         )
         conn.commit()
@@ -528,11 +831,23 @@ def get_outreach_channel_breakdown(since_iso: str) -> dict:
 
 
 def get_recent_outreach(days: int = 14) -> list[dict]:
+    """Return outreach rows with the associated job title.
+
+    G2 historically read ``job_title`` from this function, but the query used
+    to select ``outreach.*`` only; since ``outreach`` has no title column the
+    check silently never fired.  Keep the existing ``outreach.*`` shape and
+    add a LEFT JOIN so historical/manual rows remain visible even if a job was
+    removed.
+    """
     conn = get_connection()
     try:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = conn.execute(
-            "SELECT * FROM outreach WHERE sent_at >= ? ORDER BY sent_at DESC", (cutoff,)
+            "SELECT o.*, j.title AS job_title, j.company AS job_company, "
+            "j.company_normalised AS job_company_normalised "
+            "FROM outreach o LEFT JOIN jobs j ON j.id = o.job_id "
+            "WHERE o.sent_at >= ? ORDER BY o.sent_at DESC",
+            (cutoff,),
         ).fetchall()
         return _rows(rows)
     except sqlite3.Error as e:
@@ -540,6 +855,19 @@ def get_recent_outreach(days: int = 14) -> list[dict]:
         raise DatabaseError(f"get_recent_outreach failed: {e}") from e
     finally:
         conn.close()
+
+
+def get_sent_outreach_with_jobs(company_normalised: str = "") -> list[dict]:
+    """Return all sent outreach joined to jobs for semantic duplicate checks.
+
+    The optional company argument is retained for callers that want to narrow
+    the result later.  The underlying historical helper now performs the join;
+    delegating through it keeps older callers/tests that stub that seam working
+    while still covering the full retained history.
+    """
+    del company_normalised  # filtering is performed by the send-engine helper
+    rows = get_recent_outreach(days=36500)
+    return [row for row in rows if str(row.get("status", "")).lower() == "sent"]
 
 
 def get_recent_outreach_emails(days: int = 14) -> list[str]:
@@ -669,6 +997,238 @@ def update_outreach_status(outreach_id: int, status: str) -> None:
         conn.close()
 
 
+def has_outreach_status(job_id: int, status: str, channel: str | None = None) -> bool:
+    """Return True when this job already has an outreach row in ``status``."""
+    conn = get_connection()
+    try:
+        if channel:
+            row = conn.execute(
+                "SELECT 1 FROM outreach WHERE job_id=? AND status=? AND channel=? LIMIT 1",
+                (job_id, status, channel),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT 1 FROM outreach WHERE job_id=? AND status=? LIMIT 1",
+                (job_id, status),
+            ).fetchone()
+        return row is not None
+    except sqlite3.Error as e:
+        print(f"  [DB Error] has_outreach_status: {e}")
+        raise DatabaseError(f"has_outreach_status failed for job_id={job_id}: {e}") from e
+    finally:
+        conn.close()
+
+
+def has_posted_review_card(job_id: int) -> bool:
+    """True after a G10 review card was delivered, regardless of legacy channel."""
+    return has_outreach_status(job_id, "review_posted")
+
+
+def ensure_review_outreach(job_id: int, company: str, domain: str = "",
+                           reason: str = "") -> int:
+    """Create one review row for a G10 miss, idempotently across processes.
+
+    The current schema has no partial unique index for review rows.  SQLite's
+    ``BEGIN IMMEDIATE`` write transaction is therefore the application-level
+    uniqueness lock: concurrent callers serialise, re-check after acquiring the
+    lock, and either reuse the existing row or insert exactly one.  The lookup
+    intentionally includes legacy rows whose ``channel`` is ``email``; this is
+    what preserves the 17 pending rows already present in existing databases.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id FROM outreach WHERE job_id=? "
+            "AND status IN ('needs_review', 'review_sending', 'review_posted') "
+            "ORDER BY CASE status WHEN 'review_posted' THEN 0 ELSE 1 END, id DESC "
+            "LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if row:
+            review_id = int(row["id"])
+            conn.commit()
+            return review_id
+
+        company_value = str(company or "Unknown").strip() or "Unknown"
+        domain_value = str(domain or "").strip().lower()
+        reason_value = str(reason or "").strip()
+        cur = conn.execute(
+            "INSERT INTO outreach "
+            "(job_id, company, company_normalised, domain, contact_email, subject, "
+            " body, email_variant, sent_at, status, channel, notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, company_value, normalise_company(company_value), domain_value, "",
+             f"Human review: {company_value}", reason_value, "g10_review", _now(),
+             "needs_review", "discord_review", reason_value),
+        )
+        review_id = int(cur.lastrowid)
+        conn.commit()
+        return review_id
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] ensure_review_outreach: {e}")
+        raise DatabaseError(f"ensure_review_outreach failed for job_id={job_id}: {e}") from e
+    finally:
+        conn.close()
+
+
+def get_pending_review_jobs(limit: int = 20) -> list[dict]:
+    """Return undelivered G10 review rows, highest score first.
+
+    ``LEFT JOIN`` is intentional: a review must remain visible even if its job
+    row is missing or temporarily unavailable.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT o.id AS outreach_id, o.job_id, o.company, o.domain, "
+            "       o.notes AS review_reason, o.sent_at, o.status AS review_status, "
+            "       o.channel AS review_channel, "
+            "       j.title, j.link, j.source, j.score, j.letter_grade, "
+            "       j.text_summary, j.skill_gap, j.recruiter_message, "
+            "       j.recruiter_email, j.contact_email, j.inferred_domain, "
+            "       j.domain_confidence, j.pdf_path "
+            "FROM outreach o LEFT JOIN jobs j ON j.id=o.job_id "
+            "WHERE o.status='needs_review' "
+            "ORDER BY COALESCE(j.score, 0) DESC, o.id ASC LIMIT ?",
+            (max(1, min(int(limit), 100)),),
+        ).fetchall()
+        return _rows(rows)
+    except sqlite3.Error as e:
+        print(f"  [DB Error] get_pending_review_jobs: {e}")
+        raise DatabaseError(f"get_pending_review_jobs failed: {e}") from e
+    finally:
+        conn.close()
+
+
+def count_pending_review_jobs() -> int:
+    """Count every pending review row, including legacy ``email`` rows."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM outreach WHERE status='needs_review'"
+        ).fetchone()
+        return int(row["n"] if row else 0)
+    except sqlite3.Error as e:
+        print(f"  [DB Error] count_pending_review_jobs: {e}")
+        raise DatabaseError(f"count_pending_review_jobs failed: {e}") from e
+    finally:
+        conn.close()
+
+
+def get_review_outreach_status(outreach_id: int) -> str | None:
+    """Return the current status of one exact review row."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT status FROM outreach WHERE id=?", (outreach_id,)
+        ).fetchone()
+        return str(row["status"]) if row else None
+    except sqlite3.Error as e:
+        print(f"  [DB Error] get_review_outreach_status: {e}")
+        raise DatabaseError(
+            f"get_review_outreach_status failed for id={outreach_id}: {e}"
+        ) from e
+    finally:
+        conn.close()
+
+
+def claim_review_card(outreach_id: int, job_id: int | None = None) -> bool:
+    """Atomically claim one pending review row for at-most-once delivery.
+
+    A successful claim changes the exact row to ``review_sending``. Competing
+    workers therefore cannot post the same card concurrently. The state is not
+    automatically reset after a crash: retrying an ambiguous external side
+    effect is less safe than leaving the row visible for manual reconciliation.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        where = "id=? AND status='needs_review'"
+        params: list[object] = [outreach_id]
+        if job_id is not None:
+            where += " AND job_id=?"
+            params.append(job_id)
+        cur = conn.execute(
+            "UPDATE outreach SET status='review_sending', sent_at=? " + f"WHERE {where}",
+            (_now(), *params),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] claim_review_card: {e}")
+        raise DatabaseError(f"claim_review_card failed for id={outreach_id}: {e}") from e
+    finally:
+        conn.close()
+
+
+def release_review_card(outreach_id: int, reason: str = "") -> bool:
+    """Release a claimed row after a confirmed non-delivery/transport failure."""
+    conn = get_connection()
+    try:
+        detail = str(reason or "delivery failed").strip()[:300]
+        cur = conn.execute(
+            "UPDATE outreach SET status='needs_review', "
+            "notes=CASE WHEN COALESCE(notes,'')='' THEN ? "
+            "ELSE notes || '; ' || ? END "
+            "WHERE id=? AND status='review_sending'",
+            (detail, detail, outreach_id),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] release_review_card: {e}")
+        raise DatabaseError(f"release_review_card failed for id={outreach_id}: {e}") from e
+    finally:
+        conn.close()
+
+
+def mark_review_card_posted(outreach_id: int, job_id: int | None = None) -> bool:
+    """Mark exactly one outreach row as delivered; safe to call repeatedly.
+
+    ``job_id`` is an optional consistency check.  The primary key is always
+    used for the update, so a newer pending row for the same job can never be
+    marked by mistake.
+    """
+    conn = get_connection()
+    try:
+        where = "id=? AND status IN ('needs_review','review_sending')"
+        params: list[object] = [outreach_id]
+        if job_id is not None:
+            where += " AND job_id=?"
+            params.append(job_id)
+        cur = conn.execute(
+            "UPDATE outreach SET status='review_posted', channel='discord_review', "
+            "notes=CASE WHEN COALESCE(notes, '') LIKE '%Discord review card posted%' THEN notes "
+            "WHEN COALESCE(notes, '')='' THEN 'Discord review card posted' "
+            "ELSE notes || '; Discord review card posted' END "
+            f"WHERE {where}",
+            params,
+        )
+        if cur.rowcount:
+            conn.commit()
+            return True
+
+        # Another worker may have completed the exact row between SELECT and
+        # UPDATE.  Treat that as success, but never fall back to ``job_id``.
+        status_row = conn.execute(
+            "SELECT status FROM outreach WHERE id=?", (outreach_id,)
+        ).fetchone()
+        conn.commit()
+        return bool(status_row and status_row["status"] == "review_posted")
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] mark_review_card_posted: {e}")
+        raise DatabaseError(
+            f"mark_review_card_posted failed for outreach_id={outreach_id}: {e}"
+        ) from e
+    finally:
+        conn.close()
+
+
 # ── Send queue (G7/G8 overflow) ─────────────────────────────────────────────
 
 def enqueue_send(job_id: int, score: int, reason: str = "") -> int:
@@ -706,6 +1266,92 @@ def get_pending_queue_items(limit: int = 50) -> list[dict]:
         conn.close()
 
 
+def claim_pending_queue_item() -> dict | None:
+    """Atomically claim one live queue item for processing.
+
+    Claims are persisted as ``processing`` before any SMTP work starts, so two
+    daily/watcher processes cannot consume the same deferred send concurrently.
+    A process crash intentionally leaves an explicit ``processing`` row for
+    manual reconciliation rather than automatically risking a duplicate send.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT q.*, j.title AS job_title, j.company AS job_company, "
+            "j.status AS job_status, j.link AS job_link, j.source AS job_source "
+            "FROM send_queue q JOIN jobs j ON j.id=q.job_id "
+            "WHERE q.status='pending' "
+            "ORDER BY q.score DESC, q.queued_at ASC, q.id ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        cur = conn.execute(
+            "UPDATE send_queue SET status='processing', processed_at=? "
+            "WHERE id=? AND status='pending'",
+            (_now(), int(row["id"])),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return _row(row)
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] claim_pending_queue_item: {e}")
+        raise DatabaseError(f"claim_pending_queue_item failed: {e}") from e
+    finally:
+        conn.close()
+
+
+def resolve_stale_processing_queue(timeout_minutes: int = 60) -> int:
+    """Resolve abandoned queue claims without retrying an ambiguous send.
+
+    A crashed SMTP worker may have sent before losing its DB connection. Marking
+    old claims ``uncertain`` makes the outcome visible and prevents automatic
+    duplicate delivery.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cutoff = (
+            datetime.now() - timedelta(minutes=max(1, int(timeout_minutes)))
+        ).isoformat()
+        rows = conn.execute(
+            "SELECT id, job_id FROM send_queue "
+            "WHERE status='processing' AND processed_at < ?",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            conn.commit()
+            return 0
+        queue_ids = [int(row["id"]) for row in rows]
+        job_ids = [int(row["job_id"]) for row in rows if row["job_id"] is not None]
+        placeholders = ",".join("?" for _ in queue_ids)
+        conn.execute(
+            f"UPDATE send_queue SET status='uncertain', processed_at=? "
+            f"WHERE status='processing' AND id IN ({placeholders})",
+            (_now(), *queue_ids),
+        )
+        if job_ids:
+            job_placeholders = ",".join("?" for _ in job_ids)
+            conn.execute(
+                f"UPDATE jobs SET status='NeedsVerification' "
+                f"WHERE id IN ({job_placeholders}) "
+                f"AND status IN ('Evaluated','EmailQueued')",
+                tuple(job_ids),
+            )
+        conn.commit()
+        return len(queue_ids)
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] resolve_stale_processing_queue: {e}")
+        raise DatabaseError(f"resolve_stale_processing_queue failed: {e}") from e
+    finally:
+        conn.close()
+
+
 def update_queue_status(queue_id: int, status: str) -> None:
     conn = get_connection()
     try:
@@ -723,50 +1369,77 @@ def update_queue_status(queue_id: int, status: str) -> None:
 
 
 def get_domain_contact(domain: str) -> dict | None:
-    """Cached verified contact for a domain (bounce_count < 2 only)."""
+    """Return a cached contact only when it is valid for this exact domain."""
+    normalised_domain = normalise_domain(domain)
+    if not normalised_domain:
+        return None
     conn = get_connection()
     try:
         row = conn.execute(
             "SELECT domain, email, source FROM domain_contacts "
             "WHERE lower(domain)=? AND bounce_count < 2",
-            (domain.lower(),),
+            (normalised_domain,),
         ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        cached = dict(row)
+        if not email_matches_domain(cached.get("email", ""), normalised_domain):
+            # Do not propagate a stale/third-party row written by an older
+            # build.  Do not delete it here: this function is also used by
+            # simulation, which must perform no cache writes.
+            return None
+        cached["domain"] = normalised_domain
+        cached["email"] = normalise_email(cached["email"])
+        return cached
     except sqlite3.Error:
         return None  # table may not exist yet (pre-008 DBs)
     finally:
         conn.close()
 
 
-def save_domain_contact(domain: str, email: str, source: str) -> None:
+def save_domain_contact(domain: str, email: str, source: str) -> bool:
+    """Persist a contact only after exact-domain and syntax validation."""
+    normalised_domain = normalise_domain(domain)
+    normalised_email = normalise_email(email)
+    if not email_matches_domain(normalised_email, normalised_domain):
+        print(
+            "  [G10] refused domain-contact cache write: address does not "
+            f"match {normalised_domain or domain!r}"
+        )
+        return False
     conn = get_connection()
     try:
         conn.execute(
             "INSERT INTO domain_contacts (domain, email, source, found_at) "
             "VALUES (?,?,?,?) ON CONFLICT(domain) DO UPDATE SET "
             "email=excluded.email, source=excluded.source, found_at=excluded.found_at",
-            (domain.lower(), email, source, _now()),
+            (normalised_domain, normalised_email, str(source or "unknown"), _now()),
         )
         conn.commit()
+        return True
     except sqlite3.Error as e:
         conn.rollback()
         print(f"  [DB Error] save_domain_contact: {e}")
+        return False
     finally:
         conn.close()
 
 
 def bump_domain_contact(domain: str, bounced: bool) -> None:
+    normalised_domain = normalise_domain(domain)
+    if not normalised_domain:
+        return
     conn = get_connection()
     try:
         if bounced:
             conn.execute(
                 "UPDATE domain_contacts SET bounce_count=bounce_count+1 WHERE lower(domain)=?",
-                (domain.lower(),),
+                (normalised_domain,),
             )
         else:
             conn.execute(
                 "UPDATE domain_contacts SET send_count=send_count+1 WHERE lower(domain)=?",
-                (domain.lower(),),
+                (normalised_domain,),
             )
         conn.commit()
     except sqlite3.Error:

@@ -157,9 +157,44 @@ def _parse_json(text: str) -> dict:
 
 
 def _is_daily_quota(msg: str) -> bool:
-    signals = ["per day", "per_day", "daily limit", "PerDayPerProject",
-                "FreeTier", "insufficient_quota", "quota exceeded"]
-    return any(s.lower() in msg.lower() for s in signals)
+    """True only for DAILY exhaustion. Per-minute 429s carry RetryInfo /
+    PerMinute quotaIds and must NOT disable the engine — the caller retries
+    after the advised delay. (Misclassifying this zeroed a whole 43-job run
+    on 2026-09-21: one per-minute 429 disabled gemini for everything.)"""
+    low = msg.lower()
+    if "perminute" in low or "per-minute" in low:
+        return False
+    signals = ["per day", "per_day", "perday", "daily limit",
+               "requests per day", "daily quota", "perdayperproject"]
+    return any(s in low for s in signals)
+
+
+def _retry_delay_seconds(msg: str, default: int) -> int:
+    """Honor the server's RetryInfo when present ('retry in 17.5s', retryDelay)."""
+    import re as _re
+    m = _re.search(r"retry in ([\d.]+)s", msg)
+    if m:
+        try:
+            return min(120, int(float(m.group(1))) + 2)
+        except ValueError:
+            pass
+    return default
+
+
+# ── Free-tier pacing (15 RPM shared across soft-filter + eval calls) ─────────
+
+_last_call_ts = 0.0
+_MIN_CALL_GAP = 5.0
+
+
+def pace_llm_call() -> None:
+    """Sleep so consecutive Gemini calls stay ~12 RPM, under the 15 RPM
+    free-tier limit. Call at the top of every Gemini query path."""
+    global _last_call_ts
+    dt = time.time() - _last_call_ts
+    if dt < _MIN_CALL_GAP:
+        time.sleep(_MIN_CALL_GAP - dt)
+    _last_call_ts = time.time()
 
 
 # ── Engine queries ────────────────────────────────────────────────────────────
@@ -169,10 +204,11 @@ def _query_gemini(prompt: str) -> dict:
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    for attempt in range(3):
+    for attempt in range(4):
         try:
+            pace_llm_call()
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-flash-lite-latest",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -187,8 +223,8 @@ def _query_gemini(prompt: str) -> dict:
                 if _is_daily_quota(msg):
                     disable_engine("gemini", "daily quota exhausted")
                     raise
-                if attempt < 2:
-                    wait = 4 * (2 ** attempt)
+                if attempt < 3:
+                    wait = _retry_delay_seconds(msg, 4 * (2 ** attempt))
                     print(f"  [Gemini] Rate-limited, retry in {wait}s…")
                     time.sleep(wait)
                 else:
@@ -250,7 +286,10 @@ def _query_openai(prompt: str) -> dict:
             return _parse_json(resp.choices[0].message.content or "")
         except Exception as e:
             msg = str(e).lower()
-            if "429" in msg or "insufficient_quota" in msg:
+            if "insufficient_quota" in msg:
+                disable_engine("openai", "billing quota exhausted")
+                raise
+            if "429" in msg:
                 if _is_daily_quota(msg):
                     disable_engine("openai", "quota exhausted")
                     raise
@@ -283,7 +322,9 @@ def evaluate_job(
     if settings is None:
         settings = {}
 
-    preferred = (settings.get("llm") or {}).get("preferred", "gemini").lower()
+    preferred = os.getenv(
+        "PREFERRED_LLM", (settings.get("llm") or {}).get("preferred", "gemini")
+    ).strip().lower()
     start_ms  = int(time.time() * 1000)
 
     prompt = _build_prompt(job, cv_data, memory_context, profile, settings)

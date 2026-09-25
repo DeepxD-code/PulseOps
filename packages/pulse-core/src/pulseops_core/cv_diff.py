@@ -20,7 +20,15 @@ from pathlib import Path
 
 from pulseops_core.exceptions import CVParseError
 
-ROOT        = Path(__file__).resolve().parent.parent
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return here.parents[4]
+
+
+ROOT        = _repo_root()
 CV_PATH     = ROOT / "cv.md"
 HISTORY_DIR = ROOT / "memory" / "cv_history"
 CHANGELOG   = HISTORY_DIR / "cv_changelog.jsonl"

@@ -16,17 +16,22 @@ Per spec:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
+import time
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import requests
-from bs4 import BeautifulSoup
 
 from pulseops_core.exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
+
 
 def _repo_root() -> Path:
     here = Path(__file__).resolve()
@@ -37,41 +42,389 @@ def _repo_root() -> Path:
 
 
 ROOT = _repo_root()
-# New Tier-2 location first, old flat layout as fallback.
-_BRIDGE_CANDIDATES = [
-    ROOT / "apps" / "weekly-scan" / "linkedin_bridge.js",
-    ROOT / "linkedin_bridge.js",
-]
-_TEMP_CANDIDATES = [
-    ROOT / "apps" / "weekly-scan" / "temp_linkedin_jobs.json",
-    ROOT / "temp_linkedin_jobs.json",
-]
+# The bridge and its hand-off have one authoritative Tier-2 location.  The
+# legacy root file is still cleaned up before every launch, but is never read:
+# accepting it would make a failed/old root hand-off look like a fresh result.
+LINKEDIN_BRIDGE = ROOT / "apps" / "weekly-scan" / "linkedin_bridge.js"
+LINKEDIN_TEMP_JSON = ROOT / "apps" / "weekly-scan" / "temp_linkedin_jobs.json"
+LEGACY_LINKEDIN_TEMP_JSON = ROOT / "temp_linkedin_jobs.json"
+_BRIDGE_CANDIDATES = [LINKEDIN_BRIDGE, ROOT / "linkedin_bridge.js"]
+_TEMP_CANDIDATES = [LINKEDIN_TEMP_JSON, LEGACY_LINKEDIN_TEMP_JSON]
+_LINKEDIN_HANDOFF_MAX_AGE_BEFORE_LAUNCH = 0.05  # filesystem clock-resolution slack
 
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
+
+class UnsafeURLError(ValueError):
+    """Raised when an outbound URL fails the public-network policy."""
+
+
+# Keep the public validator deliberately small and explicit.  It is used for
+# both source API calls and job-page enrichment so there is one SSRF policy.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+_REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
+
+
+def _normalise_hostname(host: str) -> str:
+    """Return a DNS-safe, lower-case hostname without a trailing root dot."""
+    if not isinstance(host, str) or not host or "%" in host:
+        raise UnsafeURLError("URL has an invalid hostname")
+    try:
+        # IDNA normalisation catches look-alike local names such as
+        # ``foo。local`` before they are handed to the resolver.
+        normalised = host.rstrip(".").encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise UnsafeURLError("URL has an invalid hostname") from exc
+    if not normalised or "\\" in normalised or any(ch.isspace() for ch in normalised):
+        raise UnsafeURLError("URL has an invalid hostname")
+    return normalised
+
+
+def _is_ip_literal(host: str) -> bool:
+    """Recognise IPv4/IPv6 literals, including common alternate IPv4 forms."""
+    if ":" in host:
+        # A colon cannot occur in a DNS hostname.  Treat malformed IPv6 and
+        # zone-qualified literals as literals too, so they never reach DNS.
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+
+    # ``ipaddress`` intentionally does not accept legacy decimal/octal/hex
+    # IPv4 spellings, but requests/socket may.  Reject those spellings too.
+    if re.fullmatch(r"[0-9]+|0[xX][0-9a-fA-F]+", host):
+        return True
+    try:
+        socket.inet_aton(host)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _assert_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    """Reject every address category that is not globally routable."""
+    if (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+        or getattr(address, "is_site_local", False)
+        or not address.is_global
+    ):
+        raise UnsafeURLError("URL host resolves to a non-public address")
+
+
+def _resolve_and_validate_host(host: str, port: int | None) -> None:
+    """Resolve *host* and reject the URL if any returned address is unsafe."""
+    if _is_ip_literal(host):
+        raise UnsafeURLError("IP literals are not allowed")
+
+    try:
+        # Use getaddrinfo rather than gethostbyname so IPv6 answers and every
+        # returned address are checked.  Calling it with two arguments also
+        # keeps this straightforward to mock in unit tests.
+        answers = list(socket.getaddrinfo(host, port))
+    except Exception as exc:
+        raise UnsafeURLError("URL hostname could not be resolved") from exc
+
+    if not answers:
+        raise UnsafeURLError("URL hostname resolved to no addresses")
+
+    for answer in answers:
+        try:
+            sockaddr = answer[4]
+            raw_address = sockaddr[0]
+            if isinstance(raw_address, bytes):
+                raw_address = raw_address.decode("ascii")
+            # IPv6 link-local answers can carry a scope identifier.  The
+            # address itself is still rejected below.
+            raw_address = str(raw_address).split("%", 1)[0]
+            address = ipaddress.ip_address(raw_address)
+        except (IndexError, TypeError, ValueError, UnicodeError) as exc:
+            raise UnsafeURLError("URL hostname returned an invalid address") from exc
+        _assert_public_address(address)
+
+
+def _canonical_allowed_host(value: str) -> str:
+    """Normalise an allowlist entry, accepting a hostname or a URL."""
+    text = str(value).strip()
+    if "://" in text or text.startswith("//"):
+        parsed = urlsplit(text)
+        text = parsed.hostname or ""
+    return _normalise_hostname(text)
+
+
+def validate_public_http_url(
+    url: str,
+    *,
+    allowed_hosts: Collection[str] | None = None,
+    require_https: bool = False,
+) -> str:
+    """Validate a URL for an outbound request and return it unchanged.
+
+    Only HTTP(S) URLs with a public DNS destination are accepted.  Hostname
+    resolution is performed here rather than relying on a string blocklist,
+    and every caller-supplied allowlist is applied to the resolved hostname as
+    well.  ``UnsafeURLError`` is a ``ValueError`` for easy fail-closed handling.
+    """
+    if not isinstance(url, str) or not url or url.strip() != url:
+        raise UnsafeURLError("URL must be a non-empty string")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        raise UnsafeURLError("URL contains control characters")
+    if "\\" in url:
+        # Backslashes are interpreted inconsistently by URL parsers and can
+        # turn an apparent public host into a different request target.
+        raise UnsafeURLError("URL contains an unsafe backslash")
+
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise UnsafeURLError("URL is malformed") from exc
+
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise UnsafeURLError("URL scheme is not HTTP or HTTPS")
+    if require_https and scheme != "https":
+        raise UnsafeURLError("URL must use HTTPS")
+    if not host:
+        raise UnsafeURLError("URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise UnsafeURLError("URL credentials are not allowed")
+    if port is not None and not 1 <= port <= 65535:
+        raise UnsafeURLError("URL has an invalid port")
+
+    normalised_host = _normalise_hostname(host)
+    local_names = {"localhost", "localhost.localdomain", "local", "internal"}
+    if (
+        normalised_host in local_names
+        or normalised_host.endswith(".localhost")
+        or normalised_host.endswith(".local")
+        or normalised_host.endswith(".internal")
+    ):
+        raise UnsafeURLError("local and internal hostnames are not allowed")
+    if _is_ip_literal(normalised_host):
+        raise UnsafeURLError("IP literals are not allowed")
+
+    if allowed_hosts is not None:
+        candidates = [allowed_hosts] if isinstance(allowed_hosts, str) else allowed_hosts
+        try:
+            allowed = {_canonical_allowed_host(candidate) for candidate in candidates}
+        except (TypeError, ValueError) as exc:
+            raise UnsafeURLError("URL host allowlist is invalid") from exc
+        if normalised_host not in allowed:
+            raise UnsafeURLError("URL host is not trusted for this request")
+
+    _resolve_and_validate_host(
+        normalised_host,
+        port if port is not None else (443 if scheme == "https" else 80),
+    )
+    return url
+
+
+def is_public_http_url(url: str, **kwargs) -> bool:
+    """Boolean convenience wrapper around :func:`validate_public_http_url`."""
+    try:
+        validate_public_http_url(url, **kwargs)
+    except UnsafeURLError:
+        return False
+    return True
+
+
+# A short alias is useful to callers that describe the policy simply as URL
+# validation, while the explicit name remains the canonical public API.
+validate_public_url = validate_public_http_url
+
+
+def _response_location(response) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    location = headers.get("Location")
+    if location is None:
+        location = headers.get("location")
+    if location is None:
+        return None
+    return str(location)
+
+
+def _response_status(response) -> int | None:
+    status = getattr(response, "status_code", None)
+    if isinstance(status, bool):
+        return None
+    if isinstance(status, int):
+        return status
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_get(
+    url: str,
+    *,
+    timeout: float = 10,
+    headers: dict | None = None,
+    params: dict | None = None,
+    allowed_hosts: Collection[str] | None = None,
+    require_https: bool = False,
+    max_redirects: int = _MAX_REDIRECTS,
+    **kwargs,
+):
+    """GET a validated public URL while validating every redirect manually.
+
+    Automatic redirects are always disabled.  Each ``Location`` is resolved
+    and checked before the next request, and the hop count is bounded.  A
+    caller cannot opt back into automatic redirects through ``kwargs``.
+    """
+    if not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or max_redirects < 0:
+        raise ValueError("max_redirects must be a non-negative integer")
+    max_redirects = min(max_redirects, _MAX_REDIRECTS)
+
+    current_url = validate_public_http_url(
+        url,
+        allowed_hosts=allowed_hosts,
+        require_https=require_https,
+    )
+    first_request = True
+    redirects = 0
+
+    while True:
+        request_kwargs = dict(kwargs)
+        request_kwargs["allow_redirects"] = False
+        request_kwargs["timeout"] = timeout
+        if first_request:
+            if headers is not None:
+                request_kwargs["headers"] = headers
+            if params is not None:
+                request_kwargs["params"] = params
+        response = requests.get(current_url, **request_kwargs)
+
+        status = _response_status(response)
+        if status not in _REDIRECT_STATUS_CODES:
+            return response
+        location = _response_location(response)
+        if not location:
+            # Do not follow an ambiguous redirect.  The caller will handle the
+            # non-success response as a source/base-description failure.
+            return response
+        if redirects >= max_redirects:
+            raise UnsafeURLError("URL redirect limit exceeded")
+
+        current_url = validate_public_http_url(
+            urljoin(current_url, location),
+            allowed_hosts=allowed_hosts,
+            require_https=require_https,
+        )
+        redirects += 1
+        first_request = False
+
+
+def safe_post(
+    url: str,
+    *,
+    allowed_hosts: Collection[str] | None = None,
+    require_https: bool = False,
+    **kwargs,
+):
+    """POST to a validated trusted endpoint without following redirects.
+
+    Source APIs are POST endpoints (TheirStack in particular).  Redirects are
+    rejected rather than replaying credentials or other sensitive request
+    data to a location selected by the remote service.
+    """
+    current_url = validate_public_http_url(
+        url,
+        allowed_hosts=allowed_hosts,
+        require_https=require_https,
+    )
+    request_kwargs = dict(kwargs)
+    request_kwargs["allow_redirects"] = False
+    response = requests.post(current_url, **request_kwargs)
+
+    if _response_status(response) in _REDIRECT_STATUS_CODES:
+        location = _response_location(response)
+        if location:
+            # Validate the advertised destination too, even though it will not
+            # be followed; this keeps redirect handling fail-closed and clear.
+            validate_public_http_url(
+                urljoin(current_url, location),
+                allowed_hosts=allowed_hosts,
+                require_https=require_https,
+            )
+        raise UnsafeURLError("redirects are not allowed for this API request")
+    return response
+
+
+# Public aliases make the shared policy discoverable without coupling callers
+# to private implementation names.
+_safe_get = safe_get
+_safe_post = safe_post
+
+
+_GOOGLE_API_URL = "https://www.searchapi.io/api/v1/search"
+_GOOGLE_API_HOSTS = frozenset({"www.searchapi.io", "searchapi.io"})
+_THEIRSTACK_API_URL = "https://api.theirstack.com/v1/jobs/search"
+_THEIRSTACK_API_HOSTS = frozenset({"api.theirstack.com"})
+
+
+def _clear_linkedin_handoff(*, strict: bool = False) -> None:
+    """Remove every known LinkedIn hand-off file.
+
+    Deletion is deliberately done before the bridge is started.  ``strict`` is
+    used for that pre-launch cleanup: if an old file cannot be removed, the
+    bridge must not run at all because its output could be mistaken for the
+    current run.  Cleanup after a failed run is best effort and is only for
+    hygiene; the caller still fails closed.
+    """
+    paths: list[Path] = []
+    for candidate in [LINKEDIN_TEMP_JSON, LEGACY_LINKEDIN_TEMP_JSON, *_TEMP_CANDIDATES]:
+        path = Path(candidate)
+        if path not in paths:
+            paths.append(path)
+    errors: list[str] = []
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    if errors and strict:
+        raise LinkedInBridgeError(
+            "Could not remove stale LinkedIn hand-off before launch: "
+            + "; ".join(errors)
+        )
+    if errors:
+        print("  [!] Could not fully clean LinkedIn hand-off: " + "; ".join(errors))
+
+def _is_linkedin_job_url(value: str) -> bool:
+    """Accept only official HTTPS LinkedIn job-view pages."""
+    try:
+        parsed = urlsplit(str(value or ""))
+        host = _normalise_hostname(parsed.hostname or "")
+    except (UnsafeURLError, ValueError):
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (host == "linkedin.com" or host.endswith(".linkedin.com"))
+        and parsed.path.startswith("/jobs/view/")
+        and parsed.username is None
+        and parsed.password is None
+    )
+
 
 def _enrich_description(link: str, base_desc: str) -> str:
-    """Fetch job link page and extract JD + contact email + how to apply."""
-    if not link or "example.com" in link or "linkedin.com/jobs/view" in link:
-        # LinkedIn view requires auth — skip fetch, keep base
-        return base_desc
-    try:
-        resp = requests.get(link, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code != 200 or len(resp.text) < 500:
-            return base_desc
-        soup = BeautifulSoup(resp.text, "lxml")
-        text = soup.get_text(separator=" ", strip=True)
-        # Extract JD snippet + contact email
-        email_match = _EMAIL_RE.search(text)
-        snippet = text[:2000]
-        if email_match:
-            snippet += f"\n\nContact: {email_match.group(0)} — found on job page"
-            # Also scan for apply instructions
-            apply_hint = re.search(r"(apply|send|email|contact).{0,80}@" , text, re.IGNORECASE)
-            if apply_hint:
-                snippet += f" | Apply hint: {apply_hint.group(0)[:120]}"
-        return snippet[:3500]
-    except Exception:
-        return base_desc
+    """Keep source descriptions; do not fetch untrusted job pages.
+
+    A hostname pre-check followed by a second resolver lookup in ``requests``
+    is vulnerable to DNS rebinding. Until a DNS-pinned transport is available,
+    dynamic job-page enrichment is disabled so listing-controlled URLs cannot
+    become an SSRF or PII side channel.
+    """
+    return base_desc
 
 
 class PulseOpsScraper:
@@ -85,55 +438,102 @@ class PulseOpsScraper:
     # ── LinkedIn (Node.js bridge) ─────────────────────────────────────────
 
     def fetch_linkedin(self) -> list[dict]:
-        bridge = next((p for p in _BRIDGE_CANDIDATES if p.exists()), None)
-        temp_json = next((p for p in _TEMP_CANDIDATES if p.exists()), _TEMP_CANDIDATES[0])
+        """Fetch LinkedIn jobs through a fresh, Tier-2-only hand-off.
 
+        The Node sidecar writes ``apps/weekly-scan/temp_linkedin_jobs.json``.
+        A root-level file is a legacy artifact and must never be used as a
+        fallback.  The file is removed before launch, and is accepted only
+        after a successful bridge exit and an mtime from this invocation.
+        """
+        # Do this even when the bridge is unavailable: leaving a tempting old
+        # file around is worse than returning an empty source for this run.
+        _clear_linkedin_handoff(strict=True)
+
+        bridge = next((Path(p) for p in _BRIDGE_CANDIDATES if Path(p).exists()), None)
         if not bridge:
             print("  [!] linkedin_bridge.js not found — skipping LinkedIn source")
             return []
 
+        # Never select an existing root/Tier-2 path.  The bridge contract is
+        # fixed to the Tier-2 output, regardless of which compatibility bridge
+        # executable was found.
+        temp_json = LINKEDIN_TEMP_JSON
+        launched_at = time.time()
+
         try:
             result = subprocess.run(
                 ["node", str(bridge)],
-                capture_output=True, text=True,
-                env=os.environ.copy(), timeout=30,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=os.environ.copy(),
+                timeout=30,
             )
             if result.returncode != 0:
+                stderr = str(getattr(result, "stderr", "") or "").strip()
                 raise LinkedInBridgeError(
-                    f"Node bridge exit {result.returncode}: "
-                    f"{result.stderr.strip()[:200]}"
+                    f"Node bridge exit {result.returncode}: {stderr[:200]}"
                 )
 
-            if not temp_json.exists():
-                raise LinkedInBridgeError("Bridge did not produce temp_linkedin_jobs.json")
+            # Check the exact Tier-2 path only.  In particular, do not fall
+            # back to LEGACY_LINKEDIN_TEMP_JSON when this file is absent.
+            if not temp_json.is_file():
+                raise LinkedInBridgeError(
+                    "Bridge did not produce the Tier-2 temp_linkedin_jobs.json"
+                )
 
-            raw = json.loads(temp_json.read_text(encoding="utf-8"))
             try:
-                temp_json.unlink()
-            except OSError:
-                pass
+                mtime = temp_json.stat().st_mtime
+            except OSError as exc:
+                raise LinkedInBridgeError(
+                    f"Could not stat Tier-2 LinkedIn hand-off: {exc}"
+                ) from exc
+            if mtime < launched_at - _LINKEDIN_HANDOFF_MAX_AGE_BEFORE_LAUNCH:
+                raise LinkedInBridgeError(
+                    "Tier-2 LinkedIn hand-off is stale (not written by this bridge run)"
+                )
 
-            jobs = []
-            for item in (raw if isinstance(raw, list) else []):
-                if not isinstance(item, dict):
-                    continue
-                link = item.get("jobUrl", "")
-                base = f"LinkedIn listing: {item.get('company','')} in {item.get('location','India')}."
-                jobs.append({
-                    "title":       item.get("position", "Untitled"),
-                    "company":     item.get("company", "Unknown"),
-                    "link":        link,
-                    "description": _enrich_description(link, base),
-                    "source":      "LinkedIn",
-                    "posted_at":   item.get("date", ""),
-                    "location_raw": item.get("location", ""),
-                })
-            return jobs
-
+            try:
+                raw = json.loads(temp_json.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise LinkedInBridgeError(
+                    f"Could not parse Tier-2 LinkedIn hand-off: {exc}"
+                ) from exc
         except LinkedInBridgeError:
+            _clear_linkedin_handoff(strict=False)
             raise
-        except Exception as e:
-            raise LinkedInBridgeError(f"LinkedIn bridge failed: {e}") from e
+        except subprocess.TimeoutExpired as exc:
+            _clear_linkedin_handoff(strict=False)
+            raise LinkedInBridgeError("LinkedIn bridge timed out after 30 seconds") from exc
+        except Exception as exc:
+            _clear_linkedin_handoff(strict=False)
+            raise LinkedInBridgeError(f"LinkedIn bridge failed: {exc}") from exc
+        finally:
+            # The hand-off is a transport, not a durable cache.  Remove it
+            # after the exact file has been consumed, including on parse or
+            # process failures handled above.
+            _clear_linkedin_handoff(strict=False)
+
+        jobs = []
+        for item in (raw if isinstance(raw, list) else []):
+            if not isinstance(item, dict):
+                continue
+            link = str(item.get("jobUrl") or "")
+            if not _is_linkedin_job_url(link):
+                print("  [!] linkedin_bridge returned a non-job/untrusted URL — skipping")
+                continue
+            base = f"LinkedIn listing: {item.get('company','')} in {item.get('location','India')}."
+            jobs.append({
+                "title":       item.get("position", "Untitled"),
+                "company":     item.get("company", "Unknown"),
+                "link":        link,
+                "description": _enrich_description(link, base),
+                "source":      "LinkedIn",
+                "posted_at":   item.get("date", ""),
+                "location_raw": item.get("location", ""),
+            })
+        return jobs
 
     # ── Google Jobs (SearchApi.io) ────────────────────────────────────────
 
@@ -159,11 +559,13 @@ class PulseOpsScraper:
         all_jobs, seen = [], set()
         for q in variants[:6]:
             try:
-                resp = requests.get(
-                    "https://www.searchapi.io/api/v1/search",
+                resp = safe_get(
+                    _GOOGLE_API_URL,
                     params={"engine": "google_jobs", "q": q,
                             "location": location, "api_key": api_key},
                     timeout=20,
+                    allowed_hosts=_GOOGLE_API_HOSTS,
+                    require_https=True,
                 )
                 if resp.status_code != 200:
                     raise GoogleJobsError(
@@ -223,8 +625,8 @@ class PulseOpsScraper:
         titles = list(dict.fromkeys(t.lower() for t in titles))
 
         try:
-            resp = requests.post(
-                "https://api.theirstack.com/v1/jobs/search",
+            resp = safe_post(
+                _THEIRSTACK_API_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type":  "application/json",
@@ -237,6 +639,8 @@ class PulseOpsScraper:
                     "order_by": [{"desc": True, "field": "date_posted"}],
                 },
                 timeout=20,
+                allowed_hosts=_THEIRSTACK_API_HOSTS,
+                require_https=True,
             )
             if resp.status_code != 200:
                 raise TheirStackError(

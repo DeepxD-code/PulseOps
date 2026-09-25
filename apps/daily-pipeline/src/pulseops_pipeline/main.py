@@ -51,6 +51,91 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parents[4]
 
+SIMULATED_SOURCE_PREFIX = "SIMULATED:"
+
+
+def _source_is_simulated(source: object) -> bool:
+    """Return whether a source is explicitly marked as simulated."""
+    return str(source or "").strip().upper().startswith(SIMULATED_SOURCE_PREFIX)
+
+
+def _source_is_mock(source: object) -> bool:
+    """Recognise legacy mock labels before they reach persistence."""
+    value = str(source or "").strip()
+    if _source_is_simulated(value):
+        value = value[len(SIMULATED_SOURCE_PREFIX):].strip()
+    return value.lower() == "mock" or value.lower().startswith(("mock:", "mock-"))
+
+
+def _mark_simulated_job(job: dict) -> dict:
+    """Mark a job before persistence without discarding its source name."""
+    raw_source = str(job.get("source") or "Mock").strip() or "Mock"
+    if _source_is_simulated(raw_source):
+        original_source = raw_source[len(SIMULATED_SOURCE_PREFIX):].strip() or "Mock"
+    else:
+        original_source = raw_source
+    job.setdefault("source_original", original_source)
+    job["source"] = f"{SIMULATED_SOURCE_PREFIX}{original_source}"
+    job["simulated"] = True
+    return job
+
+
+def _mark_simulated_jobs(jobs: list[dict] | None) -> list[dict]:
+    return [_mark_simulated_job(job) for job in (jobs or []) if isinstance(job, dict)]
+
+
+def _use_isolated_simulation_db() -> None:
+    """Keep simulation rows out of the live jobs/outreach database."""
+    from pulseops_store import db_manager as db
+
+    live_path = Path(os.getenv("PULSEOPS_DB", str(ROOT / "pulseops.db"))).resolve()
+    configured = os.getenv("PULSEOPS_SIMULATION_DB", "").strip()
+    simulation_path = (
+        Path(configured).resolve()
+        if configured
+        else (ROOT / "data" / "pulseops-simulation.db").resolve()
+    )
+    if simulation_path == live_path:
+        raise RuntimeError(
+            "PULSEOPS_SIMULATION_DB must not point at the live PULSEOPS_DB"
+        )
+    db.DB_PATH = simulation_path
+    db.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _send_pause_active(reader) -> bool:
+    """Read the pause switch fail-closed if the DB cannot be consulted."""
+    try:
+        return bool(reader())
+    except Exception:
+        return True
+
+
+def _protect_pending_email_queue() -> None:
+    """Keep legacy pending e-mail rows out of the browser-apply status set."""
+    try:
+        from pulseops_store.db_manager import (
+            get_job,
+            get_pending_queue_items,
+            is_protected_job_status,
+            update_job_status,
+        )
+
+        for item in get_pending_queue_items(limit=1000):
+            try:
+                job_id = int(item.get("job_id", 0))
+            except (TypeError, ValueError):
+                continue
+            if job_id <= 0:
+                continue
+            job = get_job(job_id)
+            if not job:
+                continue
+            if not is_protected_job_status(job.get("status")):
+                update_job_status(job_id, "EmailQueued")
+    except Exception as e:
+        print(f"  [!] Could not protect pending e-mail queue rows: {e}")
+
 
 def _header(title: str) -> None:
     print(f"\n{'=' * 62}\n  {title}\n{'=' * 62}")
@@ -184,8 +269,13 @@ def main() -> None:
         run_server()
         sys.exit(0)
 
+    if args.simulate and not (args.pause_sends or args.resume_sends):
+        _use_isolated_simulation_db()
+
     from pulseops_store.db_manager import get_send_paused, init_db, set_send_paused
     init_db()
+    if not args.simulate:
+        _protect_pending_email_queue()
 
     if args.pause_sends:
         set_send_paused(True)
@@ -204,10 +294,13 @@ def main() -> None:
     from pulseops_store import audit_log
     from pulseops_store.db_manager import (
         enqueue_send,
+        get_job_for_identity,
         is_job_processed,
+        is_protected_job_status,
         record_source_health,
         save_job,
         update_job_paths,
+        update_job_status,
     )
 
     run_id    = audit_log.generate_run_id()
@@ -221,29 +314,44 @@ def main() -> None:
     _header(f"PulseOps Daily Run [{run_id}]")
     print(f"  Mode:  {'SIMULATION' if args.simulate else 'LIVE'}")
     print(f"  Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    if get_send_paused():
-        print("  [!] Auto-sends are PAUSED (run --resume-sends to re-enable)")
+    if _send_pause_active(get_send_paused):
+        print("  [!] Auto-sends are PAUSED or their setting is unreadable (fail-closed)")
 
     audit_log.write_run_start(run_id, run_type="daily")
 
     # Load notification channels early (needed for Phase 1 source health alerts)
     discord_webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-    # Live mode: require at minimum Gemini + Groq keys
+    stats = {
+        "sourced": 0, "after_dedup": 0, "after_location": 0,
+        "after_hard_filter": 0, "after_soft_filter": 0,
+        "evaluated": 0, "matched_pdf": 0,
+        "sent": 0, "queued": 0, "skipped": 0, "uncertain": 0,
+        "tokens_used": 0, "engines_used": {},
+    }
+    new_matches: list[dict] = []
+
+    if not args.simulate:
+        _header("Phase 0A: Deferred Email Queue")
+        from pulseops_outreach.send_engine import process_pending_send_queue
+        queue_result = process_pending_send_queue(
+            settings=settings,
+            run_id=run_id,
+            limit=20,
+        )
+        stats["sent"] += int(queue_result.get("sent", 0))
+        stats["queued"] += int(queue_result.get("deferred", 0))
+        stats["skipped"] += int(queue_result.get("skipped", 0))
+        stats["uncertain"] += int(queue_result.get("uncertain", 0))
+        print(f"  [SendQueue] {queue_result}")
+
+    # Live sourcing/evaluation requires its normal LLM cascade. Deferred email
+    # work above is independent and must not be blocked by an evaluation key.
     if not args.simulate:
         missing = [k for k in ["GEMINI_API_KEY", "GROQ_API_KEY"] if not os.getenv(k)]
         if missing:
             print(f"\n[ERR] Missing API keys: {', '.join(missing)}")
             sys.exit(1)
-
-    stats = {
-        "sourced": 0, "after_dedup": 0, "after_location": 0,
-        "after_hard_filter": 0, "after_soft_filter": 0,
-        "evaluated": 0, "matched_pdf": 0,
-        "sent": 0, "queued": 0, "skipped": 0,
-        "tokens_used": 0, "engines_used": {},
-    }
-    new_matches: list[dict] = []
 
     # ── PHASE 0 — GitHub Resume Sync ─────────────────────────────────────
     _header("Phase 0: GitHub Resume Sync")
@@ -290,8 +398,8 @@ def main() -> None:
         scraper = PulseOpsScraper()
 
     if args.simulate:
-        raw_jobs = scraper.get_mock_listings()
-        print(f"  [~] Simulation: {len(raw_jobs)} mock jobs")
+        raw_jobs = _mark_simulated_jobs(scraper.get_mock_listings())
+        print(f"  [~] Simulation: {len(raw_jobs)} mock jobs (source-marked, no live send)")
         stats["sourced"] = len(raw_jobs)
     else:
         for source_name, fetch_fn in [
@@ -434,21 +542,41 @@ def main() -> None:
         cv_data = None
 
     for idx, job in enumerate(soft_passed, 1):
+        # Mark before the processed-row check and before save_job.  A mock
+        # source therefore remains identifiable even if it reaches this loop
+        # through a non-standard scraper or a caller-provided fixture.
+        if args.simulate or _source_is_simulated(job.get("source", "")) or _source_is_mock(job.get("source", "")):
+            _mark_simulated_job(job)
         title   = job.get("title", "Unknown")
         company = job.get("company", "Unknown")
         link    = job.get("link", "")
         source  = job.get("source", "?")
+        simulated_job = _source_is_simulated(source)
+        send_paused = False
+        if not simulated_job:
+            send_paused = _send_pause_active(get_send_paused)
 
         print(f"\n  [{idx}/{len(soft_passed)}] {title} @ {company}")
 
-        if not args.force and is_job_processed(title, company, link):
-            print("    [~] Already processed — skipping (use --force to re-evaluate)")
+        already_processed = is_job_processed(title, company, link)
+        if already_processed:
+            existing = get_job_for_identity(title, company, link)
+            if existing and is_protected_job_status(existing.get("status")):
+                print(
+                    "    [~] Existing job is protected "
+                    f"({existing.get('status')}); skipping re-evaluation"
+                )
+                continue
+        if already_processed and (not args.force or simulated_job):
+            print("    [~] Already processed — skipping" +
+                  (" (simulation rows are never overwritten)" if simulated_job else " (use --force to re-evaluate)"))
             continue
 
         # Phase 5 — Evaluation
         try:
-            if args.simulate or not has_evaluator:
+            if args.simulate or simulated_job or not has_evaluator:
                 eval_result = _mock_evaluation(title, company)
+                eval_result["simulated"] = True
             else:
                 memory_ctx = load_context(company=company) if has_context_loader else ""
                 eval_result = evaluate_job(
@@ -461,6 +589,17 @@ def main() -> None:
             engine   = eval_result.get("engine", "simulation")
             tokens   = eval_result.get("tokens_used", 0)
             duration = eval_result.get("eval_duration_ms", 0)
+
+            # A live run can still fall back to the mock evaluator when the
+            # optional evaluator package is unavailable.  Never let that
+            # fallback create a sendable row.
+            if engine == "simulation" and not simulated_job:
+                _mark_simulated_job(job)
+                source = job["source"]
+                simulated_job = True
+                if is_job_processed(title, company, link):
+                    print("    [~] Existing row collision — skipping simulated persistence")
+                    continue
 
             print(f"    Score: {score}  Grade: {grade}  Engine: {engine}")
             stats["evaluated"] += 1
@@ -475,10 +614,14 @@ def main() -> None:
             print(f"    [X] Unexpected evaluation error: {e}")
             continue
 
-        # Save job to DB
+        # Save a simulation row only with an explicit non-live status/source.
+        # save_job is never allowed to upsert over an existing row in this
+        # mode (the collision checks above enforce that invariant).
         job_id = save_job(
             title=title, company=company, link=link, source=source, run_id=run_id,
-            score=score, letter_grade=grade, status="Evaluated",
+            score=score, letter_grade=grade,
+            status=("Simulated" if simulated_job else
+                    "SendPaused" if send_paused else "Evaluated"),
             posted_at=job.get("posted_at", ""),
             location_raw=job.get("location_raw", ""),
             location_resolved=job.get("location_resolved", ""),
@@ -499,7 +642,8 @@ def main() -> None:
             eval_engine=engine, eval_tokens=tokens, eval_duration_ms=duration,
         )
 
-        # Phase 6 — Resume Build
+        # Phase 6 — Resume Build.  Simulation uses the builder's HTML-only
+        # mode; it never updates a live job path or creates a PDF.
         pdf_path = report_path = ""
         if score >= pdf_threshold:
             stats["matched_pdf"] += 1
@@ -507,38 +651,72 @@ def main() -> None:
                 from pulseops_core.resume_builder import build_resume
                 pdf_path, report_path = build_resume(
                     cv_data=cv_data, eval_result=eval_result,
-                    company=company, role=title, simulate=args.simulate,
+                    company=company, role=title,
+                    jd_text=job.get("description", ""),
+                    profile=profile,
+                    simulate=args.simulate or simulated_job or send_paused,
                 )
-                print(f"    [PDF] {pdf_path}")
-                update_job_paths(job_id, pdf_path=pdf_path, report_path=report_path)
+                print(f"    [PDF] {pdf_path or report_path}")
+                if not simulated_job and not send_paused:
+                    update_job_paths(job_id, pdf_path=pdf_path, report_path=report_path)
+                elif simulated_job:
+                    print("    [SIM] HTML-only resume; no live DB path update")
+                else:
+                    print("    [PAUSE] HTML-only resume; no live DB path update")
             except Exception as e:
                 print(f"    [!] Resume build failed (non-fatal): {e}")
 
-        # Phase 7 — Send Engine
+        # Phase 7 — Send Engine.  Do not call decide_send in simulation:
+        # its G10 path can read/write the contact cache and perform network
+        # lookups even when simulate=True.
         send_decision: dict | None = None
-        if score >= notify_threshold and not get_send_paused():
-            try:
-                from pulseops_outreach.send_engine import decide_send
-                send_decision = decide_send(
-                    job_id=job_id, job=job, eval_result=eval_result,
-                    settings=settings, run_id=run_id, simulate=args.simulate,
-                    pdf_path=pdf_path,
-                )
-                action = send_decision["action"]
-                reason = send_decision.get("reason", "")
-                print(f"    [Send] {action}" + (f": {reason}" if reason else ""))
-                audit_log.write_send_decision(run_id, company, title, action, reason)
+        if score >= notify_threshold:
+            if simulated_job:
+                send_decision = {
+                    "action": "SKIP",
+                    "reason": "simulation: send/review disabled",
+                    "guardrail": "SIMULATION",
+                }
+            elif send_paused or _send_pause_active(get_send_paused):
+                if not send_paused:
+                    send_paused = True
+                    update_job_status(job_id, "SendPaused")
+                send_decision = {
+                    "action": "SKIP",
+                    "reason": "auto-sends are paused",
+                    "guardrail": "PAUSE",
+                }
+            else:
+                try:
+                    from pulseops_outreach.send_engine import decide_send
+                    send_decision = decide_send(
+                        job_id=job_id, job=job, eval_result=eval_result,
+                        settings=settings, run_id=run_id, simulate=False,
+                        pdf_path=pdf_path,
+                    )
+                except (ImportError, Exception) as e:
+                    print(f"    [!] Send engine error (non-fatal): {e}")
+                    send_decision = {
+                        "action": "SKIP",
+                        "reason": f"send engine error: {e}",
+                        "guardrail": "ERROR",
+                    }
 
-                if action == "SEND":
-                    stats["sent"] += 1
-                elif action == "QUEUE":
-                    stats["queued"] += 1
-                    enqueue_send(job_id, score, reason)
-                else:
-                    stats["skipped"] += 1
+            action = send_decision["action"]
+            reason = send_decision.get("reason", "")
+            print(f"    [Send] {action}" + (f": {reason}" if reason else ""))
+            audit_log.write_send_decision(run_id, company, title, action, reason)
 
-            except (ImportError, Exception) as e:
-                print(f"    [!] Send engine error (non-fatal): {e}")
+            if action == "SEND":
+                stats["sent"] += 1
+            elif action == "QUEUE":
+                stats["queued"] += 1
+                # This is an e-mail overflow queue, not a browser-job queue.
+                # Mark first so an interrupted enqueue cannot leave an
+                # Evaluated row eligible for unattended browser consumption.
+                update_job_status(job_id, "EmailQueued")
+                enqueue_send(job_id, score, reason)
+            else:
                 stats["skipped"] += 1
 
         if score >= notify_threshold:
@@ -555,7 +733,9 @@ def main() -> None:
     telegram_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
-    if telegram_token and telegram_chat_id:
+    if args.simulate:
+        print("  [SIM] Telegram notifications skipped")
+    elif telegram_token and telegram_chat_id:
         try:
             from pulseops_notify.notifier import send_audit_summary, send_match_card
             send_audit_summary(stats, new_matches, run_id, telegram_token, telegram_chat_id, settings)
@@ -574,7 +754,9 @@ def main() -> None:
     else:
         print("  [~] Telegram not configured — set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
 
-    if discord_webhook:
+    if args.simulate:
+        print("  [SIM] Discord notifications skipped")
+    elif discord_webhook:
         try:
             from pulseops_notify.discord import send_discord_match_card, send_discord_summary
             send_discord_summary(stats, new_matches, run_id, discord_webhook, settings)
@@ -596,57 +778,64 @@ def main() -> None:
     # ── PHASE 9 — Reply Check + Interview Prep + Follow-ups + TSV ────────
     _header("Phase 9: Reply Check + Interview Prep + Follow-ups")
 
-    # 9a: IMAP reply + bounce + platform ingest (email_watcher runs hourly too)
-    try:
-        from pulseops_notify.email_watcher import run_watcher
-        w = run_watcher(dry_run=args.simulate)
-        print(f"  [OK] Watcher: bounces_fixed {w.get('bounces_fixed',0)}, platform_jobs {w.get('platform_jobs_ingested',0)}")
-    except Exception as e:
-        print(f"  [!] Watcher failed (non-fatal): {e}")
-    try:
-        from pulseops_notify.reply_detector import check_for_replies
-        n_replies = check_for_replies(run_id=run_id, simulate=args.simulate,
-                                       bot_token=telegram_token, chat_id=telegram_chat_id,
-                                       webhook_url=discord_webhook)
-        print(f"  [OK] Reply check: {n_replies} new reply/replies")
-    except Exception as e:
-        print(f"  [!] IMAP reply check failed (non-fatal): {e}")
-
-    # 9b: Interview prep auto-trigger
-    try:
-        from pulseops_notify.interview_prep import check_and_send_prep_packs
-        n_prep = check_and_send_prep_packs(run_id=run_id, bot_token=telegram_token,
-                                            chat_id=telegram_chat_id,
-                                            webhook_url=discord_webhook)
-        print(f"  [OK] Interview prep packs: {n_prep} sent")
-    except Exception as e:
-        print(f"  [!] Interview prep trigger failed (non-fatal): {e}")
-
-    # 9c: Day-5 follow-ups
-    if settings.get("followup", {}).get("enabled", True):
+    if args.simulate:
+        # These helpers can read IMAP/SMTP-adjacent state, send notifications,
+        # ingest platform jobs, or write follow-up/export state.  None belongs
+        # in an offline run, even when their implementations accept a
+        # simulate/dry_run flag.
+        print("  [SIM] Reply checks, interview prep, follow-ups, export, and digest skipped")
+    else:
+        # 9a: IMAP reply + bounce + platform ingest (email_watcher runs hourly too)
         try:
-            from pulseops_outreach.followup_engine import process_followups
-            n_fu = process_followups(run_id=run_id, settings=settings, simulate=args.simulate)
-            print(f"  [OK] Follow-ups sent: {n_fu}")
+            from pulseops_notify.email_watcher import run_watcher
+            w = run_watcher(dry_run=False)
+            print(f"  [OK] Watcher: bounces_fixed {w.get('bounces_fixed',0)}, platform_jobs {w.get('platform_jobs_ingested',0)}")
         except Exception as e:
-            print(f"  [!] Follow-up engine failed (non-fatal): {e}")
+            print(f"  [!] Watcher failed (non-fatal): {e}")
+        try:
+            from pulseops_notify.reply_detector import check_for_replies
+            n_replies = check_for_replies(run_id=run_id, simulate=False,
+                                           bot_token=telegram_token, chat_id=telegram_chat_id,
+                                           webhook_url=discord_webhook)
+            print(f"  [OK] Reply check: {n_replies} new reply/replies")
+        except Exception as e:
+            print(f"  [!] IMAP reply check failed (non-fatal): {e}")
 
-    # 9d: TSV export
-    try:
-        from pulseops_store.tsv_exporter import export
-        export(run_id=run_id)
-    except Exception as e:
-        print(f"  [!] TSV export failed (non-fatal): {e}")
+        # 9b: Interview prep auto-trigger
+        try:
+            from pulseops_notify.interview_prep import check_and_send_prep_packs
+            n_prep = check_and_send_prep_packs(run_id=run_id, bot_token=telegram_token,
+                                                chat_id=telegram_chat_id,
+                                                webhook_url=discord_webhook)
+            print(f"  [OK] Interview prep packs: {n_prep} sent")
+        except Exception as e:
+            print(f"  [!] Interview prep trigger failed (non-fatal): {e}")
 
-    # 9e: Weekly digest (if Sunday 09:00 IST)
-    try:
-        from pulseops_notify.weekly_digest import send_weekly_digest, should_send_digest
-        if should_send_digest():
-            print("  [OK] It's Sunday 09:00 IST — sending weekly digest…")
-            send_weekly_digest(bot_token=telegram_token, chat_id=telegram_chat_id,
-                               run_id=run_id, webhook_url=discord_webhook)
-    except Exception as e:
-        print(f"  [!] Weekly digest failed (non-fatal): {e}")
+        # 9c: Day-5 follow-ups
+        if settings.get("followup", {}).get("enabled", True):
+            try:
+                from pulseops_outreach.followup_engine import process_followups
+                n_fu = process_followups(run_id=run_id, settings=settings, simulate=False)
+                print(f"  [OK] Follow-ups sent: {n_fu}")
+            except Exception as e:
+                print(f"  [!] Follow-up engine failed (non-fatal): {e}")
+
+        # 9d: TSV export
+        try:
+            from pulseops_store.tsv_exporter import export
+            export(run_id=run_id)
+        except Exception as e:
+            print(f"  [!] TSV export failed (non-fatal): {e}")
+
+        # 9e: Weekly digest (if Sunday 09:00 IST)
+        try:
+            from pulseops_notify.weekly_digest import send_weekly_digest, should_send_digest
+            if should_send_digest():
+                print("  [OK] It's Sunday 09:00 IST — sending weekly digest…")
+                send_weekly_digest(bot_token=telegram_token, chat_id=telegram_chat_id,
+                                   run_id=run_id, webhook_url=discord_webhook)
+        except Exception as e:
+            print(f"  [!] Weekly digest failed (non-fatal): {e}")
 
     _finish(run_id, stats, run_start, settings)
 

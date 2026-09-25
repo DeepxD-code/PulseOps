@@ -28,7 +28,6 @@ def test_g1_blocks_low_score():
 
 
 def test_searchapi_lookup_keeps_only_domain_matched(monkeypatch):
-    import os
     from unittest.mock import MagicMock
 
     from pulseops_outreach import send_engine as se
@@ -42,14 +41,12 @@ def test_searchapi_lookup_keeps_only_domain_matched(monkeypatch):
         ]
     }
     monkeypatch.setenv("SEARCHAPI_API_KEY", "test-key")
-    monkeypatch.setattr("requests.get", lambda *a, **k: resp)
+    monkeypatch.setattr(se._scraper_policy, "safe_get", lambda *a, **k: resp)
     out = se._searchapi_company_emails("acme.com", "Acme")
     assert out == ["careers@acme.com"], out
 
 
 def test_searchapi_lookup_no_key_returns_empty(monkeypatch):
-    import os
-
     from pulseops_outreach import send_engine as se
 
     monkeypatch.delenv("SEARCHAPI_API_KEY", raising=False)

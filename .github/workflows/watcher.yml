@@ -1,7 +1,7 @@
 name: PulseOps Email Watcher
 
 # Runs every 30m — bounce auto-fix + platform job ingest
-# See notifications/email_watcher.py
+# See packages/pulse-notify/src/pulseops_notify/email_watcher.py
 
 on:
   schedule:
@@ -17,7 +17,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: pulseops-watcher
+  # GitHub concurrency groups are repository-wide across workflows. Dry runs
+  # deliberately join this same group: separate groups do not exclude each other,
+  # so only a shared group guarantees they never overlap a live state run.
+  group: pulseops-state-runs
   cancel-in-progress: false
 
 jobs:
@@ -26,24 +29,68 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Checkout persistent state (pulseops-state branch)
+        if: ${{ inputs.dry_run != true }}
+        id: state_checkout
+        uses: actions/checkout@v4
         with:
           ref: pulseops-state
           path: .state
-        continue-on-error: true
-      - env:
+          fetch-depth: 1
+
+      # Dry runs use an isolated local path and never read or write the live
+      # pulseops-state branch.
+      - name: Capture exact state commit for the save lease
+        if: ${{ inputs.dry_run != true && steps.state_checkout.outcome == 'success' }}
+        id: state_base
+        run: |
+          set -euo pipefail
+          STATE_BASE_SHA="$(git -C .state rev-parse --verify 'HEAD^{commit}')"
+          if ! [[ "${STATE_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not capture the exact pulseops-state commit"
+            exit 1
+          fi
+          echo "base_sha=${STATE_BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore DB + logs + memory from state branch
+        if: ${{ inputs.dry_run != true && steps.state_checkout.outcome == 'success' && steps.state_base.outcome == 'success' }}
+        id: state_restore
+        env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
-          if [ -n "$STATE_KEY" ] && [ -f .state/pulseops.db.enc ]; then
-            echo "$STATE_KEY" | openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin -in .state/pulseops.db.enc -out ./pulseops.db \
-              || echo "::warning::state decrypt failed — starting fresh"
+          rm -f pulseops.db
+          if ! git -C .state rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "::error::state checkout is unavailable; refusing to bootstrap"
+            exit 1
+          fi
+          if [ -f .state/pulseops.db.enc ]; then
+            if [ -z "${STATE_KEY:-}" ]; then
+              echo "::error::encrypted state exists but STATE_KEY is empty; refusing to continue"
+              exit 1
+            fi
+            if ! printf '%s' "$STATE_KEY" | openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin \
+              -in .state/pulseops.db.enc -out pulseops.db; then
+              rm -f pulseops.db
+              echo "::error::encrypted state decrypt failed; refusing to continue"
+              exit 1
+            fi
+          elif [ -n "${STATE_KEY:-}" ]; then
+            echo "::error::STATE_KEY is configured but no encrypted state artifact exists; refusing to start with empty state"
+            exit 1
           elif [ -f .state/pulseops.db ]; then
-            cp .state/pulseops.db ./pulseops.db
+            cp .state/pulseops.db pulseops.db
           else
-            echo "no DB"
+            echo "::notice::successful state checkout contains no prior DB; bootstrapping plaintext state"
           fi
           [ -d .state/logs ] && cp -r .state/logs/. ./logs/ || true
+          [ -d .state/data ] && cp -r .state/data/. ./data/ || true
+          [ -d .state/memory/cv_history ] && cp -r .state/memory/cv_history/. ./memory/cv_history/ || true
+          [ -f .state/memory/.github_synced.json ] && cp .state/memory/.github_synced.json ./memory/ || true
+          [ -f .state/config/profile.yml ] && cp .state/config/profile.yml ./config/ || true
+          [ -f .state/config/.cv_hash ] && cp .state/config/.cv_hash ./config/ || true
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -53,47 +100,101 @@ jobs:
           for pkg in packages/*; do
             if [ -f "$pkg/pyproject.toml" ]; then pip install -e "$pkg" --break-system-packages; fi
           done
-      - env:
+
+      - if: ${{ inputs.dry_run != true }}
+        name: Write live watcher secrets to disk
+        env:
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           IMAP_EMAIL: ${{ secrets.IMAP_EMAIL }}
           IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          set -euo pipefail
           {
             echo "SMTP_EMAIL=${SMTP_EMAIL:-}";
+            echo "SMTP_PASSWORD=${SMTP_PASSWORD:-}";
             echo "IMAP_EMAIL=${IMAP_EMAIL:-$SMTP_EMAIL}";
+            echo "IMAP_PASSWORD=${IMAP_PASSWORD:-}";
             echo "DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}";
           } > .env
           if [ -z "${SMTP_PASSWORD:-}" ]; then echo "::warning::SMTP_PASSWORD not set — sends will SKIP"; fi
+
+      - if: ${{ inputs.dry_run == true }}
+        name: Prepare dry-run environment (no credentials)
+        run: |
+          set -euo pipefail
+          mkdir -p data logs memory/cv_history output/pdf output/html output/prep config
+          cat > .env <<'EOF'
+          AUTO_SEND_EMAILS=false
+          PULSEOPS_DB=data/pulseops-dry-run.db
+          EOF
+          echo "dry-run guard: watcher credentials are not installed"
+
       - run: |
+          set -euo pipefail
           ARGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="--dry-run"
+            export AUTO_SEND_EMAILS=false
+            export PULSEOPS_DB=data/pulseops-dry-run.db
+          fi
           python -m pulseops_notify.email_watcher $ARGS
-      - if: always()
+
+      - name: Commit state back to pulseops-state branch
+        if: ${{ always() && inputs.dry_run != true && steps.state_checkout.outcome == 'success' && steps.state_base.outcome == 'success' && steps.state_restore.outcome == 'success' }}
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
+          STATE_BASE_SHA: ${{ steps.state_base.outputs.base_sha }}
         run: |
+          set -euo pipefail
+          if [ -z "${STATE_BASE_SHA:-}" ] || ! [[ "${STATE_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::missing exact state commit captured during checkout; refusing to save"
+            exit 1
+          fi
           rm -rf .state
-          mkdir -p .state/logs .state/data
-          if [ -n "$STATE_KEY" ] && [ -f pulseops.db ]; then
-            echo "$STATE_KEY" | openssl enc -aes-256-cbc -pbkdf2 -pass stdin -in pulseops.db -out .state/pulseops.db.enc \
-              || cp pulseops.db .state/pulseops.db
+          mkdir -p .state/logs .state/data .state/memory/cv_history .state/config
+          if [ -n "${STATE_KEY:-}" ]; then
+            if [ ! -f pulseops.db ]; then
+              echo "::error::pulseops.db is missing; refusing to save encrypted state"
+              exit 1
+            fi
+            if ! printf '%s' "$STATE_KEY" | openssl enc -aes-256-cbc -pbkdf2 -pass stdin \
+              -in pulseops.db -out .state/pulseops.db.enc; then
+              rm -f .state/pulseops.db.enc
+              echo "::error::encrypted state save failed; refusing plaintext fallback"
+              exit 1
+            fi
           else
-            cp pulseops.db .state/pulseops.db 2>/dev/null || true
+            if [ ! -f pulseops.db ]; then
+              echo "::error::pulseops.db is missing; refusing to save plaintext state"
+              exit 1
+            fi
+            cp pulseops.db .state/pulseops.db
           fi
           cp -r logs/. .state/logs/ 2>/dev/null || true
+          cp -r data/. .state/data/ 2>/dev/null || true
+          cp -r memory/cv_history/. .state/memory/cv_history/ 2>/dev/null || true
+          cp memory/.github_synced.json .state/memory/ 2>/dev/null || true
+          cp config/profile.yml .state/config/ 2>/dev/null || true
+          cp config/.cv_hash .state/config/ 2>/dev/null || true
+
           cd .state
           STATE_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git init -q
           git checkout -B pulseops-state
           git config user.name "pulseops-bot"
           git config user.email "pulseops-bot@users.noreply.github.com"
-          git remote add origin "$STATE_URL" 2>/dev/null || true
-          git fetch -q origin pulseops-state 2>/dev/null || true
+          # The mandatory checkout proved the branch existed. Never infer an
+          # empty lease from a save-time remote lookup failure or recreate a deleted
+          # branch implicitly; the captured checkout SHA remains authoritative.
           git add -A
-          if git diff --cached --quiet; then echo "nothing changed"; exit 0; fi
-          git commit -q -m "watcher: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push -q "$STATE_URL" HEAD:pulseops-state --force-with-lease \
-            || git push -q "$STATE_URL" HEAD:pulseops-state --force \
-            || echo "::warning::state push failed (non-fatal)"
+          if git diff --cached --quiet; then
+            echo "nothing changed — skipping push"
+            exit 0
+          fi
+          git -c user.name="pulseops-bot" -c user.email="pulseops-bot@users.noreply.github.com" \
+            commit -q -m "watcher: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # A lease conflict is a failed state-push step; never replace a
+          # concurrently updated branch with an unconditional force push.
+          git push -q "$STATE_URL" HEAD:pulseops-state --force-with-lease="refs/heads/pulseops-state:${STATE_BASE_SHA}"

@@ -7,7 +7,10 @@ name = "pulseops-daily-pipeline"
 version = "0.1.0"
 description = "Daily sourcing→evaluate→send orchestrator."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "python-dotenv>=1.2.2",
+  "pyyaml>=6.0.1",
+]
 
 [tool.setuptools.package-dir]
 "" = "src"

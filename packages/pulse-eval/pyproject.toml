@@ -7,7 +7,11 @@ name = "pulseops-pulse-eval"
 version = "0.1.0"
 description = "Domain filters, dedup, LLM evaluation cascade."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "google-genai>=2.6.0",
+  "groq>=1.2.0",
+  "openai>=2.38.0",
+]
 
 [tool.setuptools.package-dir]
 "" = "src"

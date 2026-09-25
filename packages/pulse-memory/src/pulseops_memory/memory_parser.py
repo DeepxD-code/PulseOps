@@ -164,7 +164,7 @@ def _query_gemini(prompt: str) -> dict:
     for attempt in range(2):
         try:
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-flash-lite-latest",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

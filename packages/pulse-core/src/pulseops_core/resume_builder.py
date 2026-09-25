@@ -193,7 +193,10 @@ def _build_summary(eval_result: dict, company: str, role: str, cv_data) -> str:
 
 
 def _clean_filename(s: str) -> str:
-    return re.sub(r'[\\/*?:"<>|]', "", s).strip().replace(" ", "_")[:40]
+    # Strict whitelist: npx.cmd routes args through cmd.exe, where
+    # & ( ) ^ % ! are metacharacters that mangle the argv even when
+    # subprocess passes a list. Alnum + _-. only.
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", s).strip("_")[:40]
 
 
 # ── HTML rendering ───────────────────────────────────────────────────────────
@@ -323,9 +326,13 @@ def _html_to_pdf_playwright(html_path: Path, pdf_path: Path) -> None:
     except ImportError:
         pass
 
-    # Fallback: npx playwright CLI
+    # Fallback: playwright CLI via npx. On Windows, subprocess does not
+    # resolve bare "npx" (WinError 2) and npx.ps1 is execution-policy
+    # blocked — address npx.cmd explicitly.
+    import sys as _sys
+    _npx = "npx.cmd" if _sys.platform.startswith("win") else "npx"
     result = subprocess.run(
-        ["npx", "playwright", "pdf", str(html_path.resolve()), str(pdf_path)],
+        [_npx, "playwright", "pdf", str(html_path.resolve()), str(pdf_path)],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:

@@ -101,10 +101,13 @@ async function main() {
     }
   }
 
-  process.exit(dead.length > 0 ? 1 : 0);
+  // A completed check is a successful tool run even when some portals are
+  // unreachable.  The caller consumes the JSON report to decide which portals
+  // to skip; dead portals are data, not a liveness-tool failure.
+  process.exitCode = 0;
 }
 
 main().catch((e) => {
   console.error("[Fatal] liveness check crashed:", e);
-  process.exit(1);
+  process.exitCode = 1;
 });

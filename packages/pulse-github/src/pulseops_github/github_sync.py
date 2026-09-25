@@ -123,7 +123,7 @@ def _llm_bullet(readme_content: str, repo_name: str, language: str) -> str | Non
             from google import genai
             client = genai.Client(api_key=gemini_key)
             resp = client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt,
+                model="gemini-flash-lite-latest", contents=prompt,
             )
             text = (resp.text or "").strip()
             if text:

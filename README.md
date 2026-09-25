@@ -76,7 +76,7 @@ node portal/apply.mjs --dry-run
 - Secrets are per-name (`SMTP_PASSWORD`, `IMAP_PASSWORD`, `DISCORD_WEBHOOK_URL`, …), never one `ENV_FILE` blob.
 - Cron browser-apply is preview-only; dispatch with `live_apply: true` to submit (`daily.yml`).
 - Dashboard binds `127.0.0.1`; set `DASHBOARD_TOKEN` to require `X-Token` on `/api/run`, `/api/jobs/*/status`, `/api/pause`, `/api/resume`, `/api/jobs/*/mark-outreach`.
-- `portal/storageState.json` stays local (gitignored). Tarball with secrets untracked; history purge via BFG still TODO — rotate exposed keys.
+- `portal/storageState.json` stays local (gitignored). Historical credential exposure remains an unresolved release blocker; follow [`docs/security-history-incident.md`](docs/security-history-incident.md) to rotate/revoke credentials and audit backup/history refs before publishing.
 
 ## Documentation map
 

@@ -10,11 +10,11 @@ Stage 1 — Hard filter (zero LLM cost):
   role_types.exclude      → HARD_REJECT
   seniority.exclude       → HARD_REJECT  (unless "intern"/"junior" also present)
 
-Stage 2 — Soft filter (Gemini gemini-2.5-flash, ≤150+50 tokens, 5s timeout):
+Stage 2 — Soft filter (Gemini gemini-flash-lite-latest, ≤150+50 tokens, 5s timeout):
   Input: title + first 200 chars of description only
   Question: "Is PRIMARY focus backend/systems engineering? YES/NO + reason"
   Timeout: 5s hard → default PASS on timeout (never lose valid roles)
-  Model: gemini-2.5-flash
+  Model: gemini-flash-lite-latest
 
 Non-negotiable #8: No LLM call before Stage 1 hard filter passes.
 """
@@ -182,10 +182,12 @@ def _call_gemini_soft(title: str, desc_snippet: str, domain_title: str = "",
     try:
         from google import genai
         from google.genai import types
+        from pulseops_eval.analyzer import pace_llm_call
 
+        pace_llm_call()
         client = genai.Client(api_key=api_key)
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-flash-lite-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.0,

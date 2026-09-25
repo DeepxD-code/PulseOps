@@ -28,6 +28,8 @@ from pulseops_core.exceptions import (
 from pulseops_store import audit_log
 from pulseops_store import db_manager as db
 
+from pulseops_outreach.email_sender import is_untrusted_domain
+
 try:
     from pulseops_config.paths import PROMPTS_DIR, repo_root
 
@@ -35,6 +37,61 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parent.parent
     PROMPTS_DIR = ROOT / "prompts"
+
+
+def _send_pause_active() -> bool:
+    """Read the global kill switch fail-closed.
+
+    A missing/unreadable settings row is not evidence that sending is safe.
+    Only an explicit false value permits a follow-up to proceed.
+    """
+    try:
+        paused = db.get_send_paused()
+    except Exception as exc:
+        print(f"  [Follow-up] send pause unreadable — follow-ups skipped ({exc}).")
+        return True
+    if isinstance(paused, bool):
+        return paused
+    if isinstance(paused, int) and paused in (0, 1):
+        return bool(paused)
+    return True
+
+
+def _validated_followup_target(row: dict) -> tuple[str, str, str]:
+    """Return ``(contact, domain, reason)`` for a safe stored target.
+
+    The outreach row's domain is the source of truth.  In particular, legacy
+    and manually logged rows must not borrow a current job/evaluator domain:
+    doing so could turn a third-party recruiter address into a follow-up.
+    """
+    raw_domain = row.get("domain", "")
+    try:
+        domain = db.normalise_domain(raw_domain)
+    except Exception:
+        domain = ""
+    if not domain or domain == "unknown.com" or is_untrusted_domain(domain):
+        return "", "", "G10: missing or untrusted stored domain"
+    for url_key in ("job_url", "job_link", "source_url", "link", "url"):
+        source_url = row.get(url_key)
+        if source_url and is_untrusted_domain(source_url):
+            return "", domain, "G10: job URL is a job-board/ATS domain"
+
+    # Keep the original contact precedence: a non-empty but unsafe stored
+    # contact must not silently fall back to a different job contact.
+    raw_contact = row.get("contact_email", "") or row.get("job_contact_email", "") or ""
+    try:
+        contact = db.normalise_email(raw_contact)
+    except Exception:
+        contact = ""
+    if not contact:
+        return "", domain, "G10: no valid contact email"
+    try:
+        matches = bool(db.email_matches_domain(contact, raw_domain))
+    except Exception:
+        matches = False
+    if not matches:
+        return "", domain, "G10: contact does not exactly match stored domain"
+    return contact, domain, ""
 
 
 def _load_prompt_template() -> str:
@@ -74,7 +131,7 @@ def _is_within_send_window(settings: dict) -> bool:
                               minute=int(end_str.split(":")[1]), second=0, microsecond=0)
         return start <= now <= end
     except Exception:
-        return True  # default PASS on any config error
+        return False  # malformed send-window config fails closed
 
 
 def _is_blacklisted(company: str, domain: str, settings: dict) -> bool:
@@ -96,10 +153,14 @@ def _is_domain_bounce_paused(domain: str) -> bool:
     """
     try:
         recent = db.get_recent_outreach(days=30)
-        bounces = sum(1 for r in recent if r.get("domain") == domain and r.get("status") == "bounced")
+        bounces = sum(
+            1 for r in recent
+            if r.get("domain") == domain and r.get("status") == "bounced"
+        )
         return bounces >= 2
-    except Exception:
-        return False
+    except Exception as exc:
+        print(f"  [Follow-up] bounce state unreadable — treating domain as paused ({exc}).")
+        return True
 
 
 def _recent_achievement(company: str) -> str:
@@ -115,14 +176,47 @@ def _recent_achievement(company: str) -> str:
 
 
 def _send_followup_email(to_email: str, subject: str, body: str,
-                          outreach_id: int, job_id: int, run_id: str) -> bool:
+                          outreach_id: int, job_id: int, run_id: str,
+                          domain: str = "") -> bool:
     """
     Delegates to outreach/email_sender.py SMTP transport.
-    Returns True on success, raises on failure.
+    Returns True on success, raises on failure.  The domain is supplied by
+    the stored outreach row and is revalidated at this last local boundary.
     """
     try:
+        target_domain = db.normalise_domain(domain)
+    except Exception:
+        target_domain = ""
+    try:
+        safe_target = bool(
+            target_domain
+            and target_domain != "unknown.com"
+            and not is_untrusted_domain(target_domain)
+            and db.email_matches_domain(to_email, domain)
+        )
+    except Exception:
+        safe_target = False
+    if not safe_target:
+        audit_log.write_followup(
+            run_id, "", "", "SKIP", "G10: unsafe follow-up target/domain"
+        )
+        return False
+
+    # Keep the pause check immediately adjacent to the transport call.  The
+    # caller also checks it after rendering each candidate, so a pause toggled
+    # during candidate-to-candidate work is caught before this helper runs.
+    if _send_pause_active():
+        audit_log.write_followup(run_id, "", "", "SKIP", "send paused")
+        return False
+
+    try:
         from pulseops_outreach.email_sender import send_smtp
-        sent = send_smtp(to_email=to_email, subject=subject, body=body)
+        sent = send_smtp(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            domain=target_domain,
+        )
         if sent:
             db.mark_followup_sent(outreach_id)
             db.update_job_status(job_id, "FollowupSent")
@@ -150,6 +244,12 @@ def process_followups(
         print("  [~] Follow-up engine disabled in settings.")
         return 0
 
+    # Preflight the global kill switch before even reading candidates.  An
+    # unreadable pause state is treated exactly like an active pause.
+    if _send_pause_active():
+        print("  [~] Sending is paused — follow-ups deferred.")
+        return 0
+
     day_threshold = int(followup_cfg.get("day", 5))
     max_per_app   = int(followup_cfg.get("max_per_application", 1))
     daily_cap     = settings.get("guardrails", {}).get("daily_send_cap", 5)
@@ -173,12 +273,19 @@ def process_followups(
     sent_count = 0
     for row in candidates:
         company    = row.get("company", "")
-        domain     = row.get("domain", "")
-        contact    = row.get("contact_email", "") or row.get("job_contact_email", "")
         oid        = row["id"]
         job_id     = row.get("job_id")
         orig_subj  = row.get("subject", "Application")
         job_title  = row.get("job_title", "the role")
+
+        # G10/domain safety is checked before every other follow-up work.  A
+        # legacy/manual row with no verified stored domain is permanently
+        # ineligible; never substitute the job's current inferred domain.
+        contact, domain, target_reason = _validated_followup_target(row)
+        if target_reason:
+            print(f"  [Skip] Follow-up for {company}: {target_reason}")
+            audit_log.write_followup(run_id, company, job_title, "SKIP", target_reason)
+            continue
 
         # G3 blacklist
         if _is_blacklisted(company, domain, settings):
@@ -196,11 +303,6 @@ def process_followups(
             print(f"  [Skip] Follow-up for {company}: domain bounce-paused")
             audit_log.write_followup(run_id, company, job_title, "SKIP", "G9: bounce-paused")
             raise BounceThresholdReachedError(f"Follow-up: domain {domain} bounce-paused")
-
-        if not contact:
-            print(f"  [Skip] Follow-up for {company}: no contact email")
-            audit_log.write_followup(run_id, company, job_title, "SKIP", "no contact email")
-            continue
 
         # Build the follow-up email
         skills_str = "Java, C++, Python, Go, Spring Boot, gRPC, Kubernetes"
@@ -224,17 +326,33 @@ def process_followups(
             subject = f"Re: {orig_subj}"
             body    = body_raw
 
+        # Recheck the kill switch immediately before either a simulated send
+        # decision or the live transport call.  This catches a pause toggled
+        # while processing an earlier candidate or rendering this message.
+        if _send_pause_active():
+            print("  [~] Sending is paused — remaining follow-ups deferred.")
+            return sent_count
+
         if simulate:
             print(f"  [~] Simulation follow-up → {contact}: '{subject}'")
-            db.mark_followup_sent(oid)
-            if job_id:
-                db.update_job_status(job_id, "FollowupSent")
-            audit_log.write_followup(run_id, company, job_title, "SIMULATED")
+            # Simulation is decision-only: do not consume the follow-up or
+            # change live job/outreach/audit state.
             sent_count += 1
             continue
 
         try:
-            _send_followup_email(contact, subject, body, oid, job_id or 0, run_id)
+            sent = _send_followup_email(
+                contact,
+                subject,
+                body,
+                oid,
+                job_id or 0,
+                run_id,
+                domain=domain,
+            )
+            if not sent:
+                print(f"  [~] Follow-up for {company} was not sent.")
+                continue
             print(f"  [OK] Follow-up sent → {contact}: '{subject}'")
             sent_count += 1
             if sent_count < len(candidates):

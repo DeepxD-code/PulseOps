@@ -42,6 +42,97 @@ try:
 except ImportError:
     ROOT = Path(__file__).resolve().parents[4]
 TEMP_PORTAL_JSON = ROOT / "temp_portal_jobs.json"
+SIMULATED_SOURCE_PREFIX = "SIMULATED:"
+
+
+def _source_is_simulated(source: object) -> bool:
+    """Return whether a source is already explicitly marked as simulated."""
+    return str(source or "").strip().upper().startswith(SIMULATED_SOURCE_PREFIX)
+
+
+def _source_is_mock(source: object) -> bool:
+    """Recognise legacy mock labels before they reach persistence."""
+    value = str(source or "").strip()
+    if _source_is_simulated(value):
+        value = value[len(SIMULATED_SOURCE_PREFIX):].strip()
+    return value.lower() == "mock" or value.lower().startswith(("mock:", "mock-"))
+
+
+def _mark_simulated_job(job: dict) -> dict:
+    """Mark a job in-place while retaining the original source name.
+
+    The prefix is deliberately stored in ``source`` (rather than only in an
+    in-memory flag) so a row can never be mistaken for a live sourcing result
+    if it is later inspected or exported.  ``source_original`` is retained for
+    audit/debugging and is never used as a replacement for the marked source.
+    """
+    raw_source = str(job.get("source") or "Portal").strip() or "Portal"
+    if _source_is_simulated(raw_source):
+        original_source = raw_source[len(SIMULATED_SOURCE_PREFIX):].strip() or "Portal"
+    else:
+        original_source = raw_source
+    job.setdefault("source_original", original_source)
+    job["source"] = f"{SIMULATED_SOURCE_PREFIX}{original_source}"
+    job["simulated"] = True
+    return job
+
+
+def _mark_simulated_jobs(jobs: list[dict] | None) -> list[dict]:
+    """Mark valid job dictionaries without changing their source metadata."""
+    return [_mark_simulated_job(job) for job in (jobs or []) if isinstance(job, dict)]
+
+
+def _use_isolated_simulation_db() -> None:
+    """Point simulation persistence away from the live jobs/outreach DB."""
+    from pulseops_store import db_manager as db
+
+    live_path = Path(os.getenv("PULSEOPS_DB", str(ROOT / "pulseops.db"))).resolve()
+    configured = os.getenv("PULSEOPS_SIMULATION_DB", "").strip()
+    simulation_path = (
+        Path(configured).resolve()
+        if configured
+        else (ROOT / "data" / "pulseops-simulation.db").resolve()
+    )
+    if simulation_path == live_path:
+        raise RuntimeError(
+            "PULSEOPS_SIMULATION_DB must not point at the live PULSEOPS_DB"
+        )
+    db.DB_PATH = simulation_path
+    db.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _send_pause_active(reader) -> bool:
+    """Read the pause switch fail-closed if the DB cannot be consulted."""
+    try:
+        return bool(reader())
+    except Exception:
+        return True
+
+
+def _protect_pending_email_queue() -> None:
+    """Keep legacy pending e-mail rows out of the browser-apply status set."""
+    try:
+        from pulseops_store.db_manager import (
+            get_job,
+            get_pending_queue_items,
+            is_protected_job_status,
+            update_job_status,
+        )
+
+        for item in get_pending_queue_items(limit=1000):
+            try:
+                job_id = int(item.get("job_id", 0))
+            except (TypeError, ValueError):
+                continue
+            if job_id <= 0:
+                continue
+            job = get_job(job_id)
+            if not job:
+                continue
+            if not is_protected_job_status(job.get("status")):
+                update_job_status(job_id, "EmailQueued")
+    except Exception as e:
+        print(f"  [!] Could not protect pending e-mail queue rows: {e}")
 
 
 def _header(title: str) -> None:
@@ -62,10 +153,24 @@ def main() -> None:
     parser.add_argument("--skip-liveness", action="store_true")
     args = parser.parse_args()
 
+    if args.simulate:
+        _use_isolated_simulation_db()
+
     from pulseops_store import audit_log
-    from pulseops_store.db_manager import enqueue_send, init_db, is_job_processed, save_job
+    from pulseops_store.db_manager import (
+        enqueue_send,
+        get_job_for_identity,
+        get_send_paused,
+        init_db,
+        is_job_processed,
+        is_protected_job_status,
+        save_job,
+        update_job_status,
+    )
 
     init_db()
+    if not args.simulate:
+        _protect_pending_email_queue()
     run_id = audit_log.generate_run_id()
     run_start = time.time()
 
@@ -83,30 +188,49 @@ def main() -> None:
         "sourced": 0, "after_dedup": 0, "after_location": 0,
         "after_hard_filter": 0, "after_soft_filter": 0,
         "evaluated": 0, "matched_pdf": 0,
-        "sent": 0, "queued": 0, "skipped": 0,
+        "sent": 0, "queued": 0, "skipped": 0, "uncertain": 0,
         "portals_dead": 0, "portals_auth_skipped": 0, "portals_failed": 0,
         "tokens_used": 0, "engines_used": {},
     }
     new_matches = []
+
+    if not args.simulate:
+        _header("Phase 0A: Deferred Email Queue")
+        from pulseops_outreach.send_engine import process_pending_send_queue
+        queue_result = process_pending_send_queue(
+            settings=settings,
+            run_id=run_id,
+            limit=20,
+        )
+        stats["sent"] += int(queue_result.get("sent", 0))
+        stats["queued"] += int(queue_result.get("deferred", 0))
+        stats["skipped"] += int(queue_result.get("skipped", 0))
+        stats["uncertain"] += int(queue_result.get("uncertain", 0))
+        print(f"  [SendQueue] {queue_result}")
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
     # ── Phase 0: Liveness check ─────────────────────────────────────────
     _header("Phase 0: Portal Liveness Check")
+    dead_portals: list[dict] = []
     if args.skip_liveness or args.simulate:
         print("  [~] Skipped")
     else:
-        dead = _run_liveness_check()
-        stats["portals_dead"] = len(dead)
-        if dead:
-            print(f"  [!] {len(dead)} enabled portal(s) appear unreachable:")
-            for d in dead:
-                print(f"      - {d['name']}: {d['url']}")
-            if telegram_token and telegram_chat_id:
+        dead_portals = _run_liveness_check()
+        if dead_portals is None:
+            print("  [!] Liveness check failed closed; refusing to start the scan")
+            _finish(run_id, stats, run_start)
+            sys.exit(1)
+        stats["portals_dead"] = len(dead_portals)
+        if dead_portals:
+            print(f"  [!] {len(dead_portals)} enabled portal(s) appear unreachable:")
+            for d in dead_portals:
+                print(f"      - {d.get('name', 'unknown')}: {d.get('url', '')}")
+            if not args.simulate and telegram_token and telegram_chat_id:
                 from pulseops_notify.notifier import send_telegram_summary
                 msg = "⚠️ <b>PulseOps Weekly Scan — Dead Portals</b>\n" + "\n".join(
-                    f"• {d['name']}: {d['url']}" for d in dead
+                    f"• {d.get('name', 'unknown')}: {d.get('url', '')}" for d in dead_portals
                 )
                 send_telegram_summary(msg, telegram_token, telegram_chat_id)
         else:
@@ -114,7 +238,13 @@ def main() -> None:
 
     # ── Phase 1: Run the Playwright scan ────────────────────────────────
     _header("Phase 1: Portal Scan (Playwright)")
-    raw_jobs, skipped_portals, failed_portals = _run_scan(simulate=args.simulate)
+    raw_jobs, skipped_portals, failed_portals = _run_scan(
+        simulate=args.simulate,
+        dead_portals=dead_portals,
+    )
+    if args.simulate:
+        # Mark at the ingestion boundary, before dedup or any persistence.
+        raw_jobs = _mark_simulated_jobs(raw_jobs)
     stats["sourced"] = len(raw_jobs)
     stats["portals_auth_skipped"] = len(skipped_portals)
     stats["portals_failed"] = len(failed_portals)
@@ -123,16 +253,19 @@ def main() -> None:
     print(f"  Auth-skipped:  {len(skipped_portals)} portal(s)")
     print(f"  Failed:        {len(failed_portals)} portal(s)")
 
-    from pulseops_store.db_manager import record_source_health
-    for f in failed_portals:
-        record_source_health(f"Portal:{f['name']}", run_id, 0, f.get("error", ""))
+    if not args.simulate:
+        from pulseops_store.db_manager import record_source_health
+        for f in failed_portals:
+            record_source_health(f"Portal:{f.get('name', 'unknown')}", run_id, 0, f.get("error", ""))
 
-    if skipped_portals and telegram_token and telegram_chat_id:
+    if not args.simulate and skipped_portals and telegram_token and telegram_chat_id:
         from pulseops_notify.notifier import send_telegram_summary
         msg = "🔒 <b>PulseOps Weekly Scan — Auth Required</b>\nThese portals need a logged-in session; scan them by hand:\n" + "\n".join(
-            f"• {s['name']}: {s['url']}" for s in skipped_portals
+            f"• {s.get('name', 'unknown')}: {s.get('url', '')}" for s in skipped_portals
         )
         send_telegram_summary(msg, telegram_token, telegram_chat_id)
+    elif args.simulate and skipped_portals:
+        print("  [SIM] Auth/disabled portal notices are local only")
 
     if not raw_jobs:
         print("[!] No jobs sourced from portal scan. Exiting.")
@@ -201,17 +334,36 @@ def main() -> None:
         cv_data = None
 
     for idx, job in enumerate(soft_passed, 1):
+        # A marker is applied before the processed-row check and therefore
+        # before any possible save_job call.  This also protects a live run
+        # that encounters a mock-labelled source in its input.
+        if args.simulate or _source_is_simulated(job.get("source", "")) or _source_is_mock(job.get("source", "")):
+            _mark_simulated_job(job)
         title, company, link = job.get("title", "Unknown"), job.get("company", "Unknown"), job.get("link", "")
         source = job.get("source", "Portal")
+        simulated_job = _source_is_simulated(source)
+        send_paused = False
+        if not simulated_job:
+            send_paused = _send_pause_active(get_send_paused)
         print(f"\n  [{idx}/{len(soft_passed)}] {title} @ {company}  ({source})")
 
-        if not args.force and is_job_processed(title, company, link):
-            print("    [~] Already processed")
+        already_processed = is_job_processed(title, company, link)
+        if already_processed:
+            existing = get_job_for_identity(title, company, link)
+            if existing and is_protected_job_status(existing.get("status")):
+                print(
+                    "    [~] Existing job is protected "
+                    f"({existing.get('status')}); skipping re-evaluation"
+                )
+                continue
+        if already_processed and (not args.force or simulated_job):
+            print("    [~] Already processed" + (" (simulation rows are never overwritten)" if simulated_job else ""))
             continue
 
         try:
-            if args.simulate:
+            if args.simulate or simulated_job:
                 eval_result = _mock_evaluation(title, company)
+                eval_result["simulated"] = True
             else:
                 memory_ctx = load_context(company=company)
                 eval_result = evaluate_job(job=job, cv_data=cv_data, memory_context=memory_ctx,
@@ -223,6 +375,17 @@ def main() -> None:
             tokens = eval_result.get("tokens_used", 0)
             duration = eval_result.get("eval_duration_ms", 0)
 
+            # A missing/failed evaluator can fall back to simulation even in
+            # a nominally live run.  Treat that exactly like --simulate so a
+            # mock result can never become a sendable/live job.
+            if engine == "simulation" and not simulated_job:
+                _mark_simulated_job(job)
+                source = job["source"]
+                simulated_job = True
+                if is_job_processed(title, company, link):
+                    print("    [~] Existing row collision — skipping simulated persistence")
+                    continue
+
             print(f"    Score: {score}  Grade: {grade}  Engine: {engine}")
             stats["evaluated"] += 1
             stats["tokens_used"] += tokens
@@ -231,7 +394,7 @@ def main() -> None:
 
             job_id = save_job(
                 title=title, company=company, link=link, source=source, run_id=run_id, score=score,
-                posted_at=job.get("posted_at", ""), location_raw=job.get("location_raw", ""),
+                letter_grade=grade, posted_at=job.get("posted_at", ""), location_raw=job.get("location_raw", ""),
                 location_resolved=job.get("location_resolved", ""),
                 text_summary=eval_result.get("text_summary", ""),
                 skill_gap_list=eval_result.get("skill_gap", []),
@@ -248,7 +411,10 @@ def main() -> None:
                 domain_confidence=eval_result.get("domain_confidence", ""),
                 email_variant_used=eval_result.get("email_variant_used", ""),
                 eval_engine=engine, eval_tokens=tokens, eval_duration_ms=duration,
-                status="Evaluated",
+                # Simulated/paused rows are deliberately kept out of the
+                # browser-apply query (which only consumes Evaluated jobs).
+                status=("Simulated" if simulated_job else
+                        "SendPaused" if send_paused else "Evaluated"),
             )
 
             pdf_path = ""
@@ -258,31 +424,68 @@ def main() -> None:
                     from pulseops_core.resume_builder import build_resume
                     pdf_path, html_path = build_resume(
                         cv_data=cv_data, eval_result=eval_result, company=company,
-                        role=title, simulate=args.simulate,
+                        role=title, jd_text=job.get("description", ""),
+                        profile=profile,
+                        simulate=args.simulate or simulated_job or send_paused,
                     )
                     print(f"    [PDF] {pdf_path or html_path}")
-                    from pulseops_store.db_manager import update_job_paths
-                    update_job_paths(job_id, pdf_path=pdf_path, report_path=html_path)
+                    if not simulated_job and not send_paused:
+                        from pulseops_store.db_manager import update_job_paths
+                        update_job_paths(job_id, pdf_path=pdf_path, report_path=html_path)
+                    elif simulated_job:
+                        print("    [SIM] HTML-only resume; no live DB path update")
+                    else:
+                        print("    [PAUSE] HTML-only resume; no live DB path update")
                 except Exception as e:
                     print(f"    [!] Resume build failed: {e}")
 
             send_decision = None
             if score >= notify_threshold:
-                try:
-                    from pulseops_outreach.send_engine import decide_send
-                    send_decision = decide_send(job_id=job_id, job=job, eval_result=eval_result,
-                                                settings=settings, run_id=run_id, simulate=args.simulate)
-                    action, reason = send_decision["action"], send_decision.get("reason", "")
-                    print(f"    [Send] {action}" + (f": {reason}" if reason else ""))
-                    if action == "SEND":
-                        stats["sent"] += 1
-                    elif action == "QUEUE":
-                        stats["queued"] += 1
-                        enqueue_send(job_id, score, reason)
-                    else:
-                        stats["skipped"] += 1
-                except Exception as e:
-                    print(f"    [!] Send engine: {e}")
+                if simulated_job:
+                    # Never invoke decide_send in simulation: even its
+                    # simulate=True path performs G10 cache/network work.
+                    send_decision = {
+                        "action": "SKIP",
+                        "reason": "simulation: send/review disabled",
+                        "guardrail": "SIMULATION",
+                    }
+                elif send_paused or _send_pause_active(get_send_paused):
+                    if not send_paused:
+                        send_paused = True
+                        update_job_status(job_id, "SendPaused")
+                    send_decision = {
+                        "action": "SKIP",
+                        "reason": "auto-sends are paused",
+                        "guardrail": "PAUSE",
+                    }
+                else:
+                    try:
+                        from pulseops_outreach.send_engine import decide_send
+                        send_decision = decide_send(
+                            job_id=job_id, job=job, eval_result=eval_result,
+                            settings=settings, run_id=run_id,
+                            simulate=False, pdf_path=pdf_path,
+                        )
+                    except Exception as e:
+                        print(f"    [!] Send engine: {e}")
+                        send_decision = {
+                            "action": "SKIP",
+                            "reason": f"send engine error: {e}",
+                            "guardrail": "ERROR",
+                        }
+
+                action, reason = send_decision["action"], send_decision.get("reason", "")
+                print(f"    [Send] {action}" + (f": {reason}" if reason else ""))
+                if action == "SEND":
+                    stats["sent"] += 1
+                elif action == "QUEUE":
+                    stats["queued"] += 1
+                    # send_queue is an e-mail overflow queue.  Mark the job
+                    # before enqueueing so a crash cannot leave an Evaluated
+                    # row that an unattended browser consumer could select.
+                    update_job_status(job_id, "EmailQueued")
+                    enqueue_send(job_id, score, reason)
+                else:
                     stats["skipped"] += 1
 
                 new_matches.append({
@@ -294,9 +497,24 @@ def main() -> None:
         except Exception as e:
             print(f"    [X] Unexpected: {e}")
 
+    # ── Phase 7b: G10 human-review delivery ──────────────────────────────
+    _header("Phase 7b: G10 Human Review")
+    if args.simulate:
+        print("  [SIM] Discord review flush skipped")
+    else:
+        try:
+            from pulseops_outreach.send_engine import flush_pending_review_cards
+            review_result = flush_pending_review_cards(run_id=run_id, limit=20)
+            print(f"  Discord review cards: {review_result['posted']} posted, "
+                  f"{review_result['pending']} pending, {review_result['failed']} failed")
+        except Exception as e:
+            print(f"  [!] G10 review delivery failed (non-fatal): {e}")
+
     # ── Phase 8: Notifications ───────────────────────────────────────────
     _header("Phase 8: Telegram Notifications")
-    if telegram_token and telegram_chat_id:
+    if args.simulate:
+        print("  [SIM] Telegram/Discord notifications skipped")
+    elif telegram_token and telegram_chat_id:
         try:
             from pulseops_notify.notifier import send_audit_summary, send_match_card
             send_audit_summary(stats, new_matches, run_id, telegram_token, telegram_chat_id)
@@ -311,11 +529,14 @@ def main() -> None:
 
     _finish(run_id, stats, run_start)
 
-    try:
-        from pulseops_store.tsv_exporter import export
-        export()
-    except Exception:
-        pass
+    if not args.simulate:
+        try:
+            from pulseops_store.tsv_exporter import export
+            export()
+        except Exception:
+            pass
+    else:
+        print("  [SIM] TSV export skipped")
 
 
 # ── Portal scan subprocess wiring ───────────────────────────────────────
@@ -328,39 +549,135 @@ def _portal_script(name: str) -> Path:
     return ROOT / "apps" / "weekly-scan" / name
 
 
-def _run_liveness_check() -> list[dict]:
-    """Runs check_liveness.mjs --json, returns the list of dead+enabled+non-auth portals."""
+def _run_liveness_check() -> list[dict] | None:
+    """Return dead enabled portals, or ``None`` when the check itself failed.
+
+    ``check_liveness.mjs --json`` deliberately exits successfully when the
+    check completes, even if the report contains dead portals.  Only a tool
+    failure is represented by ``None``; valid dead records are passed to the
+    scanner so it can skip exactly those portals.
+    """
     try:
         result = subprocess.run(
             ["node", str(_portal_script("check_liveness.mjs")), "--json"],
-            capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), timeout=120,
         )
-        out = result.stdout.strip()
-        # check_liveness.mjs prints the JSON as its only stdout in --json mode
-        data = json.loads(out) if out else {"results": []}
-        return [r for r in data.get("results", []) if not r["ok"] and r["enabled"] and not r["requires_auth"]]
+        returncode = getattr(result, "returncode", 0)
+        if returncode != 0:
+            print(f"  [!] Liveness check exited {returncode}")
+            return None
+        out = (getattr(result, "stdout", "") or "").strip()
+        if not out:
+            print("  [!] Liveness check returned no JSON")
+            return None
+        data = json.loads(out)
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            print("  [!] Liveness check returned an invalid payload")
+            return None
+        dead: list[dict] = []
+        for record in data["results"]:
+            if not isinstance(record, dict):
+                continue
+            # The Node tool emits booleans.  Requiring them prevents malformed
+            # records (for example, a missing ``ok`` field) from being treated
+            # as a real dead portal and accidentally skipped.
+            if (
+                record.get("ok") is False
+                and record.get("enabled") is True
+                and record.get("requires_auth", False) in (False, None)
+            ):
+                dead.append(record)
+        return dead
     except Exception as e:
         print(f"  [!] Liveness check failed to run: {e}")
-        return []
+        return None
 
 
-def _run_scan(simulate: bool) -> tuple[list[dict], list[dict], list[dict]]:
-    """Runs portal/scan.mjs (live or --mock), returns (jobs, skipped_auth, failed)."""
+def _remove_temp_portal_json() -> None:
+    """Remove a previous scan hand-off so it can never be mistaken for fresh."""
+    try:
+        TEMP_PORTAL_JSON.unlink(missing_ok=True)
+    except (OSError, TypeError) as e:
+        print(f"  [!] Could not remove stale temp_portal_jobs.json: {e}")
+
+
+def _run_scan(
+    simulate: bool,
+    dead_portals: list[dict] | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Run the scanner and accept only a successful, fresh hand-off.
+
+    The JSON file is a process hand-off, not a durable result store.  Delete
+    it before launch and require both a zero exit status and an mtime from
+    this invocation.  A failed, timed-out, or stale scan therefore always
+    returns zero jobs rather than replaying an earlier run.
+    """
+    _remove_temp_portal_json()
+    scan_started = time.time()
     cmd = ["node", str(_portal_script("scan.mjs"))]
     if simulate:
         cmd.append("--mock")
 
+    # Pass liveness failures to the Node scanner so it can skip them before a
+    # browser navigation, rather than filtering their jobs after the fact.
+    skip_values: set[str] = set()
+    for portal in dead_portals or []:
+        if not isinstance(portal, dict):
+            continue
+        # The scanner treats every --skip-portal value as a possible engine,
+        # company, name, or URL.  Passing an engine/company alias could skip
+        # healthy portals that merely share it, so use the portal URL (the
+        # stable identity supplied by liveness) and only fall back to a name
+        # for a malformed record with no URL.
+        value = str(portal.get("url", "") or "").strip()
+        if not value:
+            value = str(portal.get("name", "") or "").strip()
+        if value:
+            skip_values.add(value)
+    for value in sorted(skip_values):
+        cmd.append(f"--skip-portal={value}")
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), timeout=900)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(ROOT),
+            timeout=900,
+        )
         if result.returncode != 0:
-            print(f"  [!] scan.mjs exited {result.returncode}: {result.stderr.strip()[-400:]}")
+            print(f"  [!] scan.mjs exited {result.returncode}: {(result.stderr or '')[-400:]}")
+            _remove_temp_portal_json()
+            return [], [], []
     except subprocess.TimeoutExpired:
         print("  [!] scan.mjs timed out after 15 minutes")
+        _remove_temp_portal_json()
+        return [], [], []
     except Exception as e:
         print(f"  [!] Could not launch scan.mjs: {e}")
+        _remove_temp_portal_json()
+        return [], [], []
 
     if not TEMP_PORTAL_JSON.exists():
         print("  [!] scan.mjs did not write temp_portal_jobs.json — treating as zero results")
+        return [], [], []
+
+    try:
+        mtime = TEMP_PORTAL_JSON.stat().st_mtime
+    except OSError as e:
+        print(f"  [!] Could not stat temp_portal_jobs.json: {e}")
+        _remove_temp_portal_json()
+        return [], [], []
+
+    # The hand-off must have been written during this invocation.  A tiny
+    # timestamp allowance covers filesystems with coarse mtime resolution,
+    # while a file left by an earlier run is still rejected.
+    if mtime < scan_started - 0.05:
+        print("  [!] scan.mjs output is stale — treating as zero results")
+        _remove_temp_portal_json()
         return [], [], []
 
     try:
@@ -369,15 +686,21 @@ def _run_scan(simulate: bool) -> tuple[list[dict], list[dict], list[dict]]:
         print(f"  [!] Could not parse temp_portal_jobs.json: {e}")
         return [], [], []
     finally:
-        try:
-            TEMP_PORTAL_JSON.unlink()
-        except Exception:
-            pass
+        _remove_temp_portal_json()
 
-    jobs = data.get("jobs", [])
-    for j in jobs:
-        j.setdefault("description", "")
-    return jobs, data.get("skipped", []), data.get("failed", [])
+    if not isinstance(data, dict) or not isinstance(data.get("jobs", []), list):
+        print("  [!] scan.mjs returned an invalid payload — treating as zero results")
+        return [], [], []
+
+    jobs = [job for job in data.get("jobs", []) if isinstance(job, dict)]
+    for job in jobs:
+        job.setdefault("description", "")
+    if simulate:
+        _mark_simulated_jobs(jobs)
+
+    skipped = [item for item in data.get("skipped", []) if isinstance(item, dict)]
+    failed = [item for item in data.get("failed", []) if isinstance(item, dict)]
+    return jobs, skipped, failed
 
 
 # ── Shared helpers (mirrors main.py) ─────────────────────────────────────

@@ -14,6 +14,14 @@ config/.cv_hash
 cv.md
 
 # ── Generated artifacts ─────────────────────────────────────
+# Local Playwright/Edge profiles contain cookies and saved logins.
+.edge-profile/
+.edge-profile-*/
+# Root-level run logs and transcripts are machine-local.
+*.log
+*-log.txt
+weekly-run*.txt
+scan-err.txt
 *.tar.gz
 *.tgz
 pulseops_complete_phases1_12_tar.gz

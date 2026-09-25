@@ -4,7 +4,7 @@
  *
  * Uses Playwright (already in dependencies) to open job links, detect the
  * ATS/engine, fill the form with config/profile.yml + uploaded resume PDF,
- * and pause for approval before submitting.
+ * and leaves final submission to the operator unless --auto is explicit.
  *
  * This is MIT-licensed, local-only, and human-in-loop by default — the
  * same model Strawberry uses but without cloud.
@@ -17,19 +17,23 @@
  *   node portal/apply.mjs --dry-run              Preview 3 queued jobs, no submit
  *   node portal/apply.mjs --job-url https://...  Single URL dry-run
  *   node portal/apply.mjs --job-id 123           Apply for DB job_id (reads pulseops.db)
- *   node portal/apply.mjs --live                 Actually submit after approval (requires --live flag)
+ *   node portal/apply.mjs --live                 Fill/preview; final submit requires --auto
+ *   node portal/apply.mjs --live --auto          Allow final application actions
  *   node portal/apply.mjs --headed               Show browser window (for debugging / CAPTCHA)
  *
  * Safety:
  *   - Default is --dry-run (fill + screenshot, no click Submit)
- *   - --live requires explicit flag AND interactive approval per job (press Enter)
+ *   - --live without --auto fills and previews only; final Send/Submit is manual
+ *   - --live --auto is required before any final application action is clicked
  *   - No credentials are stored — uses your existing logged-in session if you run headed
  *     or a pre-saved storageState.json (see docs below)
- *   - CAPTCHA / 2FA pauses for manual solve
+ *   - CAPTCHA is a hard stop until the challenge disappears
  */
 
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 
@@ -39,11 +43,778 @@ const ROOT = path.resolve(__dirname, "../..");
 const DRY_RUN = !process.argv.includes("--live");
 const HEADED = process.argv.includes("--headed");
 const AUTO = process.argv.includes("--auto");
+const LOAD_EMAIL_QUEUE = process.argv.includes("--email-queue");
+const INCLUDE_INDEED = process.argv.includes("--include-indeed");
+const EDGE = process.argv.includes("--edge"); // real Edge persistent profile (beats Cloudflare)
+let sharedCtx = null;
 const MOCK_ONLY = process.argv.includes("--mock");
 const JOB_URL_FLAG = process.argv.find((a) => a.startsWith("--job-url="));
 const JOB_ID_FLAG = process.argv.find((a) => a.startsWith("--job-id="));
-const SINGLE_URL = JOB_URL_FLAG ? JOB_URL_FLAG.split("=")[1] : (process.argv.includes("--job-url") ? process.argv[process.argv.indexOf("--job-url")+1] : null);
-const SINGLE_JOB_ID = JOB_ID_FLAG ? JOB_ID_FLAG.split("=")[1] : (process.argv.includes("--job-id") ? process.argv[process.argv.indexOf("--job-id")+1] : null);
+const SINGLE_URL = JOB_URL_FLAG
+  ? JOB_URL_FLAG.slice("--job-url=".length)
+  : (process.argv.includes("--job-url") ? process.argv[process.argv.indexOf("--job-url") + 1] : null);
+const SINGLE_JOB_ID = JOB_ID_FLAG
+  ? JOB_ID_FLAG.slice("--job-id=".length)
+  : (process.argv.includes("--job-id") ? process.argv[process.argv.indexOf("--job-id") + 1] : null);
+const FLAG_CONFLICT = !!SINGLE_URL && !!SINGLE_JOB_ID;
+
+// These markers are intentionally durable DB values, not an in-memory flag. The
+// daily/weekly writers should prefix both fields for --simulate runs (see the
+// cross-file patch in the handoff). Legacy `Mock` rows are also recognised so
+// old simulation data cannot be selected by a live browser run.
+const SIMULATION_SOURCE_PREFIX = "sim:";
+const SIMULATION_RUN_PREFIX = "sim-";
+const SIMULATION_MARKER_RE = /^(?:mock|sim(?:ulated|ulation)?|fixture|sample|test|demo)(?:[:/_-]|$)/i;
+const EXCLUDED_STATUSES = new Set([
+  "applied", "sent", "followupsent", "expired", "skipped", "verified",
+  "needsreview", "needsverification", "applying", "simulated", "sendpaused", "emailqueued",
+  "blacklisted", "referral", "cooldown",
+]);
+const PENDING_REVIEW_STATUSES = new Set([
+  "needs_review", "review_pending", "pending_review", "review_posted",
+]);
+const OUTREACH_BLOCKED_STATUSES = new Set([
+  "sent", "simulated", "cooldown", "referral", "blacklisted", "bounced",
+  "followup_sent", "followupsent", "needs_review", "needsreview",
+  "review_pending", "reviewpending", "pending_review", "pendingreview", "review_posted", "reviewposted",
+]);
+
+// These are service hosts, not trust suffixes.  A tenant such as
+// `acme.lever.co` is eligible only when it is the original hostname for the
+// job; it must never inherit trust from every other *.lever.co host.
+const ATS_ALLOWED_HOSTS = Object.freeze({
+  greenhouse: ["greenhouse.io", "boards.greenhouse.io", "job-boards.greenhouse.io"],
+  lever: ["lever.co", "jobs.lever.co"],
+  ashby: ["ashbyhq.com", "jobs.ashbyhq.com"],
+  workday: ["myworkdayjobs.com", "workday.com"],
+  smartrecruiters: ["smartrecruiters.com", "jobs.smartrecruiters.com", "careers.smartrecruiters.com"],
+  naukri: ["naukri.com", "www.naukri.com", "in.naukri.com"],
+  wellfound: ["wellfound.com", "www.wellfound.com", "angel.co", "www.angel.co"],
+  linkedin: ["linkedin.com", "www.linkedin.com"],
+  indeed: ["indeed.com", "www.indeed.com"],
+  glassdoor: ["glassdoor.com", "www.glassdoor.com", "glassdoor.co.in", "glassdoor.co.uk"],
+  jobhai: ["jobhai.com", "www.jobhai.com"],
+  yc: ["workatastartup.com", "www.workatastartup.com", "ycombinator.com", "www.ycombinator.com"],
+  generic: [],
+});
+const ATS_SERVICE_HOSTS = ATS_ALLOWED_HOSTS;
+const CLAIM_RECOVERY_MS = (() => {
+  const parsed = Number.parseInt(process.env.PULSEOPS_BROWSER_CLAIM_RECOVERY_MS || "3600000", 10);
+  return Number.isFinite(parsed) && parsed >= 60000 ? parsed : 3600000;
+})();
+
+const CAPTCHA_SELECTORS = [
+  'iframe[src*="captcha"]',
+  'iframe[src*="challenges.cloudflare"]',
+  'iframe[src*="recaptcha"]',
+  'iframe[src*="turnstile"]',
+  '[data-testid="captcha"]',
+  ".cf-challenge",
+  ".cf-turnstile",
+  "[class*='captcha' i]",
+];
+const CAPTCHA_WAIT_MS = (() => {
+  const parsed = Number.parseInt(process.env.PULSEOPS_CAPTCHA_WAIT_MS || "180000", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 180000;
+})();
+const HUMAN_FINAL_STATUSES = new Set(["yc", "wellfound", "naukri", "indeed", "linkedin"]);
+
+function parseHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    // Browser-apply handles resumes and other PII.  A URL is not an
+    // eligible navigation target unless its transport is HTTPS; accepting
+    // HTTP here would let the rest of the flow accidentally open or submit
+    // over plaintext (including the same-origin case).
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalHost(host) {
+  // Do not strip `www.` here.  It is a distinct hostname for trust purposes;
+  // callers that need a display/domain alias can normalize it explicitly.
+  return String(host || "").toLowerCase().replace(/\.$/, "");
+}
+
+function serviceHostsForAts(ats) {
+  return ATS_SERVICE_HOSTS[ats] || ATS_SERVICE_HOSTS.generic || [];
+}
+
+function hasExactServiceHost(ats, hostname) {
+  const host = canonicalHost(hostname);
+  return serviceHostsForAts(ats).some((allowed) => host === canonicalHost(allowed));
+}
+
+function originOf(value) {
+  const url = parseHttpUrl(value);
+  return url ? url.origin : null;
+}
+
+function sameOrigin(left, right) {
+  const a = originOf(left);
+  const b = originOf(right);
+  return !!a && !!b && a === b;
+}
+
+function createNavigationBoundary(initialUrl, ats = "generic") {
+  const parsed = parseHttpUrl(initialUrl);
+  return {
+    ats: ats || "generic",
+    initialOrigin: parsed?.origin || null,
+    initialHost: parsed ? canonicalHost(parsed.hostname) : "",
+    pinnedOrigin: null,
+  };
+}
+
+function isNavigationBoundary(value) {
+  return !!value && typeof value === "object"
+    && Object.prototype.hasOwnProperty.call(value, "initialOrigin")
+    && Object.prototype.hasOwnProperty.call(value, "pinnedOrigin");
+}
+
+function navigationPinnedOrigin(boundary) {
+  if (!isNavigationBoundary(boundary)) return null;
+  return boundary.pinnedOrigin || boundary.initialOrigin;
+}
+
+function pinNavigationOrigin(boundary, value) {
+  if (!isNavigationBoundary(boundary)) return false;
+  const candidate = parseHttpUrl(value);
+  if (!candidate || !isAllowedNavigationUrl(candidate, boundary.ats, boundary)) return false;
+  boundary.pinnedOrigin = candidate.origin;
+  return true;
+}
+
+function isAllowedNavigationUrl(value, ats = "generic", originUrl = null) {
+  const url = parseHttpUrl(value);
+  // Keep this check explicit even though parseHttpUrl is HTTPS-only.  It
+  // protects callers that pass a URL-like object and documents that HTTP is
+  // never a valid same-origin escape hatch for a PII-bearing flow.
+  if (!url || url.protocol !== "https:") return false;
+  const effectiveAts = isNavigationBoundary(originUrl) ? originUrl.ats : (ats || "generic");
+
+  // Once a job has crossed to an approved service host/origin, pin all later
+  // navigation to that exact origin.  A redirect chain cannot bounce through
+  // another approved host and then back to an untrusted tenant.
+  if (isNavigationBoundary(originUrl)) {
+    // An invalid/insecure initial URL creates an invalid boundary.  Do not
+    // treat it as an absent origin and accidentally authorize a fresh host.
+    if (!originUrl.initialOrigin) return false;
+    if (originUrl.pinnedOrigin) {
+      return sameOrigin(url, originUrl.pinnedOrigin);
+    }
+    if (sameOrigin(url, originUrl.initialOrigin)) return true;
+    // Service hosts are exact, explicitly listed hosts and are HTTPS-only.
+    // They are not suffix matches and do not authorize sibling tenants. A
+    // non-standard port is an origin boundary, not a host alias.
+    const initial = parseHttpUrl(originUrl.initialOrigin);
+    if (!initial || initial.port || initial.protocol !== "https:") return false;
+    return url.protocol === "https:" && !url.port && hasExactServiceHost(effectiveAts, url.hostname);
+  }
+
+  // A supplied raw origin is part of the policy input, not an optional hint.
+  // In particular, http://host must fail closed rather than falling through
+  // to the no-origin ATS allowlist below.
+  if (originUrl !== null && originUrl !== undefined) {
+    const origin = parseHttpUrl(originUrl);
+    if (!origin) return false;
+    if (sameOrigin(url, origin)) return true;
+    if (effectiveAts === "generic" || origin.port || origin.protocol !== "https:") return false;
+    return url.protocol === "https:" && !url.port && hasExactServiceHost(effectiveAts, url.hostname);
+  }
+
+  // With no job origin (for example a pure URL-policy unit check), ATS
+  // service hosts are still exact; generic has no implicit allowlist.
+  return effectiveAts !== "generic"
+    && url.protocol === "https:"
+    && !url.port
+    && hasExactServiceHost(effectiveAts, url.hostname);
+}
+
+function isCurrentPageTrusted(value, ats = "generic", originUrl = null) {
+  if (!isAllowedNavigationUrl(value, ats, originUrl)) return false;
+  if (!isNavigationBoundary(originUrl)) return true;
+  return sameOrigin(value, navigationPinnedOrigin(originUrl));
+}
+
+function isSimulationJob(job) {
+  const source = String(job?.source || "").trim();
+  const runId = String(job?.run_id || job?.run_marker || job?.runMarker || job?.runId || "").trim();
+  return SIMULATION_MARKER_RE.test(source) || SIMULATION_MARKER_RE.test(runId)
+    || source.toLowerCase().startsWith(SIMULATION_SOURCE_PREFIX)
+    || runId.toLowerCase().startsWith(SIMULATION_RUN_PREFIX);
+}
+
+function isTrustworthySource(source) {
+  const value = String(source || "").trim();
+  if (!value || isSimulationJob({ source: value })) return false;
+  return !/^(?:mock|sim(?:ulation)?|fixture|sample|test|demo|manual|unknown|untrusted|queue|fallback|email|portal|scraper)(?:[:/_ -]|$)/i.test(value);
+}
+
+function isTerminalStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase().replace(/[ _-]/g, "");
+  return EXCLUDED_STATUSES.has(normalized) || /pending.*(?:review|g10)|g10.*review|review.*pending/.test(normalized);
+}
+
+function finalSubmissionAllowed({ dryRun = DRY_RUN, auto = AUTO, sendPaused, dbAvailable, claimOwned } = {}) {
+  if (dryRun || !auto) return false;
+  const paused = sendPaused === null || sendPaused === true || ["1", "true", "yes", "on"].includes(String(sendPaused || "").toLowerCase());
+  if (paused || dbAvailable === false || dbAvailable === null || claimOwned === false) return false;
+  return true;
+}
+
+function finalActionLabel(label) {
+  return /\b(?:submit|send|save|apply\s*(?:now|application)|confirm|finish|done|yes|okay)\b/i.test(String(label || ""));
+}
+
+function intermediateActionLabel(label) {
+  return /^(?:continue|review(?:\s+your\s+application)?|next)(?:\s|$)/i.test(String(label || "").trim());
+}
+
+/**
+ * Classify an Apply-looking control before touching it.  Plain `Apply` is
+ * usually a modal/flow trigger, but on a one-step form it is the final action.
+ * Callers must fail closed for `unknown`; raw clicks are reserved for
+ * `intermediate` controls.
+ */
+function classifyApplyControl(input = {}) {
+  const control = typeof input === "string" ? { label: input } : (input || {});
+  const {
+    label = "",
+    href = null,
+    selector = "",
+    oneStep = false,
+    hasFormFields = oneStep,
+    hasVisibleForm = oneStep,
+    isFinal = false,
+    isSubmit = false,
+  } = control;
+  const text = `${label || selector || ""}`.trim();
+  const explicitFinal = isFinal || finalActionLabel(text);
+  const oneStepForm = !!(oneStep || hasFormFields || hasVisibleForm);
+  const applyLike = /\bapply\b/i.test(text);
+  const final = !!(explicitFinal || isSubmit || (applyLike && oneStepForm));
+  if (final) return { classification: "final", final: true, intermediate: false, safeToClick: true };
+  const hrefText = String(href || "").trim().toLowerCase();
+  const opaqueHref = /^(?:javascript|data|blob):/.test(hrefText);
+  if (applyLike && opaqueHref && !oneStepForm
+      && !/easy\s*apply|open\s*application|start\s*application|modal/i.test(text)) {
+    return { classification: "unknown", final: false, intermediate: false, safeToClick: false };
+  }
+  if (applyLike || /easy\s*apply|open\s*application|start\s*application/i.test(text)) {
+    return { classification: "intermediate", final: false, intermediate: true, safeToClick: true };
+  }
+  if (intermediateActionLabel(text)) {
+    return { classification: "intermediate", final: false, intermediate: true, safeToClick: true };
+  }
+  // An href is not evidence that the control is safe: an unknown control can
+  // still have a JavaScript submit handler.
+  return { classification: "unknown", final: false, intermediate: false, safeToClick: false };
+}
+
+function isFinalApplyControl(input = {}) {
+  return classifyApplyControl(input).final;
+}
+const classifyApplyAction = classifyApplyControl;
+
+async function pageHasOneStepApplicationForm(page) {
+  if (!page || typeof page.evaluate !== "function") return false;
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const forms = [...document.querySelectorAll("form")].filter(visible);
+    const form = forms.find((candidate) => candidate.querySelector(
+      'button[type="submit"], input[type="submit"], button:not([type="button"])'
+    )) || forms[0];
+    const scope = form || document;
+    const fields = [...scope.querySelectorAll("input, textarea, select")].filter(visible)
+      .filter((el) => !/hidden|submit|button/i.test(`${el.type || ""} ${el.getAttribute("name") || ""}`));
+    if (!fields.length) return false;
+    const submit = form
+      ? form.querySelector('button[type="submit"], input[type="submit"], button:not([type="button"])')
+      : [...document.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type="button"])')].find(visible);
+    const hasSubmit = !!submit;
+    const applicationFields = fields.filter((el) => /name|email|phone|resume|cv|cover|file|tel/i.test(
+      `${el.getAttribute("name") || ""} ${el.getAttribute("type") || ""} ${el.getAttribute("placeholder") || ""} ${el.id || ""}`,
+    ));
+    // Name+phone-only application forms are final too. Requiring a resume,
+    // email, or textarea misclassified those controls as intermediate Apply.
+    return hasSubmit && applicationFields.length >= 1;
+  }).catch(() => false);
+}
+
+function resolveDbPath(env = process.env, root = ROOT) {
+  const configured = String(env.PULSEOPS_DB || "").trim();
+  if (configured) {
+    const candidates = [
+      path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured),
+      path.isAbsolute(configured) ? configured : path.resolve(root, configured),
+    ].filter((candidate, index, all) => all.indexOf(candidate) === index);
+    // An explicit PULSEOPS_DB is authoritative even before the file exists;
+    // never silently fall back to another database because of a typo/mount.
+    return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0] || null;
+  }
+  return [
+    path.join(root, "pulseops.db"),
+    path.join(root, ".state", "pulseops.db"),
+  ].find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function isExistingDbPath(dbPath) {
+  if (!dbPath) return false;
+  try { return fs.statSync(dbPath).isFile(); } catch { return false; }
+}
+
+function getAuthoritativeDbPath(env = process.env, root = ROOT) {
+  const configured = String(env.PULSEOPS_DB || "").trim();
+  const candidate = resolveDbPath(env, root);
+  if (configured) return isExistingDbPath(candidate) ? candidate : null;
+  return isExistingDbPath(candidate) ? candidate : null;
+}
+
+function runSqliteJson(dbPath, pythonCode, args = [], timeout = 5000) {
+  if (!isExistingDbPath(dbPath)) return null;
+  try {
+    const out = execFileSync("python", ["-c", pythonCode, ...args], {
+      encoding: "utf-8",
+      timeout,
+      windowsHide: true,
+      shell: false,
+    });
+    const line = String(out || "").trim().split(/\r?\n/).pop();
+    return line ? JSON.parse(line) : null;
+  } catch {
+    return null;
+  }
+}
+
+// All SQLite helper code is fixed and receives values as argv, never as shell
+// text. The helpers stay synchronous internally so the final-action guard can
+// re-read the authoritative state immediately before a click.
+async function readSendPause(dbPath = resolveDbPath(), { env = process.env } = {}) {
+  const resolvedPath = dbPath || resolveDbPath(env);
+  if (!isExistingDbPath(resolvedPath)) {
+    return { available: false, paused: true, reason: "db-missing" };
+  }
+  const pythonCode = String.raw`
+import json, os, sqlite3, sys
+path = sys.argv[1]
+result = {"available": False, "paused": True, "reason": "db-unavailable"}
+try:
+    if not os.path.isfile(path):
+        raise RuntimeError("db-missing")
+    conn = sqlite3.connect(path, timeout=2)
+    conn.execute("PRAGMA busy_timeout=2000")
+    tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "settings" not in tables:
+        result["reason"] = "settings-unavailable"
+    else:
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(settings)")}
+        if not {"key", "value"}.issubset(cols):
+            result["reason"] = "settings-schema-unavailable"
+        else:
+            row = conn.execute("SELECT value FROM settings WHERE key=?", ("send_paused",)).fetchone()
+            if row is None:
+                # The store's documented default is active when the key has
+                # never been written; an absent settings table/schema remains
+                # unavailable and fails closed.
+                result = {"available": True, "paused": False, "reason": "default-active"}
+            else:
+                raw = str(row[0] if row[0] is not None else "").strip().lower()
+                if raw in {"1", "true", "yes", "on"}:
+                    result = {"available": True, "paused": True, "reason": "paused"}
+                elif raw in {"0", "false", "no", "off", ""}:
+                    result = {"available": True, "paused": False, "reason": "active"}
+                else:
+                    result["reason"] = "send-paused-setting-invalid"
+    conn.close()
+except Exception:
+    pass
+print(json.dumps(result))
+`;
+  const result = runSqliteJson(resolvedPath, pythonCode, [resolvedPath], 3000);
+  return result && typeof result.available === "boolean"
+    ? result
+    : { available: false, paused: true, reason: "pause-query-failed" };
+}
+
+async function readFinalActionState(dbPath = resolveDbPath(), jobId = null, ownerToken = null) {
+  const pause = await readSendPause(dbPath);
+  if (!pause.available) return { ...pause, claimOwned: false, reason: pause.reason };
+  if (jobId === null || jobId === undefined || jobId === "") {
+    return { ...pause, claimOwned: null, reason: pause.reason };
+  }
+  if (!isExistingDbPath(dbPath)) {
+    return { available: false, paused: true, claimOwned: false, reason: "db-missing" };
+  }
+  const pythonCode = String.raw`
+import json, os, sqlite3, sys
+path, raw_id, owner = sys.argv[1], sys.argv[2], sys.argv[3]
+result = {"available": False, "paused": True, "claimOwned": False, "reason": "claim-query-failed"}
+try:
+    job_id = int(raw_id)
+    if not os.path.isfile(path):
+        raise RuntimeError("db-missing")
+    conn = sqlite3.connect(path, timeout=2)
+    conn.execute("PRAGMA busy_timeout=2000")
+    tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "settings" not in tables or "jobs" not in tables:
+        result["reason"] = "db-schema-unavailable"
+    else:
+        settings_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(settings)")}
+        job_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(jobs)")}
+        if not {"key", "value"}.issubset(settings_cols) or not {"id", "status", "processed_at"}.issubset(job_cols):
+            result["reason"] = "db-schema-unavailable"
+        else:
+            setting = conn.execute("SELECT value FROM settings WHERE key=?", ("send_paused",)).fetchone()
+            if setting is None:
+                raw = "0"
+            else:
+                raw = str(setting[0] if setting[0] is not None else "").strip().lower()
+            if raw not in {"0", "false", "no", "off", ""} and raw not in {"1", "true", "yes", "on"}:
+                result["reason"] = "send-paused-setting-invalid"
+            else:
+                paused = raw in {"1", "true", "yes", "on"}
+                row = conn.execute("SELECT status, processed_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if row is None:
+                    result["reason"] = "job-not-found"
+                else:
+                    status = str(row[0] or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+                    marker = str(row[1] or "")
+                    marker_owner = marker.rsplit("|", 1)[1] if "|" in marker else ""
+                    outreach_blocked = False
+                    if "outreach" in tables:
+                        outreach_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(outreach)")}
+                        predicates = []
+                        if "status" in outreach_cols:
+                            predicates.append("LOWER(COALESCE(status,'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_sending','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+                        if "channel" in outreach_cols:
+                            predicates.append("LOWER(COALESCE(channel,''))='referral'")
+                        if "notes" in outreach_cols:
+                            predicates.append("LOWER(COALESCE(notes,'')) LIKE '%g4:%' OR LOWER(COALESCE(notes,'')) LIKE '%g5:%' OR LOWER(COALESCE(notes,'')) LIKE '%cooldown%'")
+                        if predicates and "job_id" in outreach_cols:
+                            scope = ["job_id=?"]
+                            scope_params = [job_id]
+                            if "company" in outreach_cols and "company" in job_cols:
+                                scope.append("LOWER(TRIM(COALESCE(company,''))) = LOWER(TRIM(?))")
+                                scope_params.append(str(conn.execute("SELECT company FROM jobs WHERE id=?", (job_id,)).fetchone()[0] or ""))
+                            if "company_normalised" in outreach_cols and "company_normalised" in job_cols:
+                                scope.append("LOWER(COALESCE(company_normalised,'')) = LOWER(COALESCE(?, ''))")
+                                scope_params.append(str(conn.execute("SELECT company_normalised FROM jobs WHERE id=?", (job_id,)).fetchone()[0] or ""))
+                            outreach_blocked = conn.execute(
+                                "SELECT 1 FROM outreach WHERE (" + " OR ".join(scope) + ") AND (" +
+                                " OR ".join(predicates) + ") LIMIT 1",
+                                scope_params,
+                            ).fetchone() is not None
+                    owned = status == "applying" and bool(owner) and marker_owner == owner and not outreach_blocked
+                    result = {
+                        "available": True,
+                        "paused": paused,
+                        "claimOwned": owned,
+                        "reason": "paused" if paused else ("g10-review" if outreach_blocked else ("owned" if owned else "claim-lost")),
+                    }
+    conn.close()
+except Exception:
+    pass
+print(json.dumps(result))
+`;
+  const result = runSqliteJson(dbPath, pythonCode, [dbPath, String(jobId), String(ownerToken || "")], 3000);
+  return result && typeof result.available === "boolean"
+    ? { ...result, claimOwned: result.claimOwned === true }
+    : { available: false, paused: true, claimOwned: false, reason: "claim-query-failed" };
+}
+
+async function claimJobForApply(jobId, {
+  dbPath = resolveDbPath(),
+  ownerId = randomUUID(),
+  recoveryMs = CLAIM_RECOVERY_MS,
+  now = Date.now(),
+  allowRecovery = false,
+} = {}) {
+  const id = Number(jobId);
+  if (!/^\d+$/.test(String(jobId ?? "")) || !Number.isSafeInteger(id) || id <= 0) {
+    return { claimed: false, available: false, reason: "invalid-id", owner: ownerId };
+  }
+  if (!isExistingDbPath(dbPath)) {
+    return { claimed: false, available: false, reason: "db-missing", owner: ownerId };
+  }
+  const owner = String(ownerId || "").trim();
+  if (!owner || owner.length > 160) {
+    return { claimed: false, available: false, reason: "invalid-owner", owner: ownerId };
+  }
+  const pythonCode = String.raw`
+import datetime, json, os, re, sqlite3, sys
+path, raw_id, owner, raw_now, raw_recovery, raw_allow_recovery = sys.argv[1:7]
+owner = str(owner)
+result = {"claimed": False, "available": False, "reason": "claim-query-failed", "owner": owner}
+conn = None
+try:
+    job_id = int(raw_id)
+    now = float(raw_now) / 1000.0
+    recovery = max(60.0, float(raw_recovery) / 1000.0)
+    allow_recovery = str(raw_allow_recovery) == "1"
+    if not os.path.isfile(path):
+        raise RuntimeError("db-missing")
+    conn = sqlite3.connect(path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("BEGIN IMMEDIATE")
+    tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    settings_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(settings)")} if "settings" in tables else set()
+    job_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(jobs)")} if "jobs" in tables else set()
+    if not {"key", "value"}.issubset(settings_cols) or not {"id", "status", "score", "link", "processed_at"}.issubset(job_cols):
+        result["reason"] = "db-schema-unavailable"
+    else:
+        setting = conn.execute("SELECT value FROM settings WHERE key=?", ("send_paused",)).fetchone()
+        if setting is None:
+            raw_pause = "0"
+        else:
+            raw_pause = str(setting[0] if setting[0] is not None else "").strip().lower()
+        if raw_pause in {"1", "true", "yes", "on"}:
+            result["reason"] = "paused"
+        elif raw_pause not in {"0", "false", "no", "off", ""}:
+            result["reason"] = "send-paused-setting-invalid"
+        else:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                result["reason"] = "job-not-found"
+            else:
+                status = str(row["status"] or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+                protected = {"applied", "sent", "followupsent", "verified", "expired", "skipped", "needsreview", "needsverification", "simulated", "sendpaused", "emailqueued", "blacklisted", "referral", "cooldown", "replied", "phone_screen", "technical", "final", "offer", "accepted", "rejected"}
+                marker = str(row["processed_at"] or "")
+                recovering = status == "applying"
+                stale_marker = None
+                result["reason"] = "pending"
+                link = str(row["link"] or "").strip().lower()
+                if not link.startswith("https://"):
+                    result["reason"] = "invalid-link"
+                elif recovering:
+                    marker_owner = marker.rsplit("|", 1)[1] if "|" in marker else ""
+                    marker_time = marker.split("|", 2)[1] if marker.count("|") >= 2 else ""
+                    if marker_owner == owner:
+                        result = {"claimed": True, "available": True, "reason": "already-owned", "owner": owner, "recovered": False}
+                    else:
+                        try:
+                            stamp = datetime.datetime.fromisoformat(marker_time.replace("Z", "+00:00")).timestamp()
+                            age = now - stamp
+                        except Exception:
+                            try:
+                                stamp = float(marker_time)
+                                age = now - stamp
+                            except Exception:
+                                stamp = 0
+                                age = 0
+                        if not marker or age < recovery:
+                            result["reason"] = "already-applying"
+                        elif not allow_recovery:
+                            result["reason"] = "stale-applying-review-required"
+                        else:
+                            stale_marker = marker
+                if not result.get("claimed") and result["reason"] == "pending":
+                    try:
+                        score = float(row["score"])
+                    except Exception:
+                        score = -1
+                    source = str(row["source"] or "") if "source" in job_cols else ""
+                    run_id = str(row["run_id"] or "") if "run_id" in job_cols else ""
+                    run_marker = str(row["run_marker"] or "") if "run_marker" in job_cols else ""
+                    sim_re = re.compile(r"^(?:mock|sim(?:ulated|ulation)?|fixture|sample|test|demo)(?:[:/_-]|$)", re.I)
+                    outreach_blocked = False
+                    if "outreach" in tables:
+                        oc = {str(r[1]) for r in conn.execute("PRAGMA table_info(outreach)")}
+                        if "job_id" in oc:
+                            predicates = []
+                            if "status" in oc:
+                                predicates.append("LOWER(COALESCE(status,'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+                            if "channel" in oc:
+                                predicates.append("LOWER(COALESCE(channel,''))='referral'")
+                            if "notes" in oc:
+                                predicates.append("LOWER(COALESCE(notes,'')) LIKE '%g4:%' OR LOWER(COALESCE(notes,'')) LIKE '%g5:%' OR LOWER(COALESCE(notes,'')) LIKE '%cooldown%'")
+                            if predicates:
+                                scope = ["job_id=?"]
+                                scope_params = [job_id]
+                                if "company" in oc and "company" in job_cols:
+                                    scope.append("LOWER(TRIM(COALESCE(company,''))) = LOWER(TRIM(?))")
+                                    scope_params.append(str(row["company"] or ""))
+                                if "company_normalised" in oc and "company_normalised" in job_cols:
+                                    scope.append("LOWER(COALESCE(company_normalised,'')) = LOWER(COALESCE(?, ''))")
+                                    scope_params.append(str(row["company_normalised"] or ""))
+                                outreach_blocked = conn.execute("SELECT 1 FROM outreach WHERE (" + " OR ".join(scope) + ") AND (" + " OR ".join(predicates) + ") LIMIT 1", scope_params).fetchone() is not None
+                    if status in protected:
+                        result["reason"] = "protected-status"
+                    elif "source" in job_cols and not str(row["source"] or "").strip():
+                        result["reason"] = "source-untrusted"
+                    elif status not in {"evaluated", "applying"}:
+                        result["reason"] = "status-not-evaluable"
+                    elif score < 75:
+                        result["reason"] = "score-too-low"
+                    elif sim_re.search(source) or sim_re.search(run_id) or sim_re.search(run_marker):
+                        result["reason"] = "simulation-row"
+                    elif outreach_blocked:
+                        result["reason"] = "g10-review"
+                    else:
+                        stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                        new_marker = "browser-apply-claim|" + stamp + "|" + owner
+                        if stale_marker is not None:
+                            cur = conn.execute("UPDATE jobs SET status='Applying', processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='applying' AND processed_at=?", (new_marker, job_id, stale_marker))
+                        else:
+                            cur = conn.execute("UPDATE jobs SET status='Applying', processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='evaluated'", (new_marker, job_id))
+                        result = {"claimed": cur.rowcount == 1, "available": True, "reason": "claimed" if cur.rowcount == 1 else "claim-race-lost", "owner": owner, "recovered": bool(stale_marker is not None and cur.rowcount == 1), "marker": new_marker}
+    conn.commit()
+except Exception:
+    if conn is not None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+print(json.dumps(result))
+`;
+  const result = runSqliteJson(
+    dbPath,
+    pythonCode,
+    [dbPath, String(id), owner, String(now), String(recoveryMs), allowRecovery ? "1" : "0"],
+    7000,
+  );
+  return result || { claimed: false, available: false, reason: "claim-query-failed", owner };
+}
+
+const recoverJobClaim = (jobId, options = {}) =>
+  claimJobForApply(jobId, { ...options, allowRecovery: true });
+
+async function verifyJobClaim(jobId, ownerToken, dbPath = resolveDbPath()) {
+  const state = await readFinalActionState(dbPath, jobId, ownerToken);
+  return {
+    owned: state.available && !state.paused && state.claimOwned === true,
+    available: state.available,
+    paused: state.paused,
+    reason: state.reason,
+  };
+}
+
+async function manualUrlDatabaseGuard({ dbPath = null, dryRun = DRY_RUN } = {}) {
+  const authoritative = getAuthoritativeDbPath();
+  // An explicitly supplied path is authoritative even when it is missing;
+  // never fall back to the default DB and accidentally bypass the pause.
+  const selected = dbPath ? dbPath : authoritative;
+  if (!selected) {
+    return { allowed: !!dryRun, available: false, paused: true, dbPath: null, reason: "db-missing" };
+  }
+  const state = await readSendPause(selected);
+  return {
+    allowed: state.available && !state.paused,
+    available: state.available,
+    paused: state.paused,
+    dbPath: selected,
+    reason: state.reason,
+  };
+}
+
+const DB_PATH = resolveDbPath();
+
+function loadBlacklistEntries() {
+  const candidates = [path.join(ROOT, "config", "blacklist.txt")];
+  const entries = [];
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      for (const line of fs.readFileSync(candidate, "utf-8").split(/\r?\n/)) {
+        const value = line.trim().toLowerCase();
+        if (value && !value.startsWith("#")) entries.push(value);
+      }
+    } catch {}
+  }
+  return [...new Set(entries)];
+}
+
+function loadReferralContacts() {
+  const candidate = path.join(ROOT, "config", "contacts.yml");
+  try {
+    if (!fs.existsSync(candidate)) return [];
+    const parsed = yaml.load(fs.readFileSync(candidate, "utf-8")) || {};
+    return Array.isArray(parsed.contacts) ? parsed.contacts : [];
+  } catch {
+    return [];
+  }
+}
+
+function normaliseCompany(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function jobDomain(job) {
+  const explicit = String(job?.inferred_domain || job?.domain || "").trim().toLowerCase();
+  if (explicit) return explicit.replace(/^www\./, "");
+  try { return canonicalHost(new URL(job?.link || job?.url || "").hostname); } catch { return ""; }
+}
+
+function isBlacklistedJob(job, blacklist = loadBlacklistEntries()) {
+  const company = String(job?.company || "").toLowerCase();
+  const domain = jobDomain(job);
+  return blacklist.some((entry) => {
+    const needle = entry.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+    if (!needle) return false;
+    return company.includes(needle) || domain.includes(needle)
+      || (!!normaliseCompany(needle) && normaliseCompany(company).includes(normaliseCompany(needle)));
+  });
+}
+
+function hasReferralContact(job) {
+  const company = normaliseCompany(job?.company);
+  const domain = jobDomain(job);
+  return loadReferralContacts().some((contact) => {
+    const contactCompany = normaliseCompany(contact?.company);
+    const contactDomain = String(contact?.domain || "").toLowerCase().replace(/^www\./, "");
+    return (!!company && !!contactCompany && company === contactCompany)
+      || (!!domain && !!contactDomain && (domain === contactDomain || domain.endsWith(`.${contactDomain}`)));
+  });
+}
+
+function isBlockedOutreachJob(job) {
+  const pendingFlag = job?._pending_g10_review ?? job?.pending_g10_review;
+  const pending = pendingFlag === true || pendingFlag === 1
+    || ["1", "true", "yes"].includes(String(pendingFlag || "").toLowerCase())
+    || PENDING_REVIEW_STATUSES.has(String(job?._review_status || "").toLowerCase());
+  if (pending) return true;
+  const rawStatuses = job?._outreach_statuses ?? job?.outreach_statuses ?? job?.outreach_status ?? [];
+  const rawChannels = job?._outreach_channels ?? job?.outreach_channels ?? job?.outreach_channel ?? [];
+  const statuses = Array.isArray(rawStatuses) ? rawStatuses : String(rawStatuses || "").split(/[;,]/).map((value) => value.trim()).filter(Boolean);
+  const channels = Array.isArray(rawChannels) ? rawChannels : [rawChannels].filter(Boolean);
+  const rawNotes = job?._outreach_notes ?? job?.outreach_notes ?? job?.notes ?? "";
+  const notes = Array.isArray(rawNotes) ? rawNotes.join(" ") : String(rawNotes || "");
+  const rowNotes = [job?.reason, job?.notes, job?.blocked_reason, job?.text_summary]
+    .filter(Boolean).join(" ");
+  return statuses.some((status) => OUTREACH_BLOCKED_STATUSES.has(String(status).toLowerCase()))
+    || channels.some((channel) => /referral/i.test(String(channel)))
+    || /G4:|G5:|referral|cooldown|blacklist|pending G10|needs review/i.test(`${notes} ${rowNotes}`);
+}
+
+function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false } = {}) {
+  const status = String(job?.status || "").trim().toLowerCase();
+  const link = job?.link || job?.url || "";
+  if (!link || !isAllowedInitialJobUrl(link)) return false;
+  if (status !== "evaluated") return false;
+  if (!Number.isFinite(Number(job?.score)) || Number(job.score) < 75) return false;
+
+  const pauseValue = job?._send_paused;
+  if (job?._send_pause_available === false || job?._db_pause_available === false) return false;
+  if (Object.prototype.hasOwnProperty.call(job || {}, "job_id")
+      && !Object.prototype.hasOwnProperty.call(job || {}, "_send_paused")) return false;
+  if (pauseValue === null || pauseValue === true || pauseValue === 1
+      || ["1", "true", "yes", "on"].includes(String(pauseValue || "").toLowerCase())) return false;
+
+  if (isTerminalStatus(status) || isSimulationJob(job) || !isTrustworthySource(job?.source)) return false;
+  if (isBlockedOutreachJob(job) || isBlacklistedJob(job) || hasReferralContact(job)) return false;
+  if (inferATS(link) === "indeed") {
+    if (!includeIndeed) return false;
+  }
+  return true;
+}
 
 function loadProfile() {
   const candidates = [path.join(ROOT, "config", "profile.yml"), path.join(ROOT, "config", "profile.yml.example")];
@@ -58,33 +829,84 @@ function loadProfile() {
   return { candidate: { name: "Test User", email: "test@example.com" }, domain: { title: "Backend Engineer" } };
 }
 
-function findResumePdf(company, title) {
-  const candidates = [
-    path.join(ROOT, "output", "pdf", `${company} - ${title}.pdf`),
-    path.join(ROOT, "output", "pdf", `${company}.pdf`),
-    ...fs.existsSync(path.join(ROOT, "output", "pdf")) ? fs.readdirSync(path.join(ROOT, "output", "pdf")).map(f=>path.join(ROOT,"output","pdf",f)).filter(f=>f.endsWith(".pdf")).slice(0,1) : [],
-    path.join(ROOT, "output", "resume.pdf"), // base CV fallback (local demo)
-  ];
-  for (const p of candidates) if (p && fs.existsSync(p)) return p;
+function findResumePdf(company, title, dbPdfPath = "") {
+  const pdfDir = path.join(ROOT, "output", "pdf");
+  const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const candidates = [];
+
+  // The DB path is authoritative when present. Only use fuzzy filename matching
+  // if that exact file is missing; never let directory order pick a different CV.
+  if (dbPdfPath) {
+    const exact = path.isAbsolute(String(dbPdfPath))
+      ? String(dbPdfPath)
+      : path.resolve(ROOT, String(dbPdfPath));
+    candidates.push(exact);
+  }
+
+  // A manual URL has no meaningful company match, so do not attach an arbitrary
+  // tailored PDF to it.
+  if (String(company || "") === "Manual") {
+    candidates.push(path.join(ROOT, "output", "resume.pdf"));
+    for (const p of candidates) {
+      try { if (p && fs.existsSync(p) && fs.statSync(p).isFile()) return p; } catch {}
+    }
+    return null;
+  }
+
+  const safeFilePart = (value) => String(value || "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
+  candidates.push(
+    path.join(pdfDir, `${safeFilePart(company)} - ${safeFilePart(title)}.pdf`),
+    path.join(pdfDir, `${safeFilePart(company)}.pdf`),
+  );
+  const needle = norm(company).slice(0, 18);
+  // Prefer the tailored per-job PDF (CV_<Company>_...), matched by company substring
+  if (needle && fs.existsSync(pdfDir)) {
+    const hit = fs.readdirSync(pdfDir).find(f => f.endsWith(".pdf") && norm(f).includes(needle));
+    if (hit) candidates.push(path.join(pdfDir, hit));
+  }
+  candidates.push(path.join(ROOT, "output", "resume.pdf")); // base CV fallback
+  for (const p of candidates) {
+    try { if (p && fs.existsSync(p) && fs.statSync(p).isFile()) return p; } catch {}
+  }
   return null;
 }
 
 function inferATS(url) {
-  if (!url) return "generic";
-  if (url.includes("greenhouse.io") || url.includes("boards.greenhouse")) return "greenhouse";
-  if (url.includes("lever.co")) return "lever";
-  if (url.includes("ashbyhq.com") || url.includes("ashby")) return "ashby";
-  if (url.includes("workday")) return "workday";
-  if (url.includes("myworkdayjobs")) return "workday";
-  if (url.includes("smartrecruiters")) return "smartrecruiters";
-  if (url.includes("naukri.com")) return "naukri";
-  if (url.includes("wellfound.com") || url.includes("angel.co")) return "wellfound";
-  if (url.includes("linkedin.com")) return "linkedin";
-  if (url.includes("indeed.com")) return "indeed";
-  if (url.includes("glassdoor.")) return "glassdoor";
-  if (url.includes("jobhai.com")) return "jobhai";
-  if (url.includes("workatastartup.com") || url.includes("ycombinator")) return "yc";
+  const parsed = parseHttpUrl(url);
+  if (!parsed) return "generic";
+  const host = canonicalHost(parsed.hostname);
+  // Suffix matching here is classification only.  It never grants trust to
+  // a tenant: isAllowedNavigationUrl still requires the original hostname
+  // or an exact service host.
+  const looksLike = (ats) => serviceHostsForAts(ats).some((service) => {
+    const base = canonicalHost(service);
+    return host === base || host.endsWith(`.${base}`);
+  });
+  if (looksLike("greenhouse")) return "greenhouse";
+  if (looksLike("lever")) return "lever";
+  if (looksLike("ashby")) return "ashby";
+  if (looksLike("workday")) return "workday";
+  if (looksLike("smartrecruiters")) return "smartrecruiters";
+  if (looksLike("naukri")) return "naukri";
+  if (looksLike("wellfound")) return "wellfound";
+  if (looksLike("linkedin")) return "linkedin";
+  if (looksLike("indeed")) return "indeed";
+  if (looksLike("glassdoor")) return "glassdoor";
+  if (looksLike("jobhai")) return "jobhai";
+  if (looksLike("yc")) return "yc";
   return "generic";
+}
+
+/**
+ * Apply the complete initial-URL policy before a page or PII operation can
+ * start.  The boundary is created from the URL itself so an HTTP URL cannot
+ * become a trusted origin merely because its hostname is familiar.
+ */
+function isAllowedInitialJobUrl(value) {
+  const url = parseHttpUrl(value);
+  if (!url) return false;
+  const ats = inferATS(url);
+  return isAllowedNavigationUrl(url, ats, createNavigationBoundary(url, ats));
 }
 
 const ATS_SELECTORS = {
@@ -117,7 +939,7 @@ const ATS_SELECTORS = {
     fields: {
       name: ['input[name="name"]'], email: ['input[type="email"]'], resume: ['input[type="file"]'],
     },
-    submitBtn: ['button:has-text("Submit")', 'button:has-text("Apply")']
+    submitBtn: ['button:not([disabled]):has-text("Send")', 'button:has-text("Send")', 'button:has-text("Submit")', 'button:has-text("Apply")']
   },
   greenhouse: {
     applyBtn: ['a#apply_button', 'a[data-mapped-click="apply"]', 'a:has-text("Apply")', 'button:has-text("Apply")'],
@@ -155,7 +977,7 @@ const ATS_SELECTORS = {
     fields: {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
     },
-    submitBtn: ['button[aria-label="Submit application"]', 'button:has-text("Submit application")', 'button:has-text("Review")']
+    submitBtn: ['button[aria-label="Submit application"]', 'button:has-text("Submit application")']
   },
   naukri: {
     applyBtn: ['button:has-text("Apply")', 'a:has-text("Apply")', '#apply-button', '[id*="apply"]'],
@@ -198,9 +1020,39 @@ async function tryFill(page, selectors, value) {
   return false;
 }
 
-async function tryUpload(page, selectors, filePath) {
+async function hasCrossOriginFormOrFrame(page) {
+  if (!page || typeof page.evaluate !== "function") return false;
+  return page.evaluate(() => {
+    const origin = window.location.origin;
+    const cross = (value) => {
+      const text = String(value || "").trim().toLowerCase();
+      if (!text || text === "about:blank") return false;
+      try { return new URL(text, window.location.href).origin !== origin; }
+      catch { return true; }
+    };
+    const formTarget = [...document.querySelectorAll("form")].some((form) => cross(form.getAttribute("action") || form.action));
+    const buttonTarget = [...document.querySelectorAll("button, input[type='submit']")].some((button) => cross(button.getAttribute("formaction")));
+    const frameTarget = [...document.querySelectorAll("iframe")].some((frame) => cross(frame.getAttribute("src") || frame.src));
+    return formTarget || buttonTarget || frameTarget;
+  }).catch(() => true);
+}
+
+async function tryUpload(page, selectors, filePath, ats = null, originUrl = null) {
+  const currentUrl = typeof page?.url === "function" ? page.url() : "";
+  const effectiveAts = ats || (isNavigationBoundary(originUrl) ? originUrl.ats : "generic");
+  // A resume is PII.  Require the same HTTPS origin boundary in dry-run as
+  // well as live mode; otherwise preview mode becomes a plaintext upload
+  // bypass.
+  if (!originUrl || !currentUrl || !isCurrentPageTrusted(currentUrl, effectiveAts, originUrl)) {
+    console.log("    [upload] blocked: current page is not a trusted HTTPS origin");
+    return false;
+  }
   if (!filePath || !fs.existsSync(filePath)) {
     console.log(`    [upload] no PDF to attach`);
+    return false;
+  }
+  if (await hasCrossOriginFormOrFrame(page)) {
+    console.log("    [upload] blocked: cross-origin form/iframe target detected");
     return false;
   }
   for (const sel of selectors) {
@@ -216,47 +1068,363 @@ async function tryUpload(page, selectors, filePath) {
   return false;
 }
 
-async function detectAndClickApply(page, ats) {
+function requestIsMainFrame(request, page) {
+  try {
+    const frame = request.frame?.();
+    if (!frame) return true;
+    const main = page.mainFrame?.();
+    return !main || frame === main || frame.parentFrame?.() === null;
+  } catch {
+    return true;
+  }
+}
+
+function requestFrameOrigin(request, page) {
+  try {
+    const frame = request.frame?.();
+    // Compare a child-frame request with its parent, not with the frame's
+    // destination URL (which may already reflect an untrusted cross-origin
+    // navigation).
+    const parentUrl = frame?.parentFrame?.()?.url?.();
+    return parseHttpUrl(parentUrl) || parseHttpUrl(page.url?.());
+  } catch {
+    return parseHttpUrl(page.url?.());
+  }
+}
+
+async function installNavigationGuard(page, ats, originUrl) {
+  if (!page) throw new Error("navigation guard unavailable");
+  const boundary = isNavigationBoundary(originUrl)
+    ? originUrl
+    : createNavigationBoundary(typeof originUrl === "string" ? originUrl : page.url?.(), ats);
+  const pageContext = typeof page.context === "function" ? page.context() : null;
+  // Use a context-level guard for isolated job contexts (it also covers fetch
+  // from service workers/child frames); shared Edge contexts use a page-level
+  // guard so one job's boundary cannot poison another job's pages.
+  const routeTarget = (!sharedCtx && typeof pageContext?.route === "function")
+    ? pageContext
+    : (typeof page.route === "function" ? page : (typeof pageContext?.route === "function" ? pageContext : null));
+  if (!routeTarget) throw new Error("navigation guard unavailable");
+
+  await routeTarget.route("**/*", async (route) => {
+    let request;
+    try {
+      request = route.request();
+      const requestUrl = request.url();
+      const requestType = request.resourceType?.() || "";
+      const isMainNavigation = typeof request.isNavigationRequest === "function"
+        ? request.isNavigationRequest()
+        : (!requestType || requestType === "document");
+      if (isMainNavigation && requestIsMainFrame(request, page)) {
+        const method = String(request.method?.() || "GET").toUpperCase();
+        const currentOrigin = navigationPinnedOrigin(boundary) || page.url?.();
+        // Approved service hosts may be used for GET navigation/redirects,
+        // but a cross-origin POST form is never a safe application target.
+        if (method !== "GET" && !sameOrigin(requestUrl, currentOrigin)) {
+          console.log(`    [form-target-block] ${method} ${requestUrl}`);
+          await route.abort("blockedbyclient");
+          return;
+        }
+        if (!isAllowedNavigationUrl(requestUrl, ats, boundary)) {
+          console.log(`    [redirect-block] ${requestUrl}`);
+          await route.abort("blockedbyclient");
+          return;
+        }
+        // Leave the initial origin unpinned until page.goto finishes: a
+        // server redirect from that origin to an approved service host must
+        // still be allowed. Any service-host transition (or a later request)
+        // is then pinned immediately.
+        const wasPinned = !!boundary.pinnedOrigin;
+        if (wasPinned || !sameOrigin(requestUrl, boundary.initialOrigin)) {
+          pinNavigationOrigin(boundary, requestUrl);
+        }
+      } else {
+        // While filling/uploading, permit only same-origin HTTP(S) resources.
+        // This covers cross-origin iframes, form actions, fetch/XHR, and
+        // script/image requests before PII can leave the page.
+        const frameOrigin = requestFrameOrigin(request, page)
+          || parseHttpUrl(navigationPinnedOrigin(boundary));
+        const requestParsed = parseHttpUrl(requestUrl);
+        const blankFrame = /^about:blank(?:[#?].*)?$/i.test(String(requestUrl || ""));
+        if (!blankFrame && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
+          const kind = request.resourceType?.() || "subresource";
+          console.log(`    [subresource-block] ${kind} ${requestUrl}`);
+          await route.abort("blockedbyclient");
+          return;
+        }
+      }
+      await route.continue();
+    } catch (error) {
+      // Guard failures are fail-closed. Never turn an aborted request into a
+      // permitted request in the catch path.
+      console.log(`    [route-block] guard failed: ${String(error).slice(0, 100)}`);
+      try { await route.abort("blockedbyclient"); } catch {}
+    }
+  });
+  return boundary;
+}
+
+async function navigateAllowed(page, target, ats, originUrl) {
+  const boundary = isNavigationBoundary(originUrl)
+    ? originUrl
+    : createNavigationBoundary(target, ats);
+  if (!isAllowedNavigationUrl(target, ats, boundary)) {
+    console.log(`    [redirect-block] refusing navigation to ${target}`);
+    return false;
+  }
+  try {
+    await page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (e) {
+    console.log(`    [redirect-block] navigation failed: ${String(e).slice(0, 100)}`);
+    return false;
+  }
+  if (!isAllowedNavigationUrl(page.url(), ats, boundary)) {
+    console.log(`    [redirect-block] landed on ${page.url()}`);
+    return false;
+  }
+  pinNavigationOrigin(boundary, page.url());
+  return true;
+}
+
+async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
+  const currentUrl = typeof page?.url === "function" ? page.url() : "";
+  if (!originUrl || !currentUrl || !isCurrentPageTrusted(currentUrl, ats, originUrl)) {
+    console.log("    [redirect-block] refusing to interact with a non-HTTPS or untrusted page");
+    return { clicked: false, blocked: true, reason: "redirect" };
+  }
   const sels = ATS_SELECTORS[ats]?.applyBtn || ATS_SELECTORS.generic.applyBtn;
   for (const sel of sels) {
     const el = page.locator(sel).first();
     if (await el.count() > 0) {
-      const href = await el.getAttribute("href").catch(()=>null);
-      const label = ((await el.innerText().catch(()=> "")) || "").trim().slice(0, 40);
+      const href = typeof el.getAttribute === "function" ? await el.getAttribute("href").catch(() => null) : null;
+      const innerText = typeof el.innerText === "function" ? await el.innerText().catch(() => "") : "";
+      const ariaLabel = typeof el.getAttribute === "function" ? await el.getAttribute("aria-label").catch(() => "") : "";
+      const valueLabel = typeof el.getAttribute === "function" ? await el.getAttribute("value").catch(() => "") : "";
+      const label = (innerText || ariaLabel || valueLabel || sel).trim().slice(0, 80);
       console.log(`    [found] Apply → ${sel} "${label}" href=${href?.slice(0,80)}`);
-      // Easy Apply / modal triggers must be CLICKED (their href is a search URL, not the form).
-      // LinkedIn: use the DETAIL pane button, never a list-card anchor (those navigate away).
-      if (/easy apply/i.test(label + " " + sel)) {
-        if (ats === "linkedin") {
-          const detail = page.locator("div.jobs-details button:has-text('Easy Apply'), div.jobs-search__job-details button:has-text('Easy Apply'), button.jobs-apply-button").first();
-          if ((await detail.count()) > 0) {
-            console.log("    [easy-apply] clicking detail-pane button");
-            await detail.click({ timeout: 5000 }).catch(() => {});
-            await page.waitForTimeout(2500);
-          } else {
-            console.log("    [easy-apply] detail button not found — skipping click (would navigate away)");
-          }
-        } else {
-          await el.click({ timeout: 5000 }).catch(()=>{});
-          await page.waitForTimeout(2500);
+      let target = null;
+      let httpTarget = null;
+      if (href) {
+        try {
+          target = new URL(href, page.url()).toString();
+          if (/^https?:/i.test(target)) httpTarget = target;
+        } catch { target = null; }
+        if (httpTarget && !isAllowedNavigationUrl(httpTarget, ats, originUrl)) {
+          console.log(`    [redirect-block] apply link is outside the exact ATS boundary`);
+          return { clicked: false, blocked: true, reason: "redirect" };
         }
-      } else if (href && href.startsWith("http")) {
-        await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
-      } else if (href && href.startsWith("/")) {
-        await el.click({ timeout: 5000 }).catch(()=>{});
-        await page.waitForTimeout(1500);
-      } else {
-        await el.click({ timeout: 5000 }).catch(()=>{});
-        await page.waitForTimeout(1500);
       }
-      return true;
+
+      const oneStep = await pageHasOneStepApplicationForm(page);
+      const type = typeof el.getAttribute === "function" ? await el.getAttribute("type").catch(() => "") : "";
+      const classification = classifyApplyControl({ label, href, selector: sel, oneStep, isSubmit: type === "submit" });
+      console.log(`    [apply-class] ${classification.classification} (${label})`);
+      if (classification.classification === "unknown") {
+        return { clicked: false, blocked: true, reason: "unknown-control" };
+      }
+
+      if (classification.final) {
+        // A final-looking control is never raw-clicked, even when it has an
+        // href. The centralized guard rechecks pause/ownership immediately
+        // before the click.
+        const finalClick = await clickFinalControl(page, el, label, finalGuard);
+        return {
+          clicked: !!finalClick.clicked,
+          blocked: false,
+          finalAction: true,
+          finalClick,
+        };
+      }
+
+      // Only an explicitly intermediate Apply/modal trigger reaches this raw
+      // click branch. An absolute link merely opens the form and is guarded
+      // as navigation; it is not itself a final submission.
+      if (httpTarget) {
+        if (!(await navigateAllowed(page, httpTarget, ats, originUrl))) {
+          return { clicked: false, blocked: true, reason: "redirect" };
+        }
+      } else {
+        try {
+          if (/easy apply/i.test(label + " " + sel) && ats === "linkedin") {
+            const detail = page.locator("div.jobs-details button:has-text('Easy Apply'), div.jobs-search__job-details button:has-text('Easy Apply'), button.jobs-apply-button").first();
+            if ((await detail.count()) > 0) {
+              console.log("    [easy-apply] clicking detail-pane button");
+              await detail.click({ timeout: 5000 });
+            } else {
+              return { clicked: false, blocked: true, reason: "missing-easy-apply-trigger" };
+            }
+          } else {
+            await el.click({ timeout: 5000 });
+          }
+          await page.waitForTimeout(1500);
+        } catch (error) {
+          console.log(`    [apply-trigger-fail] ${String(error).slice(0, 100)}`);
+          return { clicked: false, blocked: true, reason: "trigger-failed" };
+        }
+      }
+      if (!isCurrentPageTrusted(page.url(), ats, originUrl)) {
+        return { clicked: false, blocked: true, reason: "redirect" };
+      }
+      return { clicked: true, blocked: false, finalAction: false, classification };
     }
   }
   console.log(`    [warn] no Apply button found for ${ats} — assuming already on form`);
-  return false;
+  return { clicked: false, blocked: false, finalAction: false };
 }
 
-async function fillCommonFields(page, ats, profile, job) {
+// Every final control goes through this one guard. A live run without --auto
+// may fill and advance intermediate steps, but it must never click a final
+// application action on behalf of the user.
+async function checkFinalActionGuards(options = {}) {
+  const pageGuard = options.page?.[Symbol.for("pulseops.browserApplyGuard")] || null;
+  const guard = { ...(pageGuard || {}), ...options };
+  const dryRun = guard.dryRun ?? DRY_RUN;
+  const auto = guard.auto ?? AUTO;
+  if (!finalSubmissionAllowed({ dryRun, auto })) {
+    return { allowed: false, reason: "auto-required" };
+  }
+  if (typeof guard.page?.url === "function") {
+    let currentUrl = "";
+    try { currentUrl = guard.page.url(); } catch { return { allowed: false, reason: "redirect-blocked" }; }
+    // Final actions are PII-bearing too.  A missing/insecure current URL is
+    // never evidence that the page is safe, even when a caller omitted the
+    // optional navigation-boundary object.
+    if (!parseHttpUrl(currentUrl)) {
+      return { allowed: false, reason: "redirect-blocked" };
+    }
+    if (guard.navigationBoundary
+        && !isCurrentPageTrusted(currentUrl, guard.navigationBoundary.ats || "generic", guard.navigationBoundary)) {
+      return { allowed: false, reason: "redirect-blocked" };
+    }
+  }
+  const dbPath = guard.dbPath || resolveDbPath();
+  const jobId = guard.jobId ?? guard.job_id ?? null;
+  const ownerToken = guard.claimToken || guard.ownerToken || null;
+  let state;
+  if (typeof guard.pauseReader === "function") {
+    const supplied = await guard.pauseReader(dbPath, jobId, ownerToken);
+    state = supplied === true ? { available: true, paused: false, claimOwned: jobId ? true : null }
+      : supplied === false ? { available: true, paused: true, claimOwned: false }
+      : (supplied || { available: false, paused: true, claimOwned: false });
+  } else {
+    state = await readFinalActionState(dbPath, jobId, ownerToken);
+  }
+  if (!state.available || state.paused) {
+    return { allowed: false, reason: state.reason || "send-paused", state };
+  }
+  if (jobId !== null && jobId !== undefined && jobId !== "" && state.claimOwned !== true) {
+    return { allowed: false, reason: "claim-lost", state };
+  }
+  if (jobId !== null && jobId !== undefined && jobId !== "" && !ownerToken) {
+    return { allowed: false, reason: "claim-required", state };
+  }
+  return { allowed: true, reason: "ready", state };
+}
+
+// Every final control goes through this one guard. A live run without --auto
+// may fill and advance intermediate steps, but it must never click a final
+// application action on behalf of the user.
+async function clickFinalControl(page, locator, label, options = {}) {
+  const guard = { ...(options || {}), page };
+  const first = await checkFinalActionGuards(guard);
+  if (!first.allowed) {
+    if (first.reason === "auto-required") {
+      console.log(`  [human-in-loop] final ${label} requires --auto; leaving it for the operator`);
+    } else {
+      console.log(`  [final-block] ${label}: ${first.reason}`);
+    }
+    return { allowed: false, clicked: false, blocked: first.reason, reason: first.reason };
+  }
+  if (await hasCaptcha(page)) {
+    console.log(`  [captcha] final ${label} is blocked until verification disappears`);
+    if (!(await waitForCaptchaResolution(page))) {
+      return { allowed: true, clicked: false, captcha: true };
+    }
+  }
+  if (!locator || (await locator.count().catch(() => 0)) === 0) {
+    return { allowed: true, clicked: false };
+  }
+  const disabled = await locator.isDisabled().catch(() => true);
+  if (disabled) return { allowed: true, clicked: false, disabled: true };
+
+  // Re-read both global pause and the exact claim after CAPTCHA/field work and
+  // immediately before the final click. This closes the mid-run pause race.
+  const last = await checkFinalActionGuards(guard);
+  if (!last.allowed) {
+    console.log(`  [final-block] ${label}: ${last.reason}`);
+    return { allowed: false, clicked: false, blocked: last.reason, reason: last.reason };
+  }
+  try {
+    await locator.click({ timeout: 5000 });
+    console.log(`  [submit] clicked final ${label}`);
+    return { allowed: true, clicked: true };
+  } catch (e) {
+    console.log(`  [submit] final ${label} click failed: ${String(e).slice(0, 100)}`);
+    return { allowed: true, clicked: false, error: e };
+  }
+}
+
+async function hasCaptcha(page) {
+  try {
+    for (const selector of CAPTCHA_SELECTORS) {
+      const loc = page.locator(selector);
+      const count = await loc.count().catch(() => 0);
+      // Treat even a hidden challenge frame as present. A later visibility
+      // check is safer than allowing a challenge to fall through unnoticed.
+      if (count > 0) return true;
+    }
+    const bodyHit = await page.evaluate(() =>
+      /verify you are human|additional verification required|checking your browser|complete the captcha/i.test(document.body?.innerText || "")
+    ).catch(() => true);
+    if (bodyHit) return true;
+    for (const frame of page.frames?.() || []) {
+      const frameHit = await frame.locator("body").innerText().catch(() => null);
+      if (frameHit === null) return true;
+      if (/verify you are human|additional verification required|checking your browser|complete the captcha/i.test(frameHit)) return true;
+    }
+    return false;
+  } catch (e) {
+    console.log(`  [captcha] challenge probe failed; fail closed: ${String(e).slice(0, 100)}`);
+    return true;
+  }
+}
+
+async function waitForCaptchaResolution(page) {
+  try {
+    if (!(await hasCaptcha(page))) return true;
+    if (DRY_RUN) return false;
+    const started = Date.now();
+    let announced = false;
+    while (await hasCaptcha(page)) {
+      if (Date.now() - started >= CAPTCHA_WAIT_MS) return false;
+      if (!announced) {
+        console.log(`  [captcha] verification is still present; waiting up to ${Math.ceil(CAPTCHA_WAIT_MS / 1000)}s`);
+        if (!HEADED) console.log("    (run with --headed to solve it manually)");
+        announced = true;
+      }
+      await page.waitForTimeout(1000).catch(() => new Promise((resolve) => setTimeout(resolve, 1000)));
+    }
+    return true;
+  } catch (e) {
+    // A failed challenge probe is not evidence that verification disappeared.
+    console.log(`  [captcha] challenge probe failed; blocking: ${String(e).slice(0, 100)}`);
+    return false;
+  }
+}
+
+async function fillCommonFields(page, ats, profile, job, originUrl = null) {
+  const currentUrl = typeof page?.url === "function" ? page.url() : "";
+  // Autofill sends PII, so dry-run and live mode share the same HTTPS
+  // same-origin gate.  A missing boundary is never treated as a preview
+  // exemption.
+  if (!originUrl || !currentUrl || !isCurrentPageTrusted(currentUrl, ats, originUrl)) {
+    console.log("  [fill] blocked: page is not a trusted HTTPS origin");
+    return false;
+  }
+  if (await hasCrossOriginFormOrFrame(page)) {
+    console.log("  [fill] blocked: cross-origin form/iframe target detected");
+    return false;
+  }
   const candidate = profile.candidate || {};
   const fullName = candidate.name || "Test User";
   const [firstName, ...rest] = fullName.split(" ");
@@ -279,21 +1447,270 @@ async function fillCommonFields(page, ats, profile, job) {
     const cover = `Dear Hiring Manager,\n\nI am excited to apply for ${job.title} at ${job.company}. My background in ${profile.domain?.title || "Backend Engineering"} aligns closely with this role.\n\nBest regards,\n${fullName}`;
     await tryFill(page, sels.cover, cover);
   }
+  return true;
 }
 
-async function processJob(browser, job, profile) {
-  const url = job.link || job.url;
+async function hasVisibleAppliedBadge(page) {
+  const pageHit = await page.evaluate(() => {
+    const statusText = /^(applied|already applied|application submitted|application sent|you applied)$/i;
+    const statusAria = /^(applied|already applied|application submitted|application sent|you applied)/i;
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    };
+    const nodes = [...document.querySelectorAll("button, a, [role='button'], [role='status'], span, div")];
+    if (nodes.some((el) => visible(el) && statusText.test((el.innerText || el.textContent || "").trim().replace(/\s+/g, " ")))) return true;
+    const body = (document.body?.innerText || "").replace(/\s+/g, " ");
+    return (/you (?:already )?applied|application (?:submitted|sent)|applied successfully|applied on/i.test(body)
+      && !/apply now|apply for this job|not applied/i.test(body))
+      || nodes.some((el) => visible(el) && statusAria.test((el.getAttribute("aria-label") || "").trim()));
+  }).catch(() => false);
+  if (pageHit) return true;
+  for (const frame of page.frames?.() || []) {
+    const hit = await frame.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ");
+      return /^(applied|already applied|application submitted|application sent|you applied)$/i.test(text)
+        || /you (?:already )?applied|application (?:submitted|sent)|applied successfully/i.test(text);
+    }).catch(() => false);
+    if (hit) return true;
+  }
+  return false;
+}
+
+// Naukri Campus periodically injects a full-screen Young Turk contest promo.
+// It can render inside a same-origin iframe and its close icon is often an
+// unlabelled SVG, so ordinary [class*=close] selectors miss it.
+async function dismissNaukriOverlays(page) {
+  const markerPattern = /India.?s biggest skill contest|Get noticed by top companies|Enrol now/i;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let frame = null;
+    let marker = null;
+    for (const candidate of page.frames()) {
+      const loc = candidate.getByText(markerPattern).last();
+      if (await loc.count().catch(() => 0) && await loc.isVisible().catch(() => false)) {
+        frame = candidate;
+        marker = loc;
+        break;
+      }
+    }
+    if (!marker) return attempt > 0;
+
+    if (attempt === 0) {
+      await marker.press("Escape").catch(() => {});
+      await page.waitForTimeout(500);
+      if (!(await marker.isVisible().catch(() => false))) {
+        console.log("  [overlay] dismissed Naukri promo with Escape");
+        return true;
+      }
+    }
+
+    const closeSelectors = [
+      '[aria-label*="close" i]', '[title*="close" i]',
+      'button:has-text("✕")', 'button:has-text("×")',
+      '[class*="close" i]',
+    ];
+    let clicked = false;
+    for (const selector of closeSelectors) {
+      const close = frame.locator(selector).first();
+      if (await close.count().catch(() => 0) && await close.isVisible().catch(() => false)) {
+        if (await close.click({ timeout: 2500, force: true }).then(() => true).catch(() => false)) {
+          clicked = true;
+          break;
+        }
+      }
+    }
+
+    // Verified Young Turk geometry: the "Enrol now" button is centred near the
+    // bottom and the unlabelled X is about (+290, -395) pixels from its centre.
+    if (!clicked) {
+      const box = await marker.boundingBox().catch(() => null);
+      if (box) {
+        const x = Math.min(1240, box.x + box.width / 2 + 290);
+        const y = Math.max(8, box.y - 395);
+        await page.mouse.click(x, y).catch(() => {});
+        clicked = true;
+      }
+    }
+
+    await page.waitForTimeout(800);
+    if (!(await marker.isVisible().catch(() => false))) {
+      console.log("  [overlay] dismissed Naukri Young Turk promo");
+      return true;
+    }
+    if (!clicked) break;
+  }
+  console.log("  [overlay] warning: Naukri promo remained open; apply click may be intercepted");
+  return false;
+}
+
+function attachPreparedRuntime(job, prepared = {}) {
+  if (!job || !prepared?.allowed) return job;
+  const dbPath = prepared.dbPath || prepared.guard?.dbPath || null;
+  const claimToken = prepared.claimToken || prepared.guard?.claimToken || null;
+  if (dbPath) {
+    job._db_path = dbPath;
+    job._dbPath = dbPath;
+  }
+  if (claimToken) {
+    job._claimToken = claimToken;
+    job._claim_token = claimToken;
+  }
+  return job;
+}
+
+async function prepareJobRuntime(job, runtime = {}) {
+  const dbPath = runtime.dbPath || job?._db_path || job?._dbPath || null;
+  const jobId = runtime.jobId ?? runtime.job_id ?? job?.job_id ?? job?.id ?? null;
+  const isManual = !!(job?.manual_url || job?._manual_url);
+  if (DRY_RUN) {
+    return {
+      allowed: true,
+      guard: { dryRun: true, auto: AUTO, dbPath, jobId: null, claimToken: null },
+    };
+  }
+
+  if (isManual) {
+    const pause = await manualUrlDatabaseGuard({ dbPath, dryRun: false });
+    if (!pause.allowed) {
+      return { allowed: false, reason: pause.reason || "send-paused", dbPath: pause.dbPath || null };
+    }
+    job._db_path = pause.dbPath;
+    return {
+      allowed: true,
+      dbPath: pause.dbPath,
+      guard: { dryRun: false, auto: AUTO, dbPath: pause.dbPath, jobId: null, claimToken: null },
+    };
+  }
+
+  if (jobId === null || jobId === undefined || jobId === "") {
+    return { allowed: false, reason: "claim-required" };
+  }
+  const selectedDb = dbPath || getAuthoritativeDbPath();
+  if (!isExistingDbPath(selectedDb)) {
+    return { allowed: false, reason: "db-missing", dbPath: selectedDb || null };
+  }
+  // An explicit --job-id is not an override switch. Re-run every durable
+  // eligibility guard here, immediately before claiming, so a manually
+  // supplied row cannot bypass score/status/pause/simulation policy.
+  if (!isEligibleJob(job, { explicit: true })) {
+    return { allowed: false, reason: "job-not-eligible", dbPath: selectedDb };
+  }
+  let claimToken = runtime.claimToken || runtime.ownerToken || job?._claimToken || job?._claim_token || null;
+  if (!claimToken) {
+    claimToken = randomUUID();
+    const claim = await claimJobForApply(jobId, { dbPath: selectedDb, ownerId: claimToken });
+    if (!claim.claimed) {
+      return { allowed: false, reason: claim.reason || "claim-blocked", dbPath: selectedDb, claim };
+    }
+    job._claimToken = claimToken;
+    job._claim_token = claimToken;
+  }
+  const state = await readFinalActionState(selectedDb, jobId, claimToken);
+  if (!state.available || state.paused || state.claimOwned !== true) {
+    return { allowed: false, reason: state.reason || "claim-lost", dbPath: selectedDb, claimToken, state };
+  }
+  job._db_path = selectedDb;
+  job._dbPath = selectedDb;
+  job._claimToken = claimToken;
+  job._claim_token = claimToken;
+  return {
+    allowed: true,
+    dbPath: selectedDb,
+    claimToken,
+    guard: { dryRun: false, auto: AUTO, dbPath: selectedDb, jobId, claimToken },
+  };
+}
+
+function finalGuardAction(result) {
+  const reason = result?.blocked || result?.reason || "";
+  if (["send-paused", "db-missing", "settings-unavailable", "pause-query-failed"].includes(reason)) return "send-paused";
+  if (["claim-lost", "claim-required", "claim-blocked"].includes(reason)) return "claim-blocked";
+  if (reason === "redirect-blocked") return "redirect-blocked";
+  if (result?.error) return "needs-verification";
+  return null;
+}
+
+async function processJob(browser, job, profile, runtime = {}) {
+  const url = String(job.link || job.url || "");
   const ats = inferATS(url);
-  const resumePdf = findResumePdf(job.company, job.title);
+  const navBoundary = createNavigationBoundary(url, ats);
+  const resumePdf = findResumePdf(job.company, job.title, job.pdf_path);
   console.log(`\n[Job] ${job.company} — ${job.title}`);
   console.log(`  URL: ${url}`);
   console.log(`  ATS: ${ats} | PDF: ${resumePdf ? path.basename(resumePdf) : "none (will use generic)"}`);
-  console.log(`  Mode: ${DRY_RUN ? "DRY-RUN (no submit)" : "LIVE (approval required)"}`);
+  console.log(`  Mode: ${DRY_RUN ? "DRY-RUN (no submit)" : AUTO ? "LIVE (AUTO final actions enabled)" : "LIVE (manual final action required)"}`);
 
-  if (!url || url.includes("example.com") || MOCK_ONLY) {
+  // Validate the initial URL before runtime/claim work, context creation, or
+  // page navigation.  This is deliberately true in dry-run: previewing an
+  // HTTP job must not turn into a plaintext request or browser session.
+  if (!isAllowedInitialJobUrl(url)) {
+    console.log("  [redirect-block] initial job URL must be HTTPS before any page interaction");
+    return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+  }
+
+  if (isSimulationJob(job)) {
+    console.log("  [simulation-guard] durable simulation/mock marker — refusing browser apply");
+    return { company: job.company, title: job.title, link: url, ats, action: "simulation-blocked", pdf: resumePdf };
+  }
+
+  if (!url || /example\.com/i.test(url) || MOCK_ONLY) {
     console.log(`  [mock] dry-run preview — would open ${url}`);
     await new Promise(r=>setTimeout(r, 200));
     return { company: job.company, title: job.title, link: url, ats, action: "mock-preview", pdf: resumePdf };
+  }
+
+  // Claim DB-backed jobs before early terminal/precondition returns. This
+  // lets auth-wall, invalid-host, and dead-link outcomes persist against the
+  // exact claim instead of leaving the row Evaluated forever.
+  const prepared = await prepareJobRuntime(job, runtime);
+  if (!prepared.allowed) {
+    console.log(`  [${prepared.reason || "guard-block"}] no page opened for ${job.company}`);
+    return {
+      company: job.company,
+      title: job.title,
+      link: url,
+      ats,
+      action: prepared.reason === "claim-blocked" || prepared.reason === "claim-lost" || prepared.reason === "claim-required" ? "claim-blocked" : "send-paused",
+      pdf: resumePdf,
+      claimToken: prepared.claimToken || job?._claimToken || null,
+    };
+  }
+  const finalGuard = { ...(prepared.guard || {}), navigationBoundary: navBoundary };
+  if (!DRY_RUN) {
+    const beforeOpen = finalGuard.jobId
+      ? await readFinalActionState(finalGuard.dbPath, finalGuard.jobId, finalGuard.claimToken)
+      : await readSendPause(finalGuard.dbPath);
+    if (!beforeOpen.available || beforeOpen.paused
+        || (finalGuard.jobId && beforeOpen.claimOwned !== true)) {
+      console.log(`  [${beforeOpen.reason || "send-paused"}] page opening refused`);
+      return {
+        company: job.company,
+        title: job.title,
+        link: url,
+        ats,
+        action: beforeOpen.paused || !beforeOpen.available ? "send-paused" : "claim-blocked",
+        pdf: resumePdf,
+        claimToken: finalGuard.claimToken || null,
+      };
+    }
+  }
+
+  if (ats === "indeed" && !INCLUDE_INDEED) {
+    console.log("  [portal-disabled] Indeed is disabled by user; use --include-indeed only for a deliberate manual override");
+    return { company: job.company, title: job.title, link: url, ats, action: "portal-disabled", pdf: resumePdf };
+  }
+
+  // The YC scraper can also emit category and company pages. They are not
+  // application listings and must never enter the browser submit path.
+  if (ats === "yc" && !/\/jobs\/\d+(?:[/?#]|$)/i.test(url)) {
+    console.log("  [invalid] YC category/company URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
+  if (!isAllowedNavigationUrl(url, ats, navBoundary)) {
+    console.log("  [redirect-block] initial URL is outside the strict ATS allowlist");
+    return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
   }
 
   const hasSession = fs.existsSync(path.join(ROOT, "portal", "storageState.json"));
@@ -301,40 +1718,73 @@ async function processJob(browser, job, profile) {
     console.log(`  [authwall-skip] ${ats} needs portal/storageState.json — run: node portal/save_sessions.mjs`);
     return { company: job.company, title: job.title, link: url, ats, action: "authwall-skip", pdf: resumePdf };
   }
-  const context = await browser.newContext({
+
+  // EDGE mode: share one persistent Edge context across jobs (never close it)
+  const context = sharedCtx || await browser.newContext({
     viewport: { width: 1366, height: 900 },
     // Use headed storageState if exists for logged-in portals (Naukri/LinkedIn)
     storageState: hasSession ? path.join(ROOT, "portal", "storageState.json") : undefined,
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
+  page[Symbol.for("pulseops.browserApplyGuard")] = finalGuard;
+  try {
+    await installNavigationGuard(page, ats, navBoundary);
+  } catch (e) {
+    console.log(`  [redirect-block] could not install navigation guard: ${String(e).slice(0, 100)}`);
+    if (!sharedCtx) await context.close();
+    return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+  }
 
   try {
     console.log(`  [nav] goto ${url.slice(0,90)}`);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (!(await navigateAllowed(page, url, ats, navBoundary))) {
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+    }
     await page.waitForTimeout(1500);
+    if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+      console.log("  [redirect-block] page changed origin before overlay handling");
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+    }
+    // Naukri Campus can cover the job page with a Young Turk contest promo.
+    await dismissNaukriOverlays(page);
+    if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+      console.log("  [redirect-block] page changed origin before form interaction");
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+    }
+    // A server-side Applied badge is authoritative for the human-facing ATSs.
+    // Check it before opening another application modal (including the Naukri
+    // Young Turk flow) and record a verified, idempotent outcome.
+    if (HUMAN_FINAL_STATUSES.has(ats) && !(await hasCaptcha(page)) && await hasVisibleAppliedBadge(page)) {
+      console.log(`  [${ats}] server-side Applied badge already present — recording verified submission`);
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
+    }
+
     // Dead-listing guard: never attempt submits on 404/expired job pages
     const deadHit = await page.evaluate(() => {
       const t = (document.body?.innerText || "").slice(0, 2000);
       return /404|no longer exists|no longer available|job (has )?expired|position (has been )?filled|this job is no longer/i.test(t);
     }).catch(() => false);
-    if (deadHit) {
+    if (deadHit && !(await hasCaptcha(page))) {
       console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
-      await context.close();
+      if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
 
-    // Detect Cloudflare / CAPTCHA
-    const captchaSel = 'iframe[src*="captcha"] , [data-testid="captcha"], .cf-challenge';
-    if (await page.locator(captchaSel).count() > 0) {
-      console.log(`  [pause] CAPTCHA/Challenge detected — please solve manually in ${HEADED ? "visible" : "headless"} window, then press Enter`);
-      if (!HEADED) console.log(`    (re-run with --headed to solve)`);
-      if (DRY_RUN) {
-        await page.screenshot({ path: path.join(ROOT, `output/apply-${job.company.replace(/\W/g,"_")}-captcha.png`), fullPage: true }).catch(()=>{});
-      }
-      // In dry-run we don't block; in live we would wait for input
-      if (!DRY_RUN) {
-        await new Promise(resolve => { process.stdin.once('data', resolve); });
+    // A CAPTCHA is a hard stop. In live/auto mode the only way onward is an
+    // actual disappearance of the challenge; a timeout or stale marker returns
+    // captcha-blocked and can never fall through to Apply/Submit.
+    if (await hasCaptcha(page)) {
+      console.log(`  [captcha] CAPTCHA/Challenge detected — waiting for verification to disappear`);
+      if (!HEADED) console.log("    (run with --headed to solve manually)");
+      await page.screenshot({ path: path.join(ROOT, `output/apply-${String(job.company || "job").replace(/\W/g,"_")}-captcha.png`), fullPage: true }).catch(()=>{});
+      if (!(await waitForCaptchaResolution(page))) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
       }
     }
 
@@ -346,8 +1796,51 @@ async function processJob(browser, job, profile) {
         await page.waitForTimeout(1000);
       }
     }
-    await detectAndClickApply(page, ats);
+    const applyNavigation = await detectAndClickApply(page, ats, navBoundary, finalGuard);
+    if (applyNavigation.blocked) {
+      if (!sharedCtx) await context.close();
+      const action = ["send-paused", "claim-blocked", "claim-lost"].includes(applyNavigation.reason)
+        ? applyNavigation.reason
+        : (applyNavigation.reason === "unknown-control" || applyNavigation.reason === "trigger-failed" ? "needs-review" : "redirect-blocked");
+      return { company: job.company, title: job.title, link: url, ats, action, pdf: resumePdf };
+    }
+    if (applyNavigation.finalAction) {
+      const finalClick = applyNavigation.finalClick || {};
+      if (finalClick.captcha) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+      }
+      if (!finalClick.clicked) {
+        if (!sharedCtx) await context.close();
+        const action = DRY_RUN ? "dry-run-preview"
+          : (finalClick.blocked === "send-paused" || finalClick.blocked === "db-missing" ? "send-paused"
+            : (finalClick.blocked === "claim-lost" || finalClick.blocked === "claim-required" ? "claim-blocked"
+              : (finalClick.error ? "needs-verification" : "needs-review")));
+        return { company: job.company, title: job.title, link: url, ats, action, pdf: resumePdf };
+      }
+      await page.waitForTimeout(2500);
+      if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "needs-verification", pdf: resumePdf };
+      }
+      const confirmed = await hasVisibleAppliedBadge(page) || await page.evaluate(() =>
+        /successfully applied|application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+      ).catch(() => false);
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : "needs-verification", pdf: resumePdf };
+    }
     await page.waitForTimeout(1500);
+    if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+    }
+    if (await hasCaptcha(page)) {
+      await page.screenshot({ path: path.join(ROOT, `output/apply-${String(job.company || "job").replace(/\W/g,"_")}-captcha.png`), fullPage: true }).catch(()=>{});
+      if (!(await waitForCaptchaResolution(page))) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+      }
+    }
     if (ats === "naukri") {
       // Verify the chat actually opened; retry the Apply click (banners intercept it)
       let opened = false;
@@ -361,30 +1854,263 @@ async function processJob(browser, job, profile) {
         const retry = page.locator("button#apply-button").first();
         if ((await retry.count()) > 0) {
           await retry.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-          await retry.click({ timeout: 5000, force: true }).catch(() => {});
+          const retryLabel = ((await retry.innerText().catch(() => "")) || "Apply").trim();
+          const retryType = typeof retry.getAttribute === "function" ? await retry.getAttribute("type").catch(() => "") : "";
+          const retryClass = classifyApplyControl({
+            label: retryLabel,
+            selector: "button#apply-button",
+            oneStep: await pageHasOneStepApplicationForm(page),
+            isSubmit: retryType === "submit",
+          });
+          if (retryClass.final) {
+            const retryFinal = await clickFinalControl(page, retry, retryLabel, finalGuard);
+            if (!retryFinal.clicked) {
+              if (!sharedCtx) await context.close();
+              return {
+                company: job.company,
+                title: job.title,
+                link: url,
+                ats,
+                action: retryFinal.blocked === "send-paused" ? "send-paused" : "needs-review",
+                pdf: resumePdf,
+              };
+            }
+          } else if (retryClass.intermediate) {
+            await retry.click({ timeout: 5000, force: true });
+          } else {
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
+          }
           await page.waitForTimeout(3000);
         } else break;
+      }
+      if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
       }
       if (!opened) {
         const appliedNow = await page.evaluate(() => /successfully applied|you have successfully applied/i.test(document.body?.innerText || ""));
         console.log(appliedNow ? "  [naukri-chat] already applied" : "  [naukri-chat] chat did not open — aborting");
-        await context.close();
-        return { company: job.company, title: job.title, link: url, ats, action: appliedNow ? "submitted" : "chat-not-opened", pdf: resumePdf };
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: appliedNow ? "verified" : "needs-review", pdf: resumePdf };
       }
     }
-
-    await fillCommonFields(page, ats, profile, job);
-    await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf);
 
     const screenshotPath = path.join(ROOT, "output", `apply-preview-${job.company.replace(/\W/g,"_")}-${Date.now()}.png`);
     let chatNeedsUser = [];
     fs.mkdirSync(path.join(ROOT, "output"), { recursive: true });
+
+    // YC / Wellfound "reach out" modal: written answer(s) (50-char minimum)
+    // + Send. Drafted per-job by Gemini from cv.md (portal/yc_answers.py).
+    // Wellfound uses the identical pattern ("Send application" button).
+    if (ats === "yc" || ats === "wellfound") {
+      await page.waitForTimeout(2500);
+      if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+      }
+      if (await hasCrossOriginFormOrFrame(page)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
+      }
+      const nAreas = await page.locator("textarea").count().catch(() => 0);
+      const modalOpen = nAreas > 0 || await page.evaluate(() =>
+        /reach out to the team|start a conversation with the team/i.test(document.body?.innerText || "")
+      ).catch(() => false);
+      if (modalOpen && nAreas > 0) {
+        // Wellfound location gate: "This job does not support the locations on
+        // your profile" disables the answer box until you pick a location
+        // option. Only ever claims relocation with explicit user approval.
+        if (ats === "wellfound") {
+          const gate = await page.evaluate(() =>
+            /does not support the locations on your profile/i.test(document.body?.innerText || "")
+          ).catch(() => false);
+          if (gate) {
+            console.log(`  [yc] location gate present — claiming relocate (user-approved)`);
+            await page.evaluate(() => {
+              const radios = [...document.querySelectorAll('input[type="radio"]')];
+              for (const r of radios) {
+                const wrap = (r.closest("label")?.innerText || r.parentElement?.innerText || "").trim();
+                if (/i can relocate to/i.test(wrap) && !r.checked) r.click();
+              }
+            }).catch(() => {});
+            await page.waitForTimeout(1500);
+            // react-select location box: type prefix, click the option (verified
+            // 2026-09-23: "Bang" -> "Bangalore Urban"; empty query opens nothing)
+            try {
+              // Focus via JS (react-select input is often 0-opacity; Playwright
+              // visibility checks refuse it), then type with the keyboard.
+              await page.evaluate(() => {
+                const ctrl = document.querySelector("[class*='select__control']");
+                const inp = ctrl ? ctrl.querySelector("input") : document.querySelector("[class*='select__control'] input");
+                if (inp) { inp.scrollIntoView({ block: "center" }); inp.focus(); }
+              }).catch(() => {});
+              await page.waitForTimeout(800);
+              await page.keyboard.type("Bang", { delay: 80 }).catch(() => {});
+              await page.waitForTimeout(2500);
+              const opt = page.locator("[class*='select__option']").filter({ hasText: /bangalore|bengaluru/i }).first();
+              if ((await opt.count()) > 0) {
+                await opt.click({ timeout: 5000 });
+                console.log(`  [yc] location set to Bangalore Urban`);
+              } else {
+                console.log(`  [yc] no Bangalore option appeared`);
+              }
+              await page.waitForTimeout(2000);
+            } catch (e) { console.log(`  [yc] location pick failed: ${String(e).slice(0, 80)}`); }
+          }
+        }
+        console.log(`  [yc] outreach modal open with ${nAreas} textarea(s) — drafting answers`);
+        let answers = null;
+        try {
+          const { execFileSync } = await import("node:child_process");
+          const roleSnippet = await page.evaluate(() =>
+            (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 800)
+          ).catch(() => "");
+          const helper = path.join(ROOT, "portal", "yc_answers.py");
+          // Scraped text is passed as an argv value, never interpolated into a
+          // shell command. execFileSync does not invoke a command shell.
+          const out = execFileSync("python", [
+            helper,
+            String(job.company || ""),
+            String(job.title || ""),
+            String(roleSnippet || ""),
+          ], {
+            cwd: ROOT,
+            encoding: "utf-8",
+            timeout: 120000,
+            windowsHide: true,
+            shell: false,
+          });
+          answers = JSON.parse(out.trim().split(/\r?\n/).pop());
+        } catch (e) { console.log(`  [yc] answer drafting failed: ${String(e).slice(0, 120)}`); }
+        if (answers) {
+          const keys = ["intro", "built", "why"];
+          for (let i = 0; i < Math.min(nAreas, 3); i++) {
+            const area = page.locator("textarea").nth(i);
+            const text = answers[keys[i]] || "";
+            try {
+              await area.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+              await area.click({ timeout: 8000 });
+              await area.fill(text, { timeout: 8000 });
+            } catch (e) {
+              // Fallback: JS focus + value set + input events (modals/overlays)
+              await page.evaluate(([idx, val]) => {
+                const t = document.querySelectorAll("textarea")[idx];
+                if (!t) return;
+                t.scrollIntoView({ block: "center" });
+                t.focus();
+                document.execCommand("selectAll", false, null);
+                document.execCommand("insertText", false, val);
+                t.dispatchEvent(new Event("input", { bubbles: true }));
+                t.dispatchEvent(new Event("change", { bubbles: true }));
+              }, [i, text]).catch(() => {});
+            }
+            const gotLen = await page.evaluate((idx) =>
+              ((document.querySelectorAll("textarea")[idx] || {}).value || "").length, i
+            ).catch(() => -1);
+            console.log(`  [yc] textarea ${i + 1}: target ${text.length} chars, actual ${gotLen}`);
+          }
+          await page.waitForTimeout(1500);
+          const sendBtn = page.locator('button:has-text("Send application"), button:has-text("Send")').first();
+          let sent = false;
+          let clickError = false;
+          if (DRY_RUN) {
+            console.log(`  [DRY-RUN] YC answers drafted — would click Send (use --live)`);
+          } else if ((await sendBtn.count()) > 0) {
+            const lens = await page.evaluate(() =>
+              [...document.querySelectorAll("textarea")].map((t) => (t.value || "").length)
+            ).catch(() => []);
+            const answersReady = lens.length >= nAreas && lens.slice(0, nAreas).every((length) => length >= 50);
+            console.log(`  [yc] textarea lens: ${JSON.stringify(lens)}; ready=${answersReady}`);
+            if (!answersReady) {
+              console.log("  [yc] answers are incomplete — refusing final Send");
+            } else {
+              const sendLabel = ((await sendBtn.innerText().catch(() => "Send application")) || "Send application").trim();
+              const clicked = await clickFinalControl(page, sendBtn, sendLabel, finalGuard);
+              if (clicked.captcha) {
+                if (!sharedCtx) await context.close();
+                return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+              }
+              const guardAction = finalGuardAction(clicked);
+              if (guardAction) {
+                if (!sharedCtx) await context.close();
+                return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+              }
+              clickError = !!clicked.error;
+              sent = clicked.clicked;
+              if (sent) {
+                await page.waitForTimeout(3000);
+                if (await hasCaptcha(page)) {
+                  if (!(await waitForCaptchaResolution(page))) {
+                    if (!sharedCtx) await context.close();
+                    return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+                  }
+                }
+                await page.waitForTimeout(2000);
+              }
+            }
+          } else {
+            console.log("  [yc] Send button not found — refusing an unverified submission");
+          }
+          if (DRY_RUN) {
+            await page.screenshot({ path: screenshotPath.replace("preview", "yc-final"), fullPage: false }).catch(() => {});
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "dry-run-preview", pdf: resumePdf };
+          }
+          if (!sent) {
+            const ycAction = clickError ? "needs-verification" : "needs-review";
+            console.log(`  [yc] final Send was not clicked; recording ${ycAction}`);
+            await page.screenshot({ path: screenshotPath.replace("preview", "yc-final"), fullPage: false }).catch(() => {});
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: ycAction, pdf: resumePdf };
+          }
+          if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+          }
+          const postSend = await page.evaluate(() =>
+            (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 400)
+          ).catch(() => "");
+          const modalGone = await page.evaluate(() =>
+            [...document.querySelectorAll("textarea")].length === 0
+          ).catch(() => false);
+          const serverApplied = await hasVisibleAppliedBadge(page);
+          const ycDone = serverApplied || (modalGone && /message sent|application sent|we'll be in touch|thanks for reaching out|successfully/i.test(postSend));
+          console.log(`  [yc] post-send check: done=${ycDone} modalGone=${modalGone} :: ${postSend.slice(0, 180)}`);
+          await page.screenshot({ path: screenshotPath.replace("preview", "yc-final"), fullPage: false }).catch(() => {});
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: ycDone ? "verified" : "needs-verification", pdf: resumePdf };
+        }
+        console.log(`  [yc] modal open but answers unavailable — leaving for user`);
+        if (!DRY_RUN) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
+        }
+      } else {
+        console.log(`  [yc] no outreach modal detected — continuing to generic submit`);
+      }
+    }
+
+    if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+      console.log("  [redirect-block] refusing to fill a page outside the ATS allowlist");
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+    }
+    await fillCommonFields(page, ats, profile, job, navBoundary);
+    if (await hasCaptcha(page)) {
+      if (!(await waitForCaptchaResolution(page))) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+      }
+    }
+    await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary);
+
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
     console.log(`  [preview] screenshot → ${path.relative(ROOT, screenshotPath)}`);
     console.log(`  [preview] form URL: ${page.url().slice(0,120)}`);
 
     // Naukri chat apply: cookie banner + bot questionnaire (bot types first — wait for it).
-    if (ats === "naukri") {
+    if (ats === "naukri" && !DRY_RUN) {
       const cookie = page.locator("button:has-text('Accept all')").first();
       if ((await cookie.count()) > 0) {
         await cookie.click({ timeout: 3000 }).catch(() => {});
@@ -410,7 +2136,14 @@ async function processJob(browser, job, profile) {
         }).catch(() => false);
       }
       const seenQuestions = [];
+      let manualFinalRequired = false;
+      let finalAttempted = false;
       for (let step = 0; step < 14; step++) {
+        if (manualFinalRequired) break;
+        if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+        }
         // Harvest every visible question for the transcript (deduped)
         try {
           const qs = await page.evaluate(() => {
@@ -489,14 +2222,35 @@ async function processJob(browser, job, profile) {
               if ((await save.count()) === 0) break;
               const dis = await save.isDisabled().catch(() => true);
               if (!dis) {
-                await save.click({ timeout: 4000 }).catch(() => {});
-                saved = true;
+                const saveLabel = ((await save.innerText().catch(() => "Save")) || "Save").trim();
+                if (finalActionLabel(saveLabel)) {
+                  const finalClick = await clickFinalControl(page, save, saveLabel, finalGuard);
+                  if (finalClick.captcha) {
+                    if (!sharedCtx) await context.close();
+                    return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+                  }
+                  if (!finalClick.clicked) {
+                    const guardAction = finalGuardAction(finalClick);
+                    if (guardAction) {
+                      if (!sharedCtx) await context.close();
+                      return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+                    }
+                    manualFinalRequired = true;
+                    break;
+                  }
+                  finalAttempted = true;
+                  saved = true;
+                  break;
+                }
+                console.log(`  [naukri-chat] unrecognised save control "${saveLabel}"; refusing it`);
+                manualFinalRequired = true;
                 break;
               }
               await page.waitForTimeout(1200);
             }
             if (saved) await page.waitForTimeout(2500);
             else console.log("  [naukri-chat] Save stayed disabled — answer may not have registered");
+            if (manualFinalRequired || finalAttempted) break;
             continue;
           }
         } else if (freeText && freeText.noRule) {
@@ -579,10 +2333,31 @@ async function processJob(browser, job, profile) {
           await page.waitForTimeout(1200);
           const save = page.locator("button:has-text('Save')").first();
           if ((await save.count()) > 0) {
-            await save.click({ timeout: 4000 }).catch(() => {});
-            await page.waitForTimeout(2500);
+            const saveLabel = ((await save.innerText().catch(() => "Save")) || "Save").trim();
+            if (finalActionLabel(saveLabel)) {
+              const finalClick = await clickFinalControl(page, save, saveLabel, finalGuard);
+              if (finalClick.captcha) {
+                if (!sharedCtx) await context.close();
+                return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+              }
+              if (finalClick.clicked) {
+                finalAttempted = true;
+                await page.waitForTimeout(2500);
+              } else {
+                const guardAction = finalGuardAction(finalClick);
+                if (guardAction) {
+                  if (!sharedCtx) await context.close();
+                  return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+                }
+                manualFinalRequired = true;
+              }
+            } else {
+              console.log(`  [naukri-chat] unrecognised save control "${saveLabel}"; refusing it`);
+              manualFinalRequired = true;
+            }
           }
           console.log(`  [naukri-chat] step ${step + 1}: typed ${filled.ans}`);
+          if (manualFinalRequired || finalAttempted) break;
           continue;
         }
         // Answer whatever option button the bot offers, by priority.
@@ -593,16 +2368,49 @@ async function processJob(browser, job, profile) {
           const btn = ((await scoped.count()) > 0) ? scoped : page.locator(OPT(label)).first();
           if ((await btn.count()) === 0) continue;
           try {
+            if (finalActionLabel(label) && (DRY_RUN || !AUTO)) {
+              manualFinalRequired = true;
+              console.log(`  [naukri-chat] final option "${label}" requires --auto; leaving it for the operator`);
+              break;
+            }
             await btn.waitFor({ state: "visible", timeout: 2000 });
             await btn.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
-            await btn.click({ timeout: 5000 });
+            if (finalActionLabel(label)) {
+              const finalClick = await clickFinalControl(page, btn, label, finalGuard);
+              if (finalClick.captcha) {
+                if (!sharedCtx) await context.close();
+                return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+              }
+              if (!finalClick.clicked) {
+                const guardAction = finalGuardAction(finalClick);
+                if (guardAction) {
+                  if (!sharedCtx) await context.close();
+                  return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+                }
+                manualFinalRequired = true;
+                break;
+              }
+              finalAttempted = true;
+            } else {
+              await btn.click({ timeout: 5000 });
+            }
           } catch {
-            // Fallback: in-page click (overlays intercept synthetic clicks)
-            await page.evaluate((t) => {
-              const els = Array.from(document.querySelectorAll("button, a, [role='button'], div"));
-              const el = els.find((e) => (e.innerText || "").trim() === t && e.offsetParent !== null);
-              if (el) el.click();
-            }, label).catch(() => {});
+            if (finalActionLabel(label) && (DRY_RUN || !AUTO)) {
+              manualFinalRequired = true;
+              break;
+            }
+            if (finalActionLabel(label)) {
+              manualFinalRequired = true;
+              console.log("  [naukri-chat] final option could not be clicked safely; leaving it for review");
+            } else {
+              // Fallback for an intermediate option only. Final actions never
+              // use this raw JS click path.
+              await page.evaluate((t) => {
+                const els = Array.from(document.querySelectorAll("button, a, [role='button'], div"));
+                const el = els.find((e) => (e.innerText || "").trim() === t && e.offsetParent !== null);
+                if (el) el.click();
+              }, label).catch(() => {});
+            }
           }
           await page.waitForTimeout(2500);
           // Verify the chat advanced (option gone); else retry next loop
@@ -610,19 +2418,41 @@ async function processJob(browser, job, profile) {
           clicked = label + (stillThere ? " (retry?)" : "");
           break;
         }
+        if (manualFinalRequired || finalAttempted) break;
         if (clicked) {
           console.log(`  [naukri-chat] step ${step + 1}: answered "${clicked}"`);
           // After any chip answer, hit Save/Send if showing (chat often waits on it)
           await page.waitForTimeout(1500);
           const postSave = page.locator("button:has-text('Save'), button:has-text('Send'), button:has-text('Submit')").first();
           if ((await postSave.count()) > 0) {
-            const dis = await postSave.isDisabled().catch(() => true);
-            if (!dis) {
-              await postSave.click({ timeout: 4000 }).catch(() => {});
-              console.log("  [naukri-chat] clicked post-answer Save/Send");
-              await page.waitForTimeout(2500);
+            const postLabel = ((await postSave.innerText().catch(() => "")) || "Save").trim();
+            if (finalActionLabel(postLabel) && (DRY_RUN || !AUTO)) {
+              manualFinalRequired = true;
+              console.log(`  [naukri-chat] final post-answer action "${postLabel}" requires --auto`);
+            } else if (finalActionLabel(postLabel)) {
+              const finalClick = await clickFinalControl(page, postSave, postLabel, finalGuard);
+              if (finalClick.captcha) {
+                if (!sharedCtx) await context.close();
+                return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+              }
+              if (finalClick.clicked) {
+                finalAttempted = true;
+                console.log("  [naukri-chat] clicked final post-answer action");
+                await page.waitForTimeout(2500);
+              } else {
+                const guardAction = finalGuardAction(finalClick);
+                if (guardAction) {
+                  if (!sharedCtx) await context.close();
+                  return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+                }
+                manualFinalRequired = true;
+              }
+            } else {
+              console.log(`  [naukri-chat] post-answer control "${postLabel}" is not recognised; refusing it`);
+              manualFinalRequired = true;
             }
           }
+          if (manualFinalRequired || finalAttempted) break;
           continue;
         }
         // No options: either done or bot still working — check success, else wait more
@@ -634,18 +2464,28 @@ async function processJob(browser, job, profile) {
       }
       const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
       if (done) {
-        console.log("  [naukri-chat] SUCCESS — application submitted");
+        console.log("  [naukri-chat] SUCCESS — recording verified submission");
         await page.screenshot({ path: screenshotPath.replace("preview", "submitted"), fullPage: true }).catch(() => {});
-        await context.close();
-        return { company: job.company, title: job.title, link: url, ats, action: "submitted", pdf: resumePdf };
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "confirmation", pdf: resumePdf };
+      }
+      if (manualFinalRequired) {
+        console.log("  [naukri-chat] final submission was not clicked; recording NeedsReview");
+        await page.screenshot({ path: screenshotPath.replace("preview", "final-review"), fullPage: false }).catch(() => {});
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf, needsUser: chatNeedsUser };
       }
       console.log("  [naukri-chat] no success confirmation detected");
     }
 
     // Indeed smartapply: Continue through steps → Review (100%) → Submit application.
-    if (ats === "indeed") {
+    if (ats === "indeed" && !DRY_RUN) {
       for (let step = 0; step < 6; step++) {
-        await fillCommonFields(page, ats, profile, job);
+        if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+        }
+        await fillCommonFields(page, ats, profile, job, navBoundary);
         await page.evaluate(() => window.scrollBy(0, 900));
         await page.waitForTimeout(1000);
         const next = page.locator("button:has-text('Continue'), button:has-text('Review your application'), button:has-text('Submit your application'), button:has-text('Submit application')").first();
@@ -661,7 +2501,9 @@ async function processJob(browser, job, profile) {
           console.log(`  [indeed] step ${step + 1}: no nav button; visible: ${JSON.stringify(all).slice(0, 200)}`);
           break;
         }
-        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
+        const label = (((await next.innerText().catch(() => "")) || "").trim()
+          || (await next.getAttribute("aria-label").catch(() => ""))
+          || (await next.getAttribute("value").catch(() => ""))).slice(0, 60);
         const dis = await next.isDisabled().catch(() => true);
         if (dis) {
           console.log(`  [indeed] "${label}" disabled — missing required input, stopping`);
@@ -669,21 +2511,44 @@ async function processJob(browser, job, profile) {
         }
         console.log(`  [indeed] step ${step + 1}: clicking "${label}"`);
         await next.scrollIntoViewIfNeeded().catch(() => {});
-        await next.click({ timeout: 5000 }).catch(() => {});
+        let clicked = false;
+        if (!intermediateActionLabel(label)) {
+          const finalClick = await clickFinalControl(page, next, label, finalGuard);
+          if (finalClick.captcha) {
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+          }
+          if (!finalClick.clicked) {
+            if (!sharedCtx) await context.close();
+            const guardAction = finalGuardAction(finalClick);
+            return { company: job.company, title: job.title, link: url, ats, action: guardAction || (finalClick.allowed ? "needs-verification" : "needs-review"), pdf: resumePdf };
+          }
+          clicked = true;
+        } else {
+          await next.click({ timeout: 5000 }).catch(() => {});
+        }
         await page.waitForTimeout(2500);
         const done = await page.evaluate(() => /application submitted|you applied|application received|thank you for applying/i.test(document.body?.innerText || ""));
         if (done) break;
+        if (clicked) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "needs-verification", pdf: resumePdf };
+        }
       }
     }
 
     // LinkedIn Easy Apply is multi-step: Next (x N) → Review → Submit. Walk it.
-    if (ats === "linkedin") {
+    if (ats === "linkedin" && !DRY_RUN) {
       for (let step = 0; step < 5; step++) {
+        if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+        }
         const next = page.locator("div[role='dialog'] button[aria-label='Continue to next step'], div[role='dialog'] button:has-text('Next'), button:has-text('Review your application')").first();
         if ((await next.count()) === 0) break;
         const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
         // Fill any visible inputs on this step before advancing
-        await fillCommonFields(page, ats, profile, job);
+        await fillCommonFields(page, ats, profile, job, navBoundary);
         console.log(`  [easy-apply] step ${step + 1}: clicking "${label}"`);
         await next.click({ timeout: 5000 }).catch(() => {});
         await page.waitForTimeout(2000);
@@ -692,10 +2557,23 @@ async function processJob(browser, job, profile) {
 
     // Naukri chat flow already attempted submit above — don't re-click the covered Apply button
     if (ats === "naukri") {
+      if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+      }
       const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
       await page.screenshot({ path: screenshotPath.replace("preview", "final"), fullPage: false }).catch(() => {});
-      await context.close();
-      return { company: job.company, title: job.title, link: url, ats, action: done ? "submitted" : "chat-incomplete", pdf: resumePdf, needsUser: chatNeedsUser };
+      if (!sharedCtx) await context.close();
+      if (DRY_RUN) return { company: job.company, title: job.title, link: url, ats, action: "dry-run-preview", pdf: resumePdf, needsUser: chatNeedsUser };
+      return { company: job.company, title: job.title, link: url, ats, action: done ? "verified" : "needs-verification", pdf: resumePdf, needsUser: chatNeedsUser };
+    }
+
+    if (await hasCaptcha(page)) {
+      await page.screenshot({ path: path.join(ROOT, `output/apply-${String(job.company || "job").replace(/\W/g,"_")}-captcha.png`), fullPage: true }).catch(()=>{});
+      if (!(await waitForCaptchaResolution(page))) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+      }
     }
 
     // Detect submit button
@@ -712,105 +2590,396 @@ async function processJob(browser, job, profile) {
 
     if (DRY_RUN) {
       console.log(`  [DRY-RUN] would WAIT for approval, then click Submit — skipping (use --live to enable)`);
-      await context.close();
+      if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "dry-run-preview", pdf: resumePdf, screenshot: screenshotPath };
-    } else {
-      if (AUTO) {
-        console.log(`\n  [AUTO] --auto flag: submitting without prompt for ${job.company}`);
-      } else {
-        console.log(`\n  [APPROVAL] Ready to SUBMIT ${job.company} — ${job.title}`);
-        console.log(`  Press ENTER to Submit, or Ctrl+C to skip`);
-        await new Promise(resolve => { process.stdin.resume(); process.stdin.once('data', ()=>resolve()); });
-      }
-      for (const sel of submitSels) {
-        const el = page.locator(sel).first();
-        if (await el.count() > 0) {
-          await el.click({ timeout: 5000 });
-          console.log(`  [submit] clicked ${sel}`);
+    }
+
+    if (!AUTO) {
+      console.log(`  [human-in-loop] final submit for ${job.company} requires --auto; no final click was made`);
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
+    }
+
+    console.log(`\n  [AUTO] --auto flag: submitting without prompt for ${job.company}`);
+    let clicked = false;
+    let clickError = false;
+    for (const sel of submitSels) {
+      const el = page.locator(sel).first();
+      if ((await el.count()) > 0) {
+        const label = ((await el.innerText().catch(() => sel)) || sel).trim().slice(0, 60);
+        const finalClick = await clickFinalControl(page, el, label || sel, finalGuard);
+        if (finalClick.captcha) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
+        }
+        const guardAction = finalGuardAction(finalClick);
+        if (guardAction) {
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
+        }
+        if (finalClick.error) clickError = true;
+        if (finalClick.clicked) {
+          clicked = true;
           await page.waitForTimeout(3000);
+          if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
+          }
           await page.screenshot({ path: screenshotPath.replace("preview","submitted"), fullPage: true }).catch(()=>{});
           break;
         }
       }
-      await context.close();
-      return { company: job.company, title: job.title, link: url, ats, action: "submitted", pdf: resumePdf };
     }
+    if (!clicked) console.log(`  [warn] no clickable final Submit found — recording NeedsReview`);
+    // Verify before claiming: a click alone is never treated as Applied.
+    const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats) && await hasVisibleAppliedBadge(page);
+    const confirmed = clicked && (serverApplied || await page.evaluate(() =>
+      /successfully applied|application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+    ).catch(() => false));
+    if (!sharedCtx) await context.close();
+    return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
   } catch (e) {
     console.log(`  [error] ${e.message.slice(0,300)}`);
     try { await page.screenshot({ path: path.join(ROOT, `output/apply-error-${job.company.replace(/\W/g,"_")}.png`), fullPage: true }); } catch {}
-    await context.close();
+    if (!sharedCtx) await context.close();
     return { company: job.company, title: job.title, link: url, ats, action: "error", error: e.message };
   }
 }
 
 async function loadJobsFromDB() {
-  // Try pulseops.db send_queue first (the 3 queued from Discord), else jobs.tsv, else mock
-  const candidates = [];
+  const dbPath = resolveDbPath();
+
+  if (FLAG_CONFLICT) {
+    console.log("[guard] --job-url and --job-id are mutually exclusive");
+    return [];
+  }
+
+  // A manually supplied URL is a possible PII destination even in dry-run.
+  // Reject it before the DB guard can turn it into a browser job.
+  if (SINGLE_URL && !isAllowedInitialJobUrl(SINGLE_URL)) {
+    console.log("[guard] --job-url must be an HTTPS URL; no browser will be opened");
+    return [];
+  }
+
   if (SINGLE_URL) {
-    candidates.push({ company: "Manual", title: "Manual Test", link: SINGLE_URL, source: "manual" });
-    return candidates;
+    const pauseGuard = await manualUrlDatabaseGuard({ dbPath, dryRun: DRY_RUN });
+    if (!pauseGuard.allowed) {
+      console.log(`[guard] --job-url refused: ${pauseGuard.reason}; an existing authoritative DB/settings state is required for live mode`);
+      return [];
+    }
+    return [{
+      company: "Manual",
+      title: "Manual Test",
+      link: SINGLE_URL,
+      source: "manual",
+      manual_url: true,
+      _manual_url: true,
+      _db_path: pauseGuard.dbPath,
+      _send_paused: pauseGuard.paused,
+      _send_pause_available: pauseGuard.available,
+    }];
   }
+
+  if (!dbPath) {
+    const configured = String(process.env.PULSEOPS_DB || "").trim();
+    console.log(configured
+      ? `[DB] PULSEOPS_DB configured path is unavailable: ${configured}`
+      : "[DB] no pulseops.db found");
+    return [];
+  }
+  const pauseAtLoad = await readSendPause(dbPath);
+  if (!pauseAtLoad.available) {
+    console.log(`[DB] pause state unavailable (${pauseAtLoad.reason}); refusing DB job selection`);
+    return [];
+  }
+  if (pauseAtLoad.paused) {
+    console.log("[DB] send_paused=1; no DB jobs selected");
+    return [];
+  }
+
+  const { execFileSync } = await import("node:child_process");
+  // The Python code is fixed; all values (DB path, mode, id) are argv values.
+  // Keeping the query in Python preserves compatibility with the existing
+  // SQLite schema without ever constructing a shell command.
+  const queryRows = (mode, id = "", includeIndeed = INCLUDE_INDEED) => {
+    const pythonCode = String.raw`
+import json, sqlite3, sys
+db_path, mode, wanted_id, include_indeed = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+def send_paused():
+    try:
+        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "settings" not in tables:
+            return None
+        row = conn.execute("SELECT value FROM settings WHERE key='send_paused'").fetchone()
+        if row is None:
+            return False
+        return str(row[0] or "").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return None
+
+def columns(table):
+    return {str(row[1]) for row in conn.execute("PRAGMA table_info(%s)" % table)}
+
+job_columns = columns("jobs")
+if not {"id", "company", "title", "link"}.issubset(job_columns):
+    print(json.dumps([]))
+    raise SystemExit(0)
+
+where = []
+params = []
+if mode == "job":
+    where.append("j.\"id\"=?")
+    params.append(int(wanted_id))
+elif mode == "email":
+    if "send_queue" not in {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        print(json.dumps([]))
+        raise SystemExit(0)
+    where.extend(["q.\"status\"='pending'", "j.\"id\"=q.\"job_id\""])
+else:
+    if "status" in job_columns:
+        where.append("LOWER(COALESCE(j.\"status\",''))='evaluated'")
+        where.append("LOWER(COALESCE(j.\"status\",'')) NOT IN ('applied','sent','followupsent','expired','skipped','verified','needsreview','needsverification','applying','sendpaused','simulated')")
+    if "score" in job_columns:
+        where.append("COALESCE(j.\"score\",0)>=75")
+    if "link" in job_columns:
+        where.append("LOWER(COALESCE(j.\"link\",'')) LIKE 'https://%'")
+        if include_indeed != "1":
+            where.append("LOWER(COALESCE(j.\"link\",'')) NOT LIKE '%indeed.com%'")
+        where.append("LOWER(COALESCE(j.\"link\",'')) NOT LIKE '%workatastartup.com/jobs/l/%'")
+        where.append("LOWER(COALESCE(j.\"link\",'')) NOT LIKE '%workatastartup.com/companies/%'")
+    if "source" in job_columns:
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'mock%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'sim:%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'sim-%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'simulation%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'simulated%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'fixture%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'sample%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'test%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'portal%'")
+        where.append("LOWER(COALESCE(j.\"source\",'')) NOT LIKE 'scraper%'")
+    if "run_id" in job_columns:
+        where.append("LOWER(COALESCE(j.\"run_id\",'')) NOT LIKE 'sim-%'")
+        where.append("LOWER(COALESCE(j.\"run_id\",'')) NOT LIKE 'simulation%'")
+        where.append("LOWER(COALESCE(j.\"run_id\",'')) NOT LIKE 'simulated%'")
+        where.append("LOWER(COALESCE(j.\"run_id\",'')) NOT LIKE 'mock-%'")
+        where.append("LOWER(COALESCE(j.\"run_id\",'')) NOT LIKE 'test-%'")
+    if "run_marker" in job_columns:
+        where.append("LOWER(COALESCE(j.\"run_marker\",'')) NOT LIKE 'sim-%'")
+        where.append("LOWER(COALESCE(j.\"run_marker\",'')) NOT LIKE 'simulation%'")
+        where.append("LOWER(COALESCE(j.\"run_marker\",'')) NOT LIKE 'simulated%'")
+
+# Do not select known terminal rows or rows awaiting a G10 human review. The
+# same checks are repeated in JS after the query for schema/file-based cases.
+outreach_columns = columns("outreach") if "outreach" in {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} else set()
+if outreach_columns and "job_id" in outreach_columns and mode != "job":
+    blocked = []
+    if "status" in outreach_columns:
+        blocked.append("LOWER(COALESCE(o.\"status\",'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+    if "channel" in outreach_columns:
+        blocked.append("LOWER(COALESCE(o.\"channel\",''))='referral'")
+    if "notes" in outreach_columns:
+        blocked.append("LOWER(COALESCE(o.\"notes\",'')) LIKE '%g4:%' OR LOWER(COALESCE(o.\"notes\",'')) LIKE '%g5:%' OR LOWER(COALESCE(o.\"notes\",'')) LIKE '%cooldown%'")
+    scope = ["o.\"job_id\"=j.\"id\""]
+    if "company" in outreach_columns:
+        scope.append("LOWER(TRIM(COALESCE(o.\"company\",''))) = LOWER(TRIM(COALESCE(j.\"company\",'')))")
+    if "company_normalised" in outreach_columns and "company_normalised" in job_columns:
+        scope.append("LOWER(COALESCE(o.\"company_normalised\",'')) = LOWER(COALESCE(j.\"company_normalised\",''))")
+    if blocked:
+        where.append("NOT EXISTS (SELECT 1 FROM outreach o WHERE (" + " OR ".join(scope) + ") AND (" + " OR ".join(blocked) + "))")
+
+if mode == "email":
+    sql = "SELECT j.* FROM jobs j JOIN send_queue q ON q.\"job_id\"=j.\"id\""
+else:
+    sql = "SELECT j.* FROM jobs j"
+if where:
+    sql += " WHERE " + " AND ".join(where)
+sql += " ORDER BY j.\"id\" DESC LIMIT 100"
+rows = conn.execute(sql, params).fetchall()
+result = []
+paused = send_paused()
+for row in rows:
+    item = dict(row)
+    item["_send_paused"] = paused
+    item["_send_pause_available"] = paused is not None
+    item["_db_pause_available"] = paused is not None
+    if outreach_columns and "id" in item:
+        outreach_rows = []
+        if "job_id" in outreach_columns:
+            scope = ["o.\"job_id\"=?"]
+            scope_params = [item["id"]]
+            if "company" in outreach_columns:
+                scope.append("LOWER(TRIM(COALESCE(o.\"company\",''))) = LOWER(TRIM(?))")
+                scope_params.append(str(item.get("company", "")))
+            if "company_normalised" in outreach_columns and "company_normalised" in item:
+                scope.append("LOWER(COALESCE(o.\"company_normalised\",'')) = LOWER(COALESCE(?, ''))")
+                scope_params.append(str(item.get("company_normalised", "")))
+            outreach_rows = conn.execute("SELECT o.* FROM outreach o WHERE " + " OR ".join(scope), scope_params).fetchall()
+        item["_outreach_statuses"] = [str(r["status"]) for r in outreach_rows] if "status" in outreach_columns else []
+        item["_outreach_channels"] = [str(r["channel"]) for r in outreach_rows] if "channel" in outreach_columns else []
+        item["_outreach_notes"] = [str(r["notes"]) for r in outreach_rows] if "notes" in outreach_columns else []
+        item["_pending_g10_review"] = any(str(r["status"] or "").lower() in ("needs_review", "review_pending", "pending_review") for r in outreach_rows) if "status" in outreach_columns else False
+    result.append(item)
+print(json.dumps(result))
+`;
+    const out = execFileSync("python", ["-c", pythonCode, dbPath, mode, String(id), includeIndeed ? "1" : "0"], {
+      encoding: "utf-8",
+      timeout: 10000,
+      windowsHide: true,
+    });
+    const line = out.trim().split(/\r?\n/).pop();
+    return line ? JSON.parse(line) : [];
+  };
+
   if (SINGLE_JOB_ID) {
-    // Load from DB
     try {
-      const { execSync } = await import("node:child_process");
-      const dbPath = path.join(ROOT, "pulseops.db");
-      if (!fs.existsSync(dbPath) && fs.existsSync(path.join(ROOT, ".state", "pulseops.db"))) {
-        // Try state
+      const rawId = String(SINGLE_JOB_ID).trim();
+      if (!/^\d+$/.test(rawId)) throw new Error("invalid --job-id");
+      const id = Number(rawId);
+      if (!Number.isSafeInteger(id) || id <= 0) throw new Error("invalid --job-id");
+      const rows = queryRows("job", String(id));
+      if (!rows.length) {
+        console.log(`  [db] job #${id} was not found`);
+        return [];
       }
-      const out = execSync(`python -c "import sqlite3,json,sys; conn=sqlite3.connect('${dbPath.replace(/\\\\/g,'/')}'); rows=conn.execute('SELECT j.company,j.title,j.link FROM jobs j WHERE j.id=${parseInt(SINGLE_JOB_ID)}').fetchall(); print(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))"`, { encoding: "utf-8", timeout: 5000 });
-      const parsed = JSON.parse(out.trim().split("\n").pop());
-      if (parsed.length) return parsed.map(p=>({ ...p, source: "db" }));
-    } catch (e) { console.log(`  [db] load by id ${SINGLE_JOB_ID} failed: ${e.message.slice(0,120)}`); }
+      const eligible = rows.filter((row) => isEligibleJob(row, { explicit: true }));
+      if (!eligible.length) {
+        const row = rows[0];
+        console.log(`  [guard] --job-id #${id} refused (status=${row.status || "unknown"}, source=${row.source || "unknown"}, simulation=${isSimulationJob(row)}, pending_g10=${row._pending_g10_review === true})`);
+        return [];
+      }
+      return eligible.map((row) => ({ ...row, job_id: row.id, _db_path: dbPath }));
+    } catch (e) {
+      console.log(`  [db] load by id ${SINGLE_JOB_ID} failed: ${e.message.slice(0, 120)}`);
+    }
+    return [];
   }
-  // Try send_queue — use helper script to avoid quoting hell
-  try {
-    const { execSync } = await import("node:child_process");
-    const dbCandidates = [path.join(ROOT, "pulseops.db"), path.join(ROOT, ".state", "pulseops.db")];
-    let dbPath = null;
-    for (const p of dbCandidates) if (fs.existsSync(p)) { dbPath = p; break; }
-    if (!dbPath) throw new Error("no pulseops.db");
-    const helper = path.join(ROOT, "portal", "queue_helper.py");
-    fs.writeFileSync(helper, `import sqlite3,json,sys\nconn=sqlite3.connect(r'${dbPath.replace(/\\/g,'/')}')\nrows=conn.execute('SELECT j.company,j.title,j.link FROM send_queue q JOIN jobs j ON j.id=q.job_id WHERE q.status=\"pending\" ORDER BY q.score DESC LIMIT 5').fetchall()\nprint(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))\n`, "utf-8");
-    const out = execSync(`python "${helper}"`, { encoding: "utf-8", timeout: 5000 });
-    const parsed = JSON.parse(out.trim().split("\n").pop());
-    if (parsed && parsed.length) {
-      console.log(`[DB] loaded ${parsed.length} pending queued jobs`);
-      return parsed.map(p=>({ ...p, source: "queue" }));
-    }
-  } catch (e) { console.log(`[DB] queue load failed: ${e.message?.slice(0,120)}`); }
-  // Fallback: try recent high-score jobs with real apply links ( greenhhouse/lever/indeed/naukri etc.), then mock
-  try {
-    const { execSync } = await import("node:child_process");
-    const dbCandidates = [path.join(ROOT, "pulseops.db"), path.join(ROOT, ".state", "pulseops.db")];
-    let dbPath2 = null;
-    for (const p of dbCandidates) if (fs.existsSync(p)) { dbPath2 = p; break; }
-    if (dbPath2) {
-      const helper2 = path.join(ROOT, "portal", "queue_helper2.py");
-      fs.writeFileSync(helper2, `import sqlite3,json\nconn=sqlite3.connect(r'${dbPath2.replace(/\\/g,'/')}')\nrows=conn.execute('SELECT company,title,link FROM jobs WHERE score>=65 AND status!=\"Sent\" AND link LIKE \"%http%\" ORDER BY score DESC LIMIT 5').fetchall()\nprint(json.dumps([{'company':r[0],'title':r[1],'link':r[2]} for r in rows]))\n`, "utf-8");
-      const out2 = execSync(`python "${helper2}"`, { encoding: "utf-8", timeout: 5000 });
-      const parsed2 = JSON.parse(out2.trim().split("\n").pop());
-      if (parsed2 && parsed2.length) {
-        console.log(`[DB] fallback to ${parsed2.length} recent high-score jobs with real links`);
-        return parsed2.map(p=>({ ...p, source: "jobs-fallback" }));
+
+  // send_queue is an e-mail overflow queue, not a browser-apply queue. Only
+  // include it when the operator explicitly supplies --email-queue.
+  if (LOAD_EMAIL_QUEUE) {
+    try {
+      const rows = queryRows("email").filter((row) => isEligibleJob(row, { explicit: true }));
+      if (rows.length) {
+        console.log(`[DB] loaded ${rows.length} explicit --email-queue rows`);
+        return rows.slice(0, 5).map((row) => ({ ...row, job_id: row.id, _db_path: dbPath, queue_source: "email-queue" }));
       }
+    } catch (e) {
+      console.log(`[DB] email-queue load failed: ${e.message?.slice(0, 120)}`);
     }
-  } catch (e) { console.log(`[DB] jobs fallback failed: ${e.message?.slice(0,80)}`); }
-  console.log(`[fallback] using mock queued 3 (MediNex etc.)`);
-  return [
-    { company: "MediNex Workforce", title: "Java Developer Intern | Entry Level | Fresher | Core Java, Spring Boot, REST APIs", link: "https://example.com/mediNex", source: "mock-queue" },
-    { company: "internmo", title: "Back End Developer", link: "https://example.com/internmo", source: "mock-queue" },
-    { company: "UniAiHub", title: "Full Stack Engineer", link: "https://example.com/uniaihub", source: "mock-queue" },
-  ];
+  }
+
+  // Safe unattended default: only fresh, scored, trustworthy, unsubmitted
+  // rows. JS repeats the policy after the query so blacklist/contact files and
+  // unusual schemas still fail closed.
+  try {
+    const rows = queryRows("default").filter((row) => isEligibleJob(row));
+    if (rows.length) {
+      console.log(`[DB] loaded ${rows.length} recent eligible Evaluated jobs`);
+      return rows.slice(0, 5).map((row) => ({ ...row, job_id: row.id, _db_path: dbPath }));
+    }
+  } catch (e) {
+    console.log(`[DB] eligible-jobs load failed: ${e.message?.slice(0, 120)}`);
+  }
+
+  console.log("[DB] no eligible real jobs found");
+  return [];
 }
 
 function isMockJob(j) {
-  return !j?.link || j.link.includes("example.com") || (j.source || "").startsWith("mock");
+  const link = String(j?.link || j?.url || "");
+  return !link || /example\.com/i.test(link) || isSimulationJob(j);
+}
+
+function statusForBrowserResult(result) {
+  const action = String(result?.action || "");
+  if (action === "verified" || (action === "submitted" && result?.confirmed === true)) return "Verified";
+  if (action === "submitted" || ["unverified", "chat-incomplete", "needs-verification", "no-submit", "not-submitted", "click-failed", "error"].includes(action)) return "NeedsVerification";
+  if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled"].includes(action)) return "NeedsReview";
+  if (action === "dead-link" || action === "invalid-listing") return "Expired";
+  // A pause/claim miss is deliberately not written.  The existing Applying
+  // marker remains recoverable instead of being downgraded to Evaluated.
+  return null;
+}
+
+async function persistBrowserResult(result, {
+  dbPath = resolveDbPath(),
+  dryRun = DRY_RUN,
+  claimToken = result?.claimToken || result?.ownerToken || result?.owner || result?._claimToken || result?._claim_token || null,
+  requireClaim = true,
+} = {}) {
+  if (dryRun) return { updated: false, reason: "dry-run" };
+  const jobId = Number.parseInt(result?.job_id ?? result?.jobId ?? result?.id, 10);
+  if (!Number.isSafeInteger(jobId) || jobId <= 0) return { updated: false, reason: "invalid-id" };
+  const nextStatus = statusForBrowserResult(result);
+  if (!nextStatus) return { updated: false, reason: "no-status-transition" };
+  if (requireClaim && !claimToken) return { updated: false, reason: "claim-required" };
+  if (!isExistingDbPath(dbPath)) return { updated: false, reason: "db-missing" };
+
+  const pythonCode = String.raw`
+import datetime, json, os, sqlite3, sys
+path, raw_id, status, owner, raw_now = sys.argv[1:6]
+result = {"updated": False, "reason": "persist-failed"}
+try:
+    job_id = int(raw_id)
+    if not os.path.isfile(path) or not owner:
+        result["reason"] = "db-missing" if not os.path.isfile(path) else "claim-required"
+    else:
+        conn = sqlite3.connect(path, timeout=5)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(jobs)")}
+        if not {"id", "status", "processed_at"}.issubset(cols):
+            result["reason"] = "db-schema-unavailable"
+        else:
+            row = conn.execute("SELECT status, processed_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                result["reason"] = "job-not-found"
+            else:
+                current = str(row[0] or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+                marker = str(row[1] or "")
+                marker_owner = marker.rsplit("|", 1)[1] if "|" in marker else ""
+                if current != "applying" or marker_owner != owner:
+                    result["reason"] = "claim-lost"
+                else:
+                    stamp = datetime.datetime.fromtimestamp(float(raw_now) / 1000.0, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                    new_marker = "browser-apply-result|" + stamp + "|" + owner
+                    cur = conn.execute("UPDATE jobs SET status=?, processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='applying' AND processed_at=?", (status, new_marker, job_id, marker))
+                    result = {"updated": cur.rowcount == 1, "reason": "updated" if cur.rowcount == 1 else "claim-race-lost"}
+        conn.commit()
+except Exception:
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+print(json.dumps(result))
+`;
+  const changed = runSqliteJson(dbPath, pythonCode, [dbPath, String(jobId), nextStatus, String(claimToken || ""), String(Date.now())], 7000);
+  if (changed?.updated) console.log(`  [db] job #${jobId} -> ${nextStatus} (1 row)`);
+  else console.log(`  [db] job #${jobId} result not persisted (${changed?.reason || "unknown"})`);
+  return changed || { updated: false, reason: "persist-failed" };
+}
+
+async function persistBrowserResults(results, options = {}) {
+  const list = Array.isArray(results) ? results : [results];
+  const persisted = [];
+  for (const result of list) {
+    persisted.push(await persistBrowserResult(result, options));
+  }
+  return persisted;
 }
 
 async function main() {
   const profile = loadProfile();
   console.log(`[Profile] ${profile.candidate?.name} <${profile.candidate?.email}> — ${profile.domain?.title || ""}`);
+  if (FLAG_CONFLICT) {
+    console.error("[FATAL] --job-url and --job-id cannot be used together; no browser was launched.");
+    process.exitCode = 4;
+    return;
+  }
   if (!DRY_RUN) {
     // Hard guardrails: never submit as a fallback identity or to mock listings.
     const who = `${profile.candidate?.name || ""}`.trim().toLowerCase();
@@ -821,42 +2990,150 @@ async function main() {
     }
   }
   let jobs = await loadJobsFromDB();
+  const beforeHttpsFilter = jobs.length;
+  jobs = jobs.filter((job) => {
+    const link = job?.link || job?.url;
+    if (isAllowedInitialJobUrl(link)) return true;
+    console.log(`  [redirect-block] dropped non-HTTPS job URL: ${String(link || "").slice(0, 120)}`);
+    return false;
+  });
+  if (beforeHttpsFilter !== jobs.length) {
+    console.log(`  [guard] dropped ${beforeHttpsFilter - jobs.length} non-HTTPS job URL(s); no browser was opened for them`);
+  }
+  if (!DRY_RUN && MOCK_ONLY) {
+    console.error("[FATAL] --live --mock refused: simulation mode cannot open a live browser.");
+    process.exitCode = 4;
+    return;
+  }
+  if (!INCLUDE_INDEED) {
+    const beforeIndeed = jobs.length;
+    jobs = jobs.filter((job) => inferATS(job.link || job.url) !== "indeed");
+    if (beforeIndeed !== jobs.length) console.log("[guard] Indeed disabled; use --include-indeed only for a deliberate run");
+  }
   if (!DRY_RUN) {
-    const real = jobs.filter((j) => !isMockJob(j));
+    const real = jobs.filter((j) => !isMockJob(j) && !isSimulationJob(j));
     const dropped = jobs.length - real.length;
-    if (dropped > 0) console.log(`[guard] dropped ${dropped} mock/fallback listing(s) — live never submits mocks`);
+    if (dropped > 0) console.log(`[guard] dropped ${dropped} simulation/mock listing(s) — live never submits them`);
     jobs = real;
-    if (!jobs.length) {
-      console.error("[FATAL] --live refused: zero real jobs (queue empty, no --job-url). Nothing submitted.");
-      process.exit(4);
+  }
+  if (!jobs.length) {
+    console.error(SINGLE_JOB_ID
+      ? `[FATAL] --job-id ${SINGLE_JOB_ID} refused or no longer eligible; no browser was launched.`
+      : "[FATAL] no eligible real jobs found; no browser was launched.");
+    process.exitCode = 4;
+    return;
+  }
+  if (!DRY_RUN) {
+    // One last preflight before launch.  The same fresh pause/claim checks are
+    // repeated in processJob and clickFinalControl for mid-run changes.
+    const firstDb = SINGLE_URL ? getAuthoritativeDbPath() : resolveDbPath();
+    const pause = await readSendPause(firstDb);
+    if (!pause.available || pause.paused) {
+      console.error(`[FATAL] send_paused=${pause.paused ? "1" : "unavailable"} (${pause.reason}); no browser was launched.`);
+      process.exitCode = 4;
+      return;
     }
+    const firstPrepared = await prepareJobRuntime(jobs[0], {});
+    if (!firstPrepared.allowed) {
+      console.error(`[FATAL] first job claim/pause guard refused (${firstPrepared.reason}); no browser was launched.`);
+      process.exitCode = 4;
+      return;
+    }
+    // Carry the preflight's exact claim token into processJob. Without this,
+    // the first pass would see its own fresh Applying row as another worker.
+    attachPreparedRuntime(jobs[0], firstPrepared);
   }
   console.log(`[Jobs] ${jobs.length} to process (dry-run=${DRY_RUN}, headed=${HEADED})`);
 
   const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: !HEADED });
-
+  let browser = null;
   const results = [];
-  for (const job of jobs) {
-    const r = await processJob(browser, job, profile);
-    results.push(r);
-    // Be nice to sites
-    await new Promise(r=>setTimeout(r, 1500));
+  try {
+    if (EDGE || process.argv.includes("--edge")) {
+      console.log(`[Edge] persistent profile ${path.join(ROOT, ".edge-profile")} (msedge, headed)`);
+      sharedCtx = await chromium.launchPersistentContext(path.join(ROOT, ".edge-profile"), {
+        channel: "msedge",
+        headless: false,
+        viewport: { width: 1366, height: 900 },
+      });
+    } else {
+      browser = await chromium.launch({ headless: !HEADED });
+    }
+
+    for (const job of jobs) {
+      const shouldCheckPause = !DRY_RUN || job.job_id != null || job._db_path || job._dbPath;
+      if (shouldCheckPause) {
+        const pause = await readSendPause(job._db_path || job._dbPath || resolveDbPath());
+        if (!pause.available || pause.paused) {
+          console.log(`  [send-paused] stopping before later job #${job.job_id || "manual"} (${pause.reason})`);
+          results.push({
+            company: job.company,
+            title: job.title,
+            link: job.link || job.url,
+            ats: inferATS(job.link || job.url),
+            action: "send-paused",
+            job_id: job.job_id || null,
+            claimToken: job._claimToken || job._claim_token || null,
+          });
+          break;
+        }
+      }
+
+      let r;
+      try {
+        r = await processJob(browser, job, profile, {
+          dbPath: job._db_path || job._dbPath || null,
+          claimToken: job._claimToken || job._claim_token || null,
+        });
+      } catch (error) {
+        // The claim is deliberately persisted as NeedsVerification on an
+        // unexpected crash; never let it fall back to Evaluated.
+        r = {
+          company: job.company,
+          title: job.title,
+          link: job.link || job.url,
+          ats: inferATS(job.link || job.url),
+          action: "error",
+          error: String(error?.message || error),
+        };
+      }
+      const result = {
+        ...r,
+        job_id: job.job_id || job.id || null,
+        claimToken: job._claimToken || job._claim_token || r.claimToken || null,
+        _db_path: job._db_path || job._dbPath || null,
+      };
+      results.push(result);
+      // Persist after every job, before waiting or closing the browser.  This
+      // is the durable recovery point if the process dies mid-batch.
+      if (!DRY_RUN) {
+        await persistBrowserResults([result], {
+          dbPath: result._db_path || resolveDbPath(),
+          dryRun: false,
+          claimToken: result.claimToken,
+        });
+      }
+      if (["send-paused", "claim-blocked", "claim-lost"].includes(result.action)) break;
+      // Be nice to sites
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } finally {
+    if (sharedCtx) await sharedCtx.close().catch(() => {});
+    else if (browser) await browser.close().catch(() => {});
   }
-  await browser.close();
 
   const outPath = path.join(ROOT, "output", "apply-results.json");
   fs.mkdirSync(path.join(ROOT, "output"), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify({ ran_at: new Date().toISOString(), dry_run: DRY_RUN, jobs, results }, null, 2), "utf-8");
   console.log(`\n[+] Done ${results.length} jobs → ${path.relative(ROOT, outPath)}`);
-  console.log(DRY_RUN ? "[*] DRY-RUN — no applications submitted. Re-run with --live --headed after verifying previews." : "[*] LIVE — submitted with approval pauses");
+  console.log(DRY_RUN ? "[*] DRY-RUN — no applications submitted. Re-run with --live --headed after verifying previews." : "[*] LIVE — final actions require --auto; verified/needs-review outcomes are recorded conservatively.");
 
-  // Discord confirmation: yes applied to this job (no links, just company + title)
-  if (!DRY_RUN && results.some(r=>r.action==="submitted")) {
+  // Discord confirmation: only server-verified outcomes are announced.
+  if (!DRY_RUN && results.some(r => r.action === "verified")) {
     const webhook = process.env.DISCORD_WEBHOOK_URL || "";
     if (webhook) {
-      for (const r of results.filter(x=>x.action==="submitted")) {
-        const msg = `✅ Applied to ${r.company} — ${r.title} via ${r.ats}`;
+      for (const r of results.filter(x => x.action === "verified")) {
+        const msg = `✅ Verified application to ${r.company} — ${r.title} via ${r.ats}`;
         try {
           const resp = await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: msg }) });
           if (resp.ok) console.log(`  [Discord] confirmation sent: ${msg}`);
@@ -867,4 +3144,55 @@ async function main() {
   }
 }
 
-main().catch(e=>{ console.error("[Fatal] apply crashed", e); process.exit(1); });
+export {
+  ATS_ALLOWED_HOSTS,
+  ATS_SERVICE_HOSTS,
+  attachPreparedRuntime,
+  CLAIM_RECOVERY_MS,
+  DB_PATH,
+  SIMULATION_RUN_PREFIX,
+  SIMULATION_SOURCE_PREFIX,
+  CAPTCHA_SELECTORS,
+  classifyApplyAction,
+  classifyApplyControl,
+  clickFinalControl,
+  createNavigationBoundary,
+  detectAndClickApply,
+  finalSubmissionAllowed,
+  findResumePdf,
+  getAuthoritativeDbPath,
+  hasCrossOriginFormOrFrame,
+  hasVisibleAppliedBadge,
+  inferATS,
+  installNavigationGuard,
+  isFinalApplyControl,
+  isAllowedInitialJobUrl,
+  isAllowedNavigationUrl,
+  isBlacklistedJob,
+  isCurrentPageTrusted,
+  isEligibleJob,
+  isMockJob,
+  isSimulationJob,
+  isTerminalStatus,
+  loadJobsFromDB,
+  manualUrlDatabaseGuard,
+  parseHttpUrl,
+  persistBrowserResult,
+  persistBrowserResults,
+  pinNavigationOrigin,
+  processJob,
+  readFinalActionState,
+  readSendPause,
+  claimJobForApply,
+  recoverJobClaim,
+  resolveDbPath,
+  statusForBrowserResult,
+  verifyJobClaim,
+  waitForCaptchaResolution,
+};
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+const modulePath = path.resolve(fileURLToPath(import.meta.url));
+if (invokedPath === modulePath) {
+  main().catch(e=>{ console.error("[Fatal] apply crashed", e); process.exit(1); });
+}
