@@ -100,6 +100,12 @@ def _post_webhook(webhook_id: str, webhook_token: str, payload: dict,
     except requests.RequestException as e:
         raise TelegramError(f"Discord webhook request failed: {e}") from e
 
+    # Discord webhook execution commonly returns 204 No Content on success
+    # when wait/response-body semantics are not requested. Treat that as a
+    # successful delivery before attempting JSON decoding; otherwise a valid
+    # card is retried and duplicated.
+    if resp.status_code == 204:
+        return {}
     try:
         data = resp.json()
     except ValueError:
@@ -108,7 +114,7 @@ def _post_webhook(webhook_id: str, webhook_token: str, payload: dict,
             f"Discord non-JSON response (HTTP {resp.status_code}): {snippet or 'empty body'}"
         )
 
-    if resp.status_code in (200, 204):
+    if resp.status_code == 200:
         return data
     raise TelegramError(
         f"Discord webhook rejected (HTTP {resp.status_code}): "
