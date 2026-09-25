@@ -199,7 +199,7 @@ def normalise_domain(domain: str) -> str:
         return ""
     if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         return ""
-    if "\\" in value or "@" in value:
+    if "\\" in value or ("@" in value and "://" not in value):
         return ""
 
     # Accept either a hostname or an HTTP(S) URL, but never retain a
@@ -211,6 +211,7 @@ def normalise_domain(domain: str) -> str:
             # Accessing ``port`` catches malformed/out-of-range ports.
             _ = parsed.port
             hostname = parsed.hostname
+            authority = parsed.netloc.rsplit("@", 1)[-1]
         except ValueError:
             return ""
         if scheme not in {"http", "https"}:
@@ -219,6 +220,7 @@ def normalise_domain(domain: str) -> str:
             parsed.username is not None
             or parsed.password is not None
             or "@" in parsed.netloc
+            or authority.endswith(":")
             or not hostname
         ):
             return ""
