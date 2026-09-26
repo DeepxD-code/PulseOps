@@ -1205,7 +1205,22 @@ async function hasCrossOriginFormOrFrame(page, originUrl = null) {
     };
     const formTarget = [...document.querySelectorAll("form")].some((form) => cross(form.getAttribute("action") || form.action));
     const buttonTarget = [...document.querySelectorAll("button, input[type='submit']")].some((button) => cross(button.getAttribute("formaction")));
-    const frameTarget = [...document.querySelectorAll("iframe")].some((frame) => cross(frame.getAttribute("src") || frame.src));
+    // Only a cross-origin frame that actually holds the form fields is a
+    // problem. Marketing, analytics, video and calendar embeds must not stop
+    // a fill on the page's own form.
+    const frameTarget = [...document.querySelectorAll("iframe")].some((frame) => {
+      if (!cross(frame.getAttribute("src") || frame.src)) return false;
+      try {
+        const doc = frame.contentDocument;
+        if (!doc) return false;
+        return [...doc.querySelectorAll("input, textarea, select")]
+          .some((el) => !/hidden/i.test(String(el.type || "")));
+      } catch {
+        // An opaque cross-origin document cannot be inspected; treat a frame
+        // that declares a form as holding the fields.
+        return !!frame.getAttribute("src");
+      }
+    });
     return formTarget || buttonTarget || frameTarget;
   }, permittedHosts).catch(() => true);
 }
@@ -2579,8 +2594,9 @@ async function processJob(browser, job, profile, runtime = {}) {
     let applyNavigation = await detectAndClickApply(page, ats, navBoundary, finalGuard);
     // After an approved off-site hop the page is a corporate careers site, so
     // the originating ATS selectors no longer exist. Re-detect with the
-    // generic set (e.g. "Apply for this role").
-    if (!applyNavigation.blocked && !applyNavigation.clicked
+    // generic set (e.g. "Apply for this role"). The hop itself already counts
+    // as a click, so this must not depend on that flag.
+    if (!applyNavigation.blocked
         && isNavigationBoundary(navBoundary) && navBoundary.externalApplyHost) {
       const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
       if (retry.clicked) applyNavigation = retry;
