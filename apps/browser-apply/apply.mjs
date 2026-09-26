@@ -98,6 +98,34 @@ const ATS_ALLOWED_HOSTS = Object.freeze({
   generic: [],
 });
 const ATS_SERVICE_HOSTS = ATS_ALLOWED_HOSTS;
+const STRICT_ROLE_EXCLUDES = [
+  "full stack", "full-stack", "fullstack", "frontend", "front-end",
+  "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
+  "ios", "embedded", "firmware", "hardware",
+];
+const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|machine[\s-]+learning|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java)\b|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
+
+function isStrictTargetRole(title) {
+  const value = String(title || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!value) return false;
+  if (STRICT_ROLE_EXCLUDES.some((marker) => value.includes(marker))) return false;
+  return STRICT_ROLE_ALLOWED.test(value);
+}
+
+// LinkedIn serves its first-party page bundle from an exact CDN hostname.
+// Allow only passive asset resource types from these hosts; XHR/fetch/form
+// requests remain blocked by the origin guard below.
+const ATS_ASSET_HOSTS = Object.freeze({
+  linkedin: ["static.licdn.com", "media.licdn.com"],
+});
+const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
+const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
+  linkedin: [
+    { host: "platform.linkedin.com", pathPrefix: "/litms/", types: ["xhr", "fetch", "script"] },
+    { host: "static.licdn.com", pathPrefix: "/aero-v1/sc/h/", types: ["xhr", "fetch", "script", "stylesheet", "image", "font", "media", "other"] },
+    { host: "media.licdn.com", pathPrefix: "/dms/", types: ["xhr", "fetch", "image"] },
+  ],
+});
 const CLAIM_RECOVERY_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_BROWSER_CLAIM_RECOVERY_MS || "3600000", 10);
   return Number.isFinite(parsed) && parsed >= 60000 ? parsed : 3600000;
@@ -798,6 +826,7 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   const status = String(job?.status || "").trim().toLowerCase();
   const link = job?.link || job?.url || "";
   if (!link || !isAllowedInitialJobUrl(link)) return false;
+  if (!isStrictTargetRole(job?.title)) return false;
   if (status !== "evaluated") return false;
   if (!Number.isFinite(Number(job?.score)) || Number(job.score) < 75) return false;
 
@@ -973,7 +1002,7 @@ const ATS_SELECTORS = {
     submitBtn: ['button[type="submit"]']
   },
   linkedin: {
-    applyBtn: ['button[aria-label*="Easy Apply"]', 'button:has-text("Easy Apply")', 'button.jobs-apply-button', 'a:has-text("Easy Apply")'],
+    applyBtn: ['button[aria-label*="Easy Apply"]', 'button:has-text("Easy Apply")', 'button.jobs-apply-button'],
     fields: {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
     },
@@ -1092,6 +1121,29 @@ function requestFrameOrigin(request, page) {
   }
 }
 
+function isAllowedAssetRequest(requestUrl, requestType, ats) {
+  const url = parseHttpUrl(requestUrl);
+  if (!url || url.protocol !== "https:" || !ASSET_RESOURCE_TYPES.has(String(requestType || "").toLowerCase())) {
+    return false;
+  }
+  const hosts = ATS_ASSET_HOSTS[String(ats || "").toLowerCase()] || [];
+  return hosts.some((host) => canonicalHost(url.hostname) === canonicalHost(host));
+}
+
+function isAllowedReadOnlyApiRequest(requestUrl, requestType, method, ats) {
+  const url = parseHttpUrl(requestUrl);
+  const requestTypeName = String(requestType || "").toLowerCase();
+  if (!url || url.protocol !== "https:" || !["GET", "HEAD"].includes(String(method || "GET").toUpperCase())) {
+    return false;
+  }
+  const entries = ATS_TRUSTED_REQUEST_HOSTS[String(ats || "").toLowerCase()] || [];
+  return entries.some((entry) => (
+    canonicalHost(url.hostname) === canonicalHost(entry.host)
+    && url.pathname.startsWith(entry.pathPrefix)
+    && entry.types.includes(requestTypeName)
+  ));
+}
+
 async function installNavigationGuard(page, ats, originUrl) {
   if (!page) throw new Error("navigation guard unavailable");
   const boundary = isNavigationBoundary(originUrl)
@@ -1112,11 +1164,12 @@ async function installNavigationGuard(page, ats, originUrl) {
       request = route.request();
       const requestUrl = request.url();
       const requestType = request.resourceType?.() || "";
+      const requestMethod = String(request.method?.() || "GET").toUpperCase();
       const isMainNavigation = typeof request.isNavigationRequest === "function"
         ? request.isNavigationRequest()
         : (!requestType || requestType === "document");
       if (isMainNavigation && requestIsMainFrame(request, page)) {
-        const method = String(request.method?.() || "GET").toUpperCase();
+        const method = requestMethod;
         const currentOrigin = navigationPinnedOrigin(boundary) || page.url?.();
         // Approved service hosts may be used for GET navigation/redirects,
         // but a cross-origin POST form is never a safe application target.
@@ -1146,7 +1199,12 @@ async function installNavigationGuard(page, ats, originUrl) {
           || parseHttpUrl(navigationPinnedOrigin(boundary));
         const requestParsed = parseHttpUrl(requestUrl);
         const blankFrame = /^about:blank(?:[#?].*)?$/i.test(String(requestUrl || ""));
-        if (!blankFrame && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
+        const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, ats);
+        const trustedReadOnlyApi = isAllowedReadOnlyApiRequest(
+          requestUrl, requestType, requestMethod, ats
+        );
+        if (!blankFrame && !trustedAsset && !trustedReadOnlyApi
+            && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
           console.log(`    [subresource-block] ${kind} ${requestUrl}`);
           await route.abort("blockedbyclient");
@@ -1251,7 +1309,12 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
               console.log("    [easy-apply] clicking detail-pane button");
               await detail.click({ timeout: 5000 });
             } else {
-              return { clicked: false, blocked: true, reason: "missing-easy-apply-trigger" };
+              // Current LinkedIn markup may expose the Easy Apply control
+              // outside the legacy detail-pane containers. The matched
+              // control is already a button on the trusted job page, so use
+              // it as the modal trigger rather than declaring a false dead end.
+              console.log("    [easy-apply] clicking matched job-page control");
+              await el.click({ timeout: 5000 });
             }
           } else {
             await el.click({ timeout: 5000 });
@@ -3168,6 +3231,9 @@ export {
   isFinalApplyControl,
   isAllowedInitialJobUrl,
   isAllowedNavigationUrl,
+  isStrictTargetRole,
+  isAllowedAssetRequest,
+  isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
   isCurrentPageTrusted,
   isEligibleJob,

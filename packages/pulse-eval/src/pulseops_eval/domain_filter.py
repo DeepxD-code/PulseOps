@@ -70,6 +70,32 @@ def _role_type_exclude(profile: dict) -> list[str]:
                                    "sales", "android", "ios", "mobile"])]
 
 
+# ── Strict target-role policy ────────────────────────────────────────────────
+# The candidate is intentionally narrow: backend, ML/AI, Java, C/C++, and
+# GenAI. Do not let generic "software engineer" or full-stack titles through.
+_STRICT_ROLE_EXCLUDES = (
+    "full stack", "full-stack", "fullstack", "frontend", "front-end",
+    "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
+    "ios", "embedded", "firmware", "hardware",
+)
+_STRICT_ROLE_ALLOWED = re.compile(
+    r"\b(?:backend|back[\s-]end|machine[\s-]+learning|ml|artificial[\s-]+intelligence|"
+    r"ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|"
+    r"deep[\s-]+learning|java)\b|\bc\b|c\+\+|c\s*/\s*c\+\+",
+    re.IGNORECASE,
+)
+
+
+def is_strict_target_role(title: str) -> bool:
+    """Return True only for the candidate's explicitly allowed role families."""
+    value = re.sub(r"\s+", " ", str(title or "").strip().lower())
+    if not value:
+        return False
+    if any(marker in value for marker in _STRICT_ROLE_EXCLUDES):
+        return False
+    return bool(_STRICT_ROLE_ALLOWED.search(value))
+
+
 # ── Stage 1 helpers ───────────────────────────────────────────────────────────
 
 def _is_primary_skill(keyword: str, title: str, desc: str) -> bool:
@@ -102,9 +128,20 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
     title_lower = title.lower()
 
     hard_ex    = _hard_excludes(profile)
-    role_ex    = _role_type_exclude(profile)
+    role_ex    = [
+        role for role in _role_type_exclude(profile)
+        if role not in {"ml engineer", "machine learning", "ai", "ai engineer", "ml"}
+    ]
     senior_ex  = _seniority_exclude(profile)
     core       = _core_skills(profile)
+
+    if not is_strict_target_role(title):
+        return FilterResult(
+            False,
+            "Stage1: title is outside strict target roles "
+            "(backend/ML/AI/Java/C/C++/GenAI)",
+            stage=1,
+        )
 
     # G1: hard_exclude as primary skill → REJECT
     for kw in hard_ex:
@@ -125,20 +162,10 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
                 return FilterResult(False,
                     f"Stage1: seniority '{lvl}' excluded (no intern/junior modifier)", stage=1)
 
-    # G4: must have at least one core skill as primary (or pass to Stage 2)
-    # If NO core skill is primary AND the title is ambiguous (no backend keyword),
-    # send to Stage 2 instead of hard-rejecting.
-    backend_title_kw = ["backend", "software", "systems", "infrastructure",
-                         "platform", "api", "devops", "sre", "reliability",
-                         "engineer", "developer", "c++", "java", "python", "go",
-                         "golang", "cloud", "database", "distributed"]
-    has_backend_title = any(k in title_lower for k in backend_title_kw)
-
-    if not has_backend_title and not core:
-        return FilterResult(False,
-            "Stage1: no backend keyword in title and no core skills defined", stage=1)
-
-    return FilterResult(True, "Stage1: passed", stage=1)
+    # The strict target-role gate above is the authoritative title boundary.
+    # Profile skill/role configuration still applies below, but an ambiguous
+    # generic software title must not be sent to Stage 2.
+    return FilterResult(True, "Stage1: strict target role passed", stage=1)
 
 
 # ── Stage 2 — Soft filter (cheap LLM) ────────────────────────────────────────
@@ -146,8 +173,10 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
 _SOFT_PROMPT_TEMPLATE = (
     'Job title: "{title}"\n'
     'Description start: "{desc_snippet}"\n\n'
-    'Is the PRIMARY focus of this job aligned with the candidate\'s target '
-    'domain of {domain_title}, using skills like {core_skills}?\n'
+    'Is the PRIMARY focus of this job aligned with the candidate\'s strict '
+    'target domain of backend, ML/AI, Java, C/C++, or GenAI, using skills '
+    'like {core_skills}? Reject full-stack, frontend, mobile, embedded, and '
+    'generic software roles.\n'
     'Answer exactly: YES or NO, then one sentence reason.'
 )
 

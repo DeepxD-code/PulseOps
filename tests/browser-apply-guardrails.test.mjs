@@ -16,10 +16,13 @@ import {
   inferATS,
   installNavigationGuard,
   isAllowedInitialJobUrl,
+  isAllowedAssetRequest,
+  isAllowedReadOnlyApiRequest,
   isAllowedNavigationUrl,
   isBlacklistedJob,
   isEligibleJob,
   isSimulationJob,
+  isStrictTargetRole,
   manualUrlDatabaseGuard,
   persistBrowserResult,
   pinNavigationOrigin,
@@ -84,6 +87,29 @@ test("simulation markers and legacy Mock rows are blocked", () => {
   assert.equal(isSimulationJob({ source: "LinkedIn", run_id: "sim-abc123" }), true);
   assert.equal(isSimulationJob({ source: "Mock" }), true);
   assert.equal(isSimulationJob({ source: "LinkedIn", run_id: "live-abc123" }), false);
+});
+
+test("strict role gate excludes full-stack, frontend, Laravel, mobile, and embedded titles", () => {
+  for (const title of [
+    "Full Stack Developer Intern",
+    "Frontend Engineer",
+    "Laravel Developer",
+    "Android Engineer",
+    "Embedded Systems Engineer Intern",
+    "Software Engineer Intern",
+  ]) {
+    assert.equal(isStrictTargetRole(title), false, title);
+  }
+  for (const title of [
+    "Backend Engineer",
+    "Machine Learning Engineer",
+    "AI/ML Engineer",
+    "Java Backend Engineer",
+    "C++ Software Engineer",
+    "GenAI Engineer",
+  ]) {
+    assert.equal(isStrictTargetRole(title), true, title);
+  }
 });
 
 test("job selection refuses terminal, review, paused, low-score, and Indeed rows", () => {
@@ -281,6 +307,72 @@ test("navigation trust uses exact hosts/origins and pins after a service crossin
   assert.equal(pinNavigationOrigin(boundary, "https://jobs.lever.co/form"), true);
   assert.equal(isAllowedNavigationUrl("https://acme.lever.co/example/1", "lever", boundary), false);
   assert.equal(isAllowedNavigationUrl("https://job-boards.greenhouse.io/form", "lever", boundary), false);
+});
+
+test("only exact LinkedIn passive asset hosts are exempted from the origin guard", () => {
+  assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.css", "stylesheet", "linkedin"), true);
+  assert.equal(isAllowedAssetRequest("https://media.licdn.com/image.png", "image", "linkedin"), true);
+  assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.js", "fetch", "linkedin"), false);
+  assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.js", "script", "generic"), false);
+  assert.equal(isAllowedAssetRequest("https://evil.static.licdn.com/a.js", "script", "linkedin"), false);
+  assert.equal(isAllowedAssetRequest("http://static.licdn.com/a.js", "script", "linkedin"), false);
+});
+
+test("only exact LinkedIn read-only API requests are exempted", () => {
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://platform.linkedin.com/litms/allowlist/voyager-web-jobs",
+      "xhr",
+      "GET",
+      "linkedin",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://static.licdn.com/aero-v1/sc/h/chunk.js",
+      "fetch",
+      "GET",
+      "linkedin",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://platform.linkedin.com/litms/utag/voyager-web-jobs/utag.js",
+      "script",
+      "GET",
+      "linkedin",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://platform.linkedin.com/voyager/api/submit",
+      "xhr",
+      "GET",
+      "linkedin",
+    ),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://platform.linkedin.com/litms/allowlist/voyager-web-jobs",
+      "xhr",
+      "POST",
+      "linkedin",
+    ),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://evil.example/litms/allowlist/voyager-web-jobs",
+      "xhr",
+      "GET",
+      "linkedin",
+    ),
+    false,
+  );
 });
 
 test("navigation guard blocks cross-origin iframe/fetch targets before fill", async () => {
