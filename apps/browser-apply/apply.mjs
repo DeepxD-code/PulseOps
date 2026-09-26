@@ -302,6 +302,51 @@ function intermediateActionLabel(label) {
   return /^(?:continue|review(?:\s+your\s+application)?|next)(?:\s|$)/i.test(String(label || "").trim());
 }
 
+// Many job pages reuse `button[type="submit"]` for search, filters, paging, and
+// cookie consent. Those submit the *page*, not an application, so a
+// submission-intent label is required before any final click is allowed.
+const NON_SUBMISSION_CONTROL_LABEL =
+  /\b(?:search|find|filter|sort|refine|login|log\s?in|sign\s?in|sign\s?up|sign\s?out|register|subscribe|newsletter|save\s?search|save\s?job|show\s?more|load\s?more|next\s?page|prev|previous|go\s?back|back|close|cancel|dismiss|clear|reset|accept|agree|consent|allow|choose|upload|attach|add|remove|edit|delete|share|print|copy|bookmark|notify|set\s?alert|apply\s?filters|update)\b/i;
+
+function isSubmissionControlLabel(label) {
+  const text = String(label || "").trim();
+  if (!text) return false;
+  if (NON_SUBMISSION_CONTROL_LABEL.test(text)) return false;
+  if (finalActionLabel(text)) return true;
+  return /\bapply\b/i.test(text);
+}
+
+// jobs.ashbyhq.com/<company> is a company board, not an application listing.
+// A real Ashby listing carries a job-scoped path segment.
+function isAshbyJobListing(url) {
+  try {
+    const segments = new URL(String(url || "")).pathname.split("/").filter(Boolean);
+    return segments.length >= 2;
+  } catch {
+    return false;
+  }
+}
+
+// Distinguish "closed", "already applied", and "apply on the company site" from
+// a genuinely missing control, so the run records an accurate outcome instead
+// of a blanket NeedsReview.
+async function classifyMissingApplyState(page) {
+  if (!page || typeof page.evaluate !== "function") return "no-apply-control";
+  return page.evaluate(() => {
+    const text = (document.body?.innerText || "").replace(/\s+/g, " ");
+    if (/no longer accepting applications|this job is no longer|job (has )?expired|position (has been )?filled|no longer available/i.test(text)) {
+      return "closed-listing";
+    }
+    if (/apply on (?:the )?(?:company|employer)|apply on company website|external apply|go to (?:the )?(?:company|employer)(?:'s)? website/i.test(text)) {
+      return "external-apply";
+    }
+    if (/\byou applied\b|application submitted|applied successfully|already applied/i.test(text)) {
+      return "already-applied";
+    }
+    return "no-apply-control";
+  }).catch(() => "no-apply-control");
+}
+
 /**
  * Classify an Apply-looking control before touching it.  Plain `Apply` is
  * usually a modal/flow trigger, but on a one-step form it is the final action.
@@ -1348,8 +1393,17 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
       return { clicked: true, blocked: false, finalAction: false, classification };
     }
   }
-  console.log(`    [warn] no Apply button found for ${ats} — assuming already on form`);
-  return { clicked: false, blocked: false, finalAction: false };
+  const missingState = await classifyMissingApplyState(page);
+  if (missingState === "closed-listing") {
+    console.log("    [apply-state] listing is closed — no apply path exists");
+  } else if (missingState === "external-apply") {
+    console.log("    [apply-state] application must be completed on the company site");
+  } else if (missingState === "already-applied") {
+    console.log("    [apply-state] page reports an existing application");
+  } else {
+    console.log(`    [warn] no Apply button found for ${ats} — assuming already on form`);
+  }
+  return { clicked: false, blocked: false, finalAction: false, missingState };
 }
 
 // Every final control goes through this one guard. A live run without --auto
@@ -1788,6 +1842,13 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
   }
 
+  // Ashby company boards (jobs.ashbyhq.com/<company>) list many roles and have
+  // no application form. Treating them as a listing burns the row every run.
+  if (ats === "ashby" && !isAshbyJobListing(url)) {
+    console.log("  [invalid] Ashby company board URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
   if (!isAllowedNavigationUrl(url, ats, navBoundary)) {
     console.log("  [redirect-block] initial URL is outside the strict ATS allowlist");
     return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
@@ -1884,6 +1945,14 @@ async function processJob(browser, job, profile, runtime = {}) {
         ? applyNavigation.reason
         : (applyNavigation.reason === "unknown-control" || applyNavigation.reason === "trigger-failed" ? "needs-review" : "redirect-blocked");
       return { company: job.company, title: job.title, link: url, ats, action, pdf: resumePdf };
+    }
+    if (applyNavigation.missingState === "closed-listing") {
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
+    }
+    if (applyNavigation.missingState === "external-apply") {
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "manual-submit-required", pdf: resumePdf };
     }
     if (applyNavigation.finalAction) {
       const finalClick = applyNavigation.finalClick || {};
@@ -2661,8 +2730,14 @@ async function processJob(browser, job, profile, runtime = {}) {
     const submitSels = ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn;
     let submitFound = false;
     for (const sel of submitSels) {
-      if (await page.locator(sel).count() > 0) {
-        console.log(`  [found] Submit → ${sel}`);
+      const probe = page.locator(sel).first();
+      if ((await probe.count()) > 0) {
+        const label = ((await probe.innerText().catch(() => "")) || "").trim().slice(0, 60);
+        if (!isSubmissionControlLabel(label)) {
+          console.log(`  [submit-skip] ${sel} is not an application submit (${label || "no label"})`);
+          continue;
+        }
+        console.log(`  [found] Submit → ${sel} ("${label}")`);
         submitFound = true;
         break;
       }
@@ -2688,6 +2763,13 @@ async function processJob(browser, job, profile, runtime = {}) {
       const el = page.locator(sel).first();
       if ((await el.count()) > 0) {
         const label = ((await el.innerText().catch(() => sel)) || sel).trim().slice(0, 60);
+        // Fail closed: a control only counts as the final submission when its
+        // label states submission intent. Search/filter/consent submits are
+        // never clicked on the user's behalf.
+        if (!isSubmissionControlLabel(label)) {
+          console.log(`  [submit-skip] refusing to click non-submit control ${sel} ("${label || "no label"}")`);
+          continue;
+        }
         const finalClick = await clickFinalControl(page, el, label || sel, finalGuard);
         if (finalClick.captcha) {
           if (!sharedCtx) await context.close();
@@ -3250,6 +3332,8 @@ export {
   isAllowedInitialJobUrl,
   isAllowedNavigationUrl,
   isStrictTargetRole,
+  isSubmissionControlLabel,
+  isAshbyJobListing,
   isAllowedAssetRequest,
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,

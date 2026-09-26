@@ -23,6 +23,8 @@ import {
   isEligibleJob,
   isSimulationJob,
   isStrictTargetRole,
+  isSubmissionControlLabel,
+  isAshbyJobListing,
   manualUrlDatabaseGuard,
   persistBrowserResult,
   pinNavigationOrigin,
@@ -69,6 +71,44 @@ test("final actions require both live mode and --auto", async () => {
   const result = await clickFinalControl({}, locator, "Send application");
   assert.equal(result.clicked, false);
   assert.equal(clicks, 0);
+});
+
+test("a generic type=submit is only final when its label states submission intent", () => {
+  // Regression: a SimplyHired `button[type="submit"]` labelled "Search Jobs"
+  // was clicked as if it submitted an application.
+  for (const label of [
+    "Search Jobs",
+    "Search",
+    "Apply filters",
+    "Sort by date",
+    "Sign in",
+    "Subscribe",
+    "Accept cookies",
+    "Load more",
+    "Save job",
+    "Upload resume",
+    "",
+  ]) {
+    assert.equal(isSubmissionControlLabel(label), false, `expected non-submit: ${label}`);
+  }
+  for (const label of [
+    "Submit",
+    "Submit application",
+    "Submit Application",
+    "Send",
+    "Apply",
+    "Apply now",
+    "Confirm",
+  ]) {
+    assert.equal(isSubmissionControlLabel(label), true, `expected submit: ${label}`);
+  }
+});
+
+test("Ashby company boards are rejected but job-scoped listings are allowed", () => {
+  assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel"), false);
+  assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/sprinto"), false);
+  assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel/9f1c2b44-1234"), true);
+  assert.equal(isAshbyJobListing("not-a-url"), false);
 });
 
 test("application surface waits through resume-loader screens", async () => {
