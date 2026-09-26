@@ -1870,7 +1870,7 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
     const deadline = Date.now() + OTP_PAUSE_MS;
     while (Date.now() < deadline) {
       const done = await page.evaluate(() =>
-        /application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+        /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received/i.test(document.body?.innerText || "")
       ).catch(() => false);
       if (done) return { state: "submitted" };
       await page.waitForTimeout(2000);
@@ -1916,7 +1916,7 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
     await page.waitForTimeout(3000);
   }
   const ok = await page.evaluate(() =>
-    /application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+    /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received/i.test(document.body?.innerText || "")
   ).catch(() => false);
   return { state: ok ? "submitted" : "unconfirmed" };
 }
@@ -2140,7 +2140,7 @@ async function advanceMultiStepFlow(page, {
     await next.click({ timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(2000);
     const confirmed = await page.evaluate(() =>
-      /application submitted|you applied|application received|thank you for applying|successfully applied/i.test(document.body?.innerText || "")
+      /application submitted|you applied|application received|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|successfully applied/i.test(document.body?.innerText || "")
     ).catch(() => false);
     if (confirmed) return { stopped: "confirmed" };
   }
@@ -2817,7 +2817,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         return { company: job.company, title: job.title, link: url, ats, action: "needs-verification", pdf: resumePdf };
       }
       const confirmed = await hasVisibleAppliedBadge(page) || await page.evaluate(() =>
-        /successfully applied|application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+        /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received/i.test(document.body?.innerText || "")
       ).catch(() => false);
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : "needs-verification", pdf: resumePdf };
@@ -3466,13 +3466,13 @@ async function processJob(browser, job, profile, runtime = {}) {
           continue;
         }
         // No options: either done or bot still working — check success, else wait more
-        const doneEarly = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+        const doneEarly = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application/i.test(document.body?.innerText || ""));
         if (doneEarly) break;
         const chatGone = await page.locator("button:has-text('Fresher'), button:has-text('Continue')").first().count().catch(() => 0);
         if (step > 4 && chatGone === 0) break;
         await page.waitForTimeout(2000);
       }
-      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application/i.test(document.body?.innerText || ""));
       if (done) {
         console.log("  [naukri-chat] SUCCESS — recording verified submission");
         await page.screenshot({ path: screenshotPath.replace("preview", "submitted"), fullPage: true }).catch(() => {});
@@ -3542,7 +3542,7 @@ async function processJob(browser, job, profile, runtime = {}) {
           await next.click({ timeout: 5000 }).catch(() => {});
         }
         await page.waitForTimeout(2500);
-        const done = await page.evaluate(() => /application submitted|you applied|application received|thank you for applying/i.test(document.body?.innerText || ""));
+        const done = await page.evaluate(() => /application submitted|you applied|application received|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application/i.test(document.body?.innerText || ""));
         if (done) break;
         if (clicked) {
           if (!sharedCtx) await context.close();
@@ -3580,7 +3580,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
       if (flow.stopped === "submitted" || flow.stopped === "confirmed") {
         const ok = await page.evaluate(() =>
-          /application submitted|you applied|application received|thank you for applying|successfully applied/i.test(document.body?.innerText || "")
+          /application submitted|you applied|application received|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|successfully applied/i.test(document.body?.innerText || "")
         ).catch(() => false);
         await page.screenshot({ path: screenshotPath.replace("preview", "submitted"), fullPage: true }).catch(() => {});
         if (!sharedCtx) await context.close();
@@ -3598,7 +3598,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
       }
-      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying/i.test(document.body?.innerText || ""));
+      const done = await page.evaluate(() => /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application/i.test(document.body?.innerText || ""));
       await page.screenshot({ path: screenshotPath.replace("preview", "final"), fullPage: false }).catch(() => {});
       if (!sharedCtx) await context.close();
       if (DRY_RUN) return { company: job.company, title: job.title, link: url, ats, action: "dry-run-preview", pdf: resumePdf, needsUser: chatNeedsUser };
@@ -3695,7 +3695,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     // Verify before claiming: a click alone is never treated as Applied.
     const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats) && await hasVisibleAppliedBadge(page);
     let confirmed = clicked && (serverApplied || await page.evaluate(() =>
-      /successfully applied|application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+      /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received/i.test(document.body?.innerText || "")
     ).catch(() => false));
     // A final click that lands on an SMS verification step is not a submission.
     // With --enter-otp the operator supplies the code they received.
@@ -3721,7 +3721,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
           const done = await page.evaluate(() =>
-            /application submitted|applied successfully|thank you for applying|you applied|application received|submitted successfully/i.test(document.body?.innerText || "")
+            /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received|submitted successfully/i.test(document.body?.innerText || "")
           ).catch(() => false);
           if (done) { confirmed = true; break; }
           await page.waitForTimeout(2000);
