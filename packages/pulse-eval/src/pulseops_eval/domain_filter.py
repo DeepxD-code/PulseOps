@@ -96,6 +96,21 @@ def is_strict_target_role(title: str) -> bool:
     return bool(_STRICT_ROLE_ALLOWED.search(value))
 
 
+def is_hard_excluded_role(title: str) -> bool:
+    """Titles that are unambiguously outside the target domain.
+
+    Stage 1 must only reject these outright. A title with no explicit
+    in-domain keyword (for example "Research Engineer, Pretraining") is
+    ambiguous rather than wrong, so it is deferred to the Stage 2 model
+    instead of being dropped. Rejecting every unkeyworded title silently
+    discarded real ML/AI roles.
+    """
+    value = re.sub(r"\s+", " ", str(title or "").strip().lower())
+    if not value:
+        return False
+    return any(marker in value for marker in _STRICT_ROLE_EXCLUDES)
+
+
 # ── Stage 1 helpers ───────────────────────────────────────────────────────────
 
 def _is_primary_skill(keyword: str, title: str, desc: str) -> bool:
@@ -135,11 +150,11 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
     senior_ex  = _seniority_exclude(profile)
     core       = _core_skills(profile)
 
-    if not is_strict_target_role(title):
+    if is_hard_excluded_role(title):
         return FilterResult(
             False,
-            "Stage1: title is outside strict target roles "
-            "(backend/ML/AI/Java/C/C++/GenAI)",
+            "Stage1: title is an excluded role family "
+            "(full-stack/frontend/mobile/embedded)",
             stage=1,
         )
 
