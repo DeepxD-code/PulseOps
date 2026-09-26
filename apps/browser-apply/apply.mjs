@@ -3653,6 +3653,20 @@ async function processJob(browser, job, profile, runtime = {}) {
       const consents = await describeUncheckedConsents(page).catch(() => []);
       if (empty.length) console.log(`  [blocked-by] empty fields still on the form: ${empty.join(", ")}`);
       if (consents.length) console.log(`  [consent] needs your tick: ${consents.join(" | ")}`);
+      // A headed run can simply be finished by hand: hold the window open and
+      // poll for the confirmation rather than dead-ending the row.
+      if (OTP_PAUSE && (empty.length || consents.length)) {
+        console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
+        const deadline = Date.now() + OTP_PAUSE_MS;
+        while (Date.now() < deadline) {
+          const done = await page.evaluate(() =>
+            /application submitted|applied successfully|thank you for applying|you applied|application received|submitted successfully/i.test(document.body?.innerText || "")
+          ).catch(() => false);
+          if (done) { confirmed = true; break; }
+          await page.waitForTimeout(2000);
+        }
+        if (confirmed) console.log("  [handoff] confirmation seen — recording verified submission");
+      }
     }
     if (!sharedCtx) await context.close();
     return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
