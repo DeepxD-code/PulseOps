@@ -42,6 +42,9 @@ const ROOT = path.resolve(__dirname, "../..");
 
 const DRY_RUN = !process.argv.includes("--live");
 const HEADED = process.argv.includes("--headed");
+// Operator-supplied SMS verification. Never automated: the human types the code
+// they received on their own phone.
+const ENTER_OTP = process.argv.includes("--enter-otp");
 const AUTO = process.argv.includes("--auto");
 const LOAD_EMAIL_QUEUE = process.argv.includes("--email-queue");
 const INCLUDE_INDEED = process.argv.includes("--include-indeed");
@@ -1735,6 +1738,69 @@ async function answerCandidateQuestions(page, profile) {
 }
 
 /**
+ * Some portals verify the phone by SMS before the application is actually
+ * submitted. The code proves the operator controls that number, so it is only
+ * ever supplied by a human at the prompt — never generated, guessed, or read
+ * from anywhere else. Returns the submitted state so the caller can verify.
+ */
+async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
+  if (!ENTER_OTP) return { state: "not-requested" };
+  const prompt = page.locator(
+    'text=/verification code|enter.*otp|one.time password/i, [class*="otp"], [class*="OTP"]',
+  ).first();
+  if (!(await prompt.count())) return { state: "not-present" };
+
+  console.log("\n  [otp] This portal sent a verification code to your phone.");
+  process.stdout.write("  [otp] Enter the code you received (blank to skip): ");
+  const code = await readLineFromStdin(timeoutMs);
+  const digits = String(code || "").replace(/\D/g, "");
+  if (digits.length < 4) {
+    console.log("\n  [otp] no usable code supplied — leaving for manual completion");
+    return { state: "skipped" };
+  }
+
+  const boxes = page.locator('input[inputmode="numeric"], input[autocomplete="one-time-code"]');
+  const count = await boxes.count().catch(() => 0);
+  if (count >= digits.length) {
+    for (let i = 0; i < digits.length; i++) {
+      await boxes.nth(i).fill(digits[i], { timeout: 3000 }).catch(() => {});
+    }
+  } else {
+    await boxes.first().fill(digits, { timeout: 3000 }).catch(() => {});
+  }
+  const confirm = page.locator(
+    'button:has-text("Verify & Submit"), button:has-text("Verify and Submit"), button:has-text("Verify"), button:has-text("Submit")',
+  ).first();
+  if (await confirm.count()) {
+    await confirm.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+  }
+  const ok = await page.evaluate(() =>
+    /application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+  ).catch(() => false);
+  return { state: ok ? "submitted" : "unconfirmed" };
+}
+
+function readLineFromStdin(timeoutMs = 180000) {
+  return new Promise((resolve) => {
+    let buffer = "";
+    const finish = (value) => {
+      process.stdin.off("data", onData);
+      process.stdin.pause();
+      resolve(value);
+    };
+    const onData = (chunk) => {
+      buffer += String(chunk);
+      const match = buffer.match(/\d{4,8}/);
+      if (match) finish(match[0]);
+    };
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", onData);
+    setTimeout(() => finish(""), Math.max(1000, Number(timeoutMs) || 180000)).unref?.();
+  });
+}
+
+/**
  * List visible required inputs that are still empty. A disabled final control
  * is almost always caused by one of these, and the operator needs to know
  * which answers only the candidate can give.
@@ -3319,9 +3385,20 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
     // Verify before claiming: a click alone is never treated as Applied.
     const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats) && await hasVisibleAppliedBadge(page);
-    const confirmed = clicked && (serverApplied || await page.evaluate(() =>
+    let confirmed = clicked && (serverApplied || await page.evaluate(() =>
       /successfully applied|application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
     ).catch(() => false));
+    // A final click that lands on an SMS verification step is not a submission.
+    // With --enter-otp the operator supplies the code they received.
+    if (clicked && !confirmed) {
+      const otp = await completeSmsVerification(page);
+      if (otp.state === "submitted") {
+        confirmed = true;
+        await page.screenshot({ path: screenshotPath.replace("preview", "verified"), fullPage: true }).catch(() => {});
+      } else if (otp.state === "not-present") {
+        confirmed = false;
+      }
+    }
     if (!sharedCtx) await context.close();
     return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
   } catch (e) {
