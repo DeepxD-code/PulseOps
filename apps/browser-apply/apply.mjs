@@ -1867,12 +1867,21 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
     // The browser is headed, so let the operator finish in the visible window
     // and poll for the result rather than reading a code out of thin air.
     console.log(`  [otp] complete the code in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
+    const flowUrl = page.url();
     const deadline = Date.now() + OTP_PAUSE_MS;
     while (Date.now() < deadline) {
       const done = await page.evaluate(() =>
         /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied|application received/i.test(document.body?.innerText || "")
       ).catch(() => false);
       if (done) return { state: "submitted" };
+      // The code dialog is modal, so the only way out of it is a successful
+      // verification. Portals then redirect to onboarding/recommended jobs,
+      // which says nothing about the application.
+      const current = page.url();
+      if (current && current !== flowUrl && !/otp|verif/i.test(current)) {
+        console.log(`  [otp] left the verification dialog for ${current.slice(0, 90)} — treating as verified`);
+        return { state: "submitted" };
+      }
       await page.waitForTimeout(2000);
     }
     console.log("  [otp] no confirmation appeared — leaving for manual completion");
