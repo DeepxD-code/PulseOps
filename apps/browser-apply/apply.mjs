@@ -4133,10 +4133,16 @@ async function main() {
     jobs = real;
   }
   if (!jobs.length) {
-    console.error(SINGLE_JOB_ID
-      ? `[FATAL] --job-id ${SINGLE_JOB_ID} refused or no longer eligible; no browser was launched.`
-      : "[FATAL] no eligible real jobs found; no browser was launched.");
-    process.exitCode = 4;
+    if (SINGLE_JOB_ID) {
+      // An explicitly requested job that is no longer eligible is a real
+      // failure worth surfacing to the operator and to CI.
+      console.error(`[FATAL] --job-id ${SINGLE_JOB_ID} refused or no longer eligible; no browser was launched.`);
+      process.exitCode = 4;
+      return;
+    }
+    // An empty queue is a normal outcome (everything is on cooldown, already
+    // terminal, or out of scope), not a failure.
+    console.log("[DB] queue is empty — nothing eligible to apply to right now (cooldowns, terminal rows, or out-of-scope roles).");
     return;
   }
   if (!DRY_RUN) {
