@@ -1153,6 +1153,8 @@ const ATS_SELECTORS = {
     applyBtn: ['a:has-text("Apply")', 'a:has-text("Apply now")', 'button:has-text("Apply")', 'button:has-text("Apply now")', '[data-testid*="apply"]'],
     fields: {
       name: ['input[name="name"]', '#name', 'input[autocomplete="name"]', 'input[placeholder*="Full name"]'],
+      firstName: ['input[name="firstName"]', 'input[name="first_name"]', 'input[name="firstname"]', 'input[autocomplete="given-name"]', 'input[placeholder*="First name" i]'],
+      lastName: ['input[name="lastName"]', 'input[name="last_name"]', 'input[name="lastname"]', 'input[autocomplete="family-name"]', 'input[placeholder*="Last name" i]'],
       email: ['input[type="email"]', 'input[name="email"]', '#email'],
       phone: ['input[type="tel"]', 'input[name="phone"]'],
       resume: ['input[type="file"]'],
@@ -1893,6 +1895,66 @@ function readLineFromStdin(timeoutMs = 180000) {
 }
 
 /**
+ * Visible entry fields still left empty. A final click that produces no
+ * confirmation is almost always blocked by one of these, and many portals
+ * mark requiredness with a CSS asterisk rather than the required attribute.
+ */
+async function describeEmptyEntryFields(page) {
+  if (!page || typeof page.evaluate !== "function") return [];
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const out = [];
+    [...document.querySelectorAll("input, textarea")].filter(visible).forEach((el) => {
+      const type = String(el.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "file", "checkbox", "radio"].includes(type)) return;
+      if (String(el.value || "").trim()) return;
+      const label = el.getAttribute("aria-label")
+        || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent)
+        || el.placeholder
+        || el.name
+        || type;
+      out.push(String(label).replace(/\s+/g, " ").trim().slice(0, 40));
+    });
+    return [...new Set(out)].slice(0, 8);
+  }).catch(() => []);
+}
+
+/**
+ * List unticked required checkboxes. These are usually legal attestations
+ * ("I agree to the Terms of Use"), which the candidate must give themselves, so
+ * they are reported rather than clicked.
+ */
+async function describeUncheckedConsents(page) {
+  if (!page || typeof page.evaluate !== "function") return [];
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const out = [];
+    [...document.querySelectorAll('input[type="checkbox"]')].filter(visible).forEach((el) => {
+      if (el.checked) return;
+      const required = el.required
+        || el.getAttribute("aria-required") === "true"
+        || /\brequired\b/i.test(String(el.className || ""));
+      if (!required) return;
+      const label = el.getAttribute("aria-label")
+        || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent)
+        || (el.closest("label")?.textContent)
+        || el.name
+        || "required checkbox";
+      out.push(String(label).replace(/\s+/g, " ").trim().slice(0, 70));
+    });
+    return [...new Set(out)].slice(0, 5);
+  }).catch(() => []);
+}
+
+/**
  * List visible required inputs that are still empty. A disabled final control
  * is almost always caused by one of these, and the operator needs to know
  * which answers only the candidate can give.
@@ -2080,8 +2142,14 @@ async function clickFinalControl(page, locator, label, options = {}) {
   const disabled = await locator.isDisabled().catch(() => true);
   if (disabled) {
     const missing = await describeMissingRequiredFields(page);
-    console.log(`  [final-disabled] "${label}" is disabled${missing.length ? ` — unanswered required fields: ${missing.join(", ")}` : ""}`);
-    return { allowed: true, clicked: false, disabled: true, missing };
+    const consents = await describeUncheckedConsents(page);
+    const detail = [
+      missing.length ? `unanswered required fields: ${missing.join(", ")}` : "",
+      consents.length ? `consent boxes to tick: ${consents.join(" | ")}` : "",
+    ].filter(Boolean).join("; ");
+    console.log(`  [final-disabled] "${label}" is disabled${detail ? ` — ${detail}` : ""}`);
+    if (consents.length) console.log("  [consent] terms/privacy checkboxes are a legal agreement and are never ticked automatically");
+    return { allowed: true, clicked: false, disabled: true, missing, consents };
   }
 
   // Re-read both global pause and the exact claim after CAPTCHA/field work and
@@ -3528,6 +3596,12 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
     if (!sharedCtx) await context.close();
+    if (clicked && !confirmed) {
+      const empty = await describeEmptyEntryFields(page).catch(() => []);
+      const consents = await describeUncheckedConsents(page).catch(() => []);
+      if (empty.length) console.log(`  [blocked-by] empty fields still on the form: ${empty.join(", ")}`);
+      if (consents.length) console.log(`  [consent] needs your tick: ${consents.join(" | ")}`);
+    }
     return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
   } catch (e) {
     console.log(`  [error] ${e.message.slice(0,300)}`);
