@@ -33,6 +33,7 @@ import {
   statusForBrowserResult,
   verifyJobClaim,
   waitForCaptchaResolution,
+  waitForApplicationSurface,
 } from "../apps/browser-apply/apply.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,6 +69,16 @@ test("final actions require both live mode and --auto", async () => {
   const result = await clickFinalControl({}, locator, "Send application");
   assert.equal(result.clicked, false);
   assert.equal(clicks, 0);
+});
+
+test("application surface waits through resume-loader screens", async () => {
+  let calls = 0;
+  const page = {
+    evaluate: async () => ({ loading: calls++ < 2 }),
+    waitForTimeout: async () => {},
+  };
+  assert.equal(await waitForApplicationSurface(page, 5000), true);
+  assert.equal(calls, 3);
 });
 
 test("CAPTCHA is fail-closed instead of falling through", async () => {

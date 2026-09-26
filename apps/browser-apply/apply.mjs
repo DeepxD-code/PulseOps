@@ -1222,6 +1222,23 @@ async function installNavigationGuard(page, ats, originUrl) {
   return boundary;
 }
 
+async function waitForApplicationSurface(page, timeoutMs = 30000) {
+  if (!page || typeof page.evaluate !== "function") return true;
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1600);
+      return {
+        loading: /reading your resume|uploading your resume|loading application|please wait|just a moment/i.test(text),
+      };
+    }).catch(() => ({ loading: false }));
+    if (!state.loading) return true;
+    await page.waitForTimeout(500).catch(() => {});
+  }
+  console.log("    [wait] application surface still loading; continuing conservatively");
+  return false;
+}
+
 async function navigateAllowed(page, target, ats, originUrl) {
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
@@ -1805,6 +1822,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
     }
+    await waitForApplicationSurface(page, 30000);
     await page.waitForTimeout(1500);
     if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
       console.log("  [redirect-block] page changed origin before overlay handling");
@@ -1830,7 +1848,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     // Dead-listing guard: never attempt submits on 404/expired job pages
     const deadHit = await page.evaluate(() => {
       const t = (document.body?.innerText || "").slice(0, 2000);
-      return /404|no longer exists|no longer available|job (has )?expired|position (has been )?filled|this job is no longer/i.test(t);
+      return /404|no longer exists|no longer available|no longer accepting applications|job (has )?expired|position (has been )?filled|this job is no longer/i.test(t);
     }).catch(() => false);
     if (deadHit && !(await hasCaptcha(page))) {
       console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
@@ -3255,6 +3273,7 @@ export {
   statusForBrowserResult,
   verifyJobClaim,
   waitForCaptchaResolution,
+  waitForApplicationSurface,
 };
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
