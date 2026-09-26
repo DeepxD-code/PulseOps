@@ -31,7 +31,7 @@ if (-not $SkipBrowserApply) {
     } else {
         Remove-Item Env:\PULSEOPS_ALLOW_EXTERNAL_APPLY -ErrorAction SilentlyContinue
     }
-    & node apps/browser-apply/apply.mjs --live --headed --auto
+    & node apps/browser-apply/apply.mjs --live --headed --auto --otp-pause
     $browserExit = $LASTEXITCODE
     Write-Host "browser_apply_exit=$browserExit"
 } else {
