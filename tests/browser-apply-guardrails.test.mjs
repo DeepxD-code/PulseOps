@@ -25,8 +25,10 @@ import {
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
+  isGreenhouseJobListing,
   advanceMultiStepFlow,
   missingContactFields,
+  tryPinExternalApplyOrigin,
   manualUrlDatabaseGuard,
   persistBrowserResult,
   pinNavigationOrigin,
@@ -169,11 +171,42 @@ test("a missing phone is reported instead of silently fabricating contact detail
   assert.deepEqual(missingContactFields(undefined), ["name", "email", "phone"]);
 });
 
+test("off-site apply hosts are blocked unless explicitly enabled", () => {
+  const boundary = {
+    ats: "linkedin",
+    initialOrigin: "https://www.linkedin.com",
+    initialHost: "www.linkedin.com",
+    pinnedOrigin: null,
+  };
+  // Default (feature flag off) must never widen the boundary.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://autter.dev/careers/x", "linkedin", false), false);
+  assert.equal(boundary.pinnedOrigin, null);
+
+  // Enabled: a LinkedIn off-site apply pins exactly one HTTPS host.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://autter.dev/careers/x", "linkedin", true), true);
+  assert.equal(boundary.pinnedOrigin, "https://autter.dev");
+
+  // Never for a non-LinkedIn ATS, plain HTTP, or a shortener/paste host.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://evil.example/x", "generic", true), false);
+  assert.equal(tryPinExternalApplyOrigin(boundary, "http://autter.dev/x", "linkedin", true), false);
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://bit.ly/x", "linkedin", true), false);
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://pastebin.com/x", "linkedin", true), false);
+  // The pin never moves back to the ATS origin.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://www.linkedin.com/jobs/view/1", "linkedin", true), false);
+});
+
 test("Ashby company boards are rejected but job-scoped listings are allowed", () => {
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel"), false);
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/sprinto"), false);
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel/9f1c2b44-1234"), true);
   assert.equal(isAshbyJobListing("not-a-url"), false);
+});
+
+test("Greenhouse company boards are rejected but job listings are allowed", () => {
+  assert.equal(isGreenhouseJobListing("https://boards.greenhouse.io/freshworks"), false);
+  assert.equal(isGreenhouseJobListing("https://job-boards.greenhouse.io/chargebee"), false);
+  assert.equal(isGreenhouseJobListing("https://boards.greenhouse.io/freshworks/jobs/4012345"), true);
+  assert.equal(isGreenhouseJobListing("not-a-url"), false);
 });
 
 test("application surface waits until real form controls render", async () => {

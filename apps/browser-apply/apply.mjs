@@ -327,6 +327,16 @@ function isAshbyJobListing(url) {
   }
 }
 
+// boards.greenhouse.io/<company> is a company board too; a real listing always
+// carries a /jobs/<id> segment.
+function isGreenhouseJobListing(url) {
+  try {
+    return /\/jobs\/\d+(?:[/?#]|$)/i.test(new URL(String(url || "")).pathname);
+  } catch {
+    return false;
+  }
+}
+
 // Distinguish "closed", "already applied", and "apply on the company site" from
 // a genuinely missing control, so the run records an accurate outcome instead
 // of a blanket NeedsReview.
@@ -1112,21 +1122,36 @@ async function tryFill(page, selectors, value) {
   return false;
 }
 
-async function hasCrossOriginFormOrFrame(page) {
+async function hasCrossOriginFormOrFrame(page, originUrl = null) {
+  // On an operator-approved external apply page the real form often lives on a
+  // known ATS host, so that pairing is allowed. Any other third-party target
+  // still counts as cross-origin and blocks the fill/upload.
+  const permittedHosts = [];
+  if (ALLOW_EXTERNAL_APPLY && isNavigationBoundary(originUrl) && originUrl.externalApplyHost) {
+    for (const hosts of Object.values(ATS_SERVICE_HOSTS)) {
+      for (const host of hosts || []) permittedHosts.push(canonicalHost(host));
+    }
+  }
   if (!page || typeof page.evaluate !== "function") return false;
-  return page.evaluate(() => {
+  return page.evaluate((allowed) => {
     const origin = window.location.origin;
     const cross = (value) => {
       const text = String(value || "").trim().toLowerCase();
       if (!text || text === "about:blank") return false;
-      try { return new URL(text, window.location.href).origin !== origin; }
+      let resolved;
+      try { resolved = new URL(text, window.location.href); }
       catch { return true; }
+      if (resolved.origin === origin) return false;
+      if (allowed.length && resolved.protocol === "https:" && allowed.includes(resolved.hostname.toLowerCase())) {
+        return false;
+      }
+      return true;
     };
     const formTarget = [...document.querySelectorAll("form")].some((form) => cross(form.getAttribute("action") || form.action));
     const buttonTarget = [...document.querySelectorAll("button, input[type='submit']")].some((button) => cross(button.getAttribute("formaction")));
     const frameTarget = [...document.querySelectorAll("iframe")].some((frame) => cross(frame.getAttribute("src") || frame.src));
     return formTarget || buttonTarget || frameTarget;
-  }).catch(() => true);
+  }, permittedHosts).catch(() => true);
 }
 
 async function tryUpload(page, selectors, filePath, ats = null, originUrl = null) {
@@ -1143,7 +1168,7 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
     console.log(`    [upload] no PDF to attach`);
     return false;
   }
-  if (await hasCrossOriginFormOrFrame(page)) {
+  if (await hasCrossOriginFormOrFrame(page, originUrl)) {
     console.log("    [upload] blocked: cross-origin form/iframe target detected");
     return false;
   }
@@ -1316,6 +1341,36 @@ async function waitForApplicationSurface(page, timeoutMs = 30000) {
   return false;
 }
 
+// Off-site ("Responses managed off LinkedIn") applies land on the employer's
+// own careers site, which is not a known ATS host. This is an explicit,
+// operator-approved relaxation and stays off unless enabled. Only the first
+// off-site hop is allowed and the boundary is re-pinned to it, so a redirect
+// chain still cannot walk further.
+const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
+  String(process.env.PULSEOPS_ALLOW_EXTERNAL_APPLY || "").trim(),
+);
+
+// Hosts that must never become an application target regardless of policy.
+const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|pastebin\.com|discord\.gg|wa\.me)\b/i;
+
+function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
+  if (!enabled) return false;
+  if (!isNavigationBoundary(boundary)) return false;
+  const effectiveAts = ats || boundary.ats;
+  if (effectiveAts !== "linkedin") return false;
+  const url = parseHttpUrl(landingUrl);
+  if (!url || url.protocol !== "https:" || url.port) return false;
+  const host = canonicalHost(url.hostname);
+  if (!host || EXTERNAL_APPLY_HOST_DENYLIST.test(host)) return false;
+  // Exactly one off-site hop is ever granted, and the pin never returns to the
+  // ATS host, so a redirect chain still cannot walk further.
+  if (boundary.externalApplyHost) return false;
+  if (host === boundary.initialHost) return false;
+  boundary.externalApplyHost = host;
+  boundary.pinnedOrigin = url.origin;
+  return true;
+}
+
 async function navigateAllowed(page, target, ats, originUrl) {
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
@@ -1331,6 +1386,10 @@ async function navigateAllowed(page, target, ats, originUrl) {
     return false;
   }
   if (!isAllowedNavigationUrl(page.url(), ats, boundary)) {
+    if (tryPinExternalApplyOrigin(boundary, page.url(), ats)) {
+      console.log(`    [external-apply] approved off-site apply host → ${canonicalHost(parseHttpUrl(page.url()).hostname)}`);
+      return true;
+    }
     console.log(`    [redirect-block] landed on ${page.url()}`);
     return false;
   }
@@ -1704,7 +1763,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     console.log("  [fill] blocked: page is not a trusted HTTPS origin");
     return false;
   }
-  if (await hasCrossOriginFormOrFrame(page)) {
+  if (await hasCrossOriginFormOrFrame(page, originUrl)) {
     console.log("  [fill] blocked: cross-origin form/iframe target detected");
     return false;
   }
@@ -2012,6 +2071,12 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
   }
 
+  // Greenhouse company boards behave the same way.
+  if (ats === "greenhouse" && !isGreenhouseJobListing(url)) {
+    console.log("  [invalid] Greenhouse company board URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
   if (!isAllowedNavigationUrl(url, ats, navBoundary)) {
     console.log("  [redirect-block] initial URL is outside the strict ATS allowlist");
     return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
@@ -2222,7 +2287,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
       }
-      if (await hasCrossOriginFormOrFrame(page)) {
+      if (await hasCrossOriginFormOrFrame(page, navBoundary)) {
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
       }
@@ -3544,8 +3609,10 @@ export {
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
+  isGreenhouseJobListing,
   advanceMultiStepFlow,
   missingContactFields,
+  tryPinExternalApplyOrigin,
   isAllowedAssetRequest,
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,

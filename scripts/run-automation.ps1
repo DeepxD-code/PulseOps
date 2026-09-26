@@ -1,7 +1,8 @@
 param(
     [switch]$SkipLiveness,
     [switch]$SkipBrowserApply,
-    [switch]$NoPush
+    [switch]$NoPush,
+    [switch]$StrictNavigation
 )
 
 # Native CLIs (Python/Node) may write warnings to stderr without failing.
@@ -22,6 +23,14 @@ Write-Host "weekly_exit=$weeklyExit"
 
 if (-not $SkipBrowserApply) {
     Write-Host "=== PulseOps browser apply (live + auto) ==="
+    # Operator-approved: most LinkedIn roles are off-site applies that land on
+    # the employer's own careers site. Grants exactly one HTTPS host hop, then
+    # re-pins. Disable with -StrictNavigation.
+    if (-not $StrictNavigation) {
+        $env:PULSEOPS_ALLOW_EXTERNAL_APPLY = "1"
+    } else {
+        Remove-Item Env:\PULSEOPS_ALLOW_EXTERNAL_APPLY -ErrorAction SilentlyContinue
+    }
     & node apps/browser-apply/apply.mjs --live --headed --auto
     $browserExit = $LASTEXITCODE
     Write-Host "browser_apply_exit=$browserExit"
