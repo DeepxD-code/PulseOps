@@ -26,6 +26,7 @@ import {
   isSubmissionControlLabel,
   isAshbyJobListing,
   isGreenhouseJobListing,
+  isLeverJobListing,
   advanceMultiStepFlow,
   missingContactFields,
   tryPinExternalApplyOrigin,
@@ -207,6 +208,13 @@ test("Greenhouse company boards are rejected but job listings are allowed", () =
   assert.equal(isGreenhouseJobListing("https://job-boards.greenhouse.io/chargebee"), false);
   assert.equal(isGreenhouseJobListing("https://boards.greenhouse.io/freshworks/jobs/4012345"), true);
   assert.equal(isGreenhouseJobListing("not-a-url"), false);
+});
+
+test("Lever company boards are rejected but role listings are allowed", () => {
+  assert.equal(isLeverJobListing("https://jobs.lever.co/groww"), false);
+  assert.equal(isLeverJobListing("https://jobs.lever.co/cred"), false);
+  assert.equal(isLeverJobListing("https://jobs.lever.co/groww/9f1c2b44-1234-5678"), true);
+  assert.equal(isLeverJobListing("not-a-url"), false);
 });
 
 test("application surface waits until real form controls render", async () => {

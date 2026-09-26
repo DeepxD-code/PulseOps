@@ -337,6 +337,16 @@ function isGreenhouseJobListing(url) {
   }
 }
 
+// jobs.lever.co/<company> is a Lever board; a real posting adds a role segment.
+function isLeverJobListing(url) {
+  try {
+    const segments = new URL(String(url || "")).pathname.split("/").filter(Boolean);
+    return segments.length >= 2;
+  } catch {
+    return false;
+  }
+}
+
 // Distinguish "closed", "already applied", and "apply on the company site" from
 // a genuinely missing control, so the run records an accurate outcome instead
 // of a blanket NeedsReview.
@@ -2077,6 +2087,12 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
   }
 
+  // Lever company boards behave the same way.
+  if (ats === "lever" && !isLeverJobListing(url)) {
+    console.log("  [invalid] Lever company board URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
   if (!isAllowedNavigationUrl(url, ats, navBoundary)) {
     console.log("  [redirect-block] initial URL is outside the strict ATS allowlist");
     return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
@@ -3235,7 +3251,21 @@ else:
     sql = "SELECT j.* FROM jobs j"
 if where:
     sql += " WHERE " + " AND ".join(where)
-sql += " ORDER BY j.\"id\" DESC LIMIT 100"
+# Prefer rows that are genuine ATS-hosted job listings. LinkedIn and aggregator
+# pages need per-site handling and were consuming every run's limited slots,
+# starving the ~18 Greenhouse/Lever listings that have real application forms.
+sql += """
+ ORDER BY CASE
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%greenhouse.io/%/jobs/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%lever.co/%/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%ashbyhq.com/%/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%myworkdayjobs.com/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%workday.com/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%smartrecruiters.com/%' THEN 0
+   WHEN LOWER(COALESCE(j."link",'')) LIKE '%linkedin.com/%' THEN 2
+   ELSE 1
+ END, j."id" DESC
+ LIMIT 100"""
 rows = conn.execute(sql, params).fetchall()
 result = []
 paused = send_paused()
@@ -3610,6 +3640,7 @@ export {
   isSubmissionControlLabel,
   isAshbyJobListing,
   isGreenhouseJobListing,
+  isLeverJobListing,
   advanceMultiStepFlow,
   missingContactFields,
   tryPinExternalApplyOrigin,
