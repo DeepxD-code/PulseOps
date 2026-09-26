@@ -28,6 +28,7 @@ import {
   isGreenhouseJobListing,
   isLeverJobListing,
   isWellfoundJobListing,
+  isNaukriJobListing,
   hasSimulationFragment,
   matchChipOption,
   matchSalaryOption,
@@ -262,6 +263,15 @@ test("Wellfound search pages are rejected but real postings are allowed", () => 
   assert.equal(isWellfoundJobListing("https://wellfound.com/india/role/intern/backend-engineer"), false);
   assert.equal(isWellfoundJobListing("https://wellfound.com/jobs/3405119-associate-software-engineer"), true);
   assert.equal(isWellfoundJobListing("not-a-url"), false);
+});
+
+test("Naukri search pages are rejected but real postings are allowed", () => {
+  assert.equal(isNaukriJobListing("https://www.naukri.com/java-spring-boot-jobs-in-bangalore-hyderabad-pune-chennai?experience=0"), false);
+  assert.equal(isNaukriJobListing("https://www.naukri.com/backend-jobs-in-bangalore"), false);
+  assert.equal(isNaukriJobListing("https://www.naukri.com/job-backend-developer-1234567"), true);
+  assert.equal(isNaukriJobListing("https://www.naukri.com/job-detail-1234567"), true);
+  assert.equal(isNaukriJobListing("https://www.naukri.com/job/1234567"), true);
+  assert.equal(isNaukriJobListing("not-a-url"), false);
 });
 
 test("simulation fragments are refused before any submission path", () => {

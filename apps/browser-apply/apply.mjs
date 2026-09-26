@@ -366,6 +366,19 @@ function isWellfoundJobListing(url) {
   }
 }
 
+// Naukri search/category pages (…-jobs-in-bangalore…?experience=0) list many
+// roles. A real posting ends in a numeric job id, e.g. /job-backend-dev-1234567
+// or /job-detail-1234567.
+function isNaukriJobListing(url) {
+  try {
+    const segments = new URL(String(url || "")).pathname.split("/").filter(Boolean);
+    const last = segments[segments.length - 1] || "";
+    return /\d{4,}$/.test(last);
+  } catch {
+    return false;
+  }
+}
+
 // A "#mock-N" style fragment marks a simulated row that must never be applied
 // to. The whole fragment must be the marker so real anchors like
 // "#testimonials" are not mistaken for one.
@@ -2453,6 +2466,12 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
   }
 
+  // Naukri search/category pages are not listings either.
+  if (ats === "naukri" && !isNaukriJobListing(url)) {
+    console.log("  [invalid] Naukri search URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
   // Wellfound search/category pages are not listings either.
   if (ats === "wellfound" && !isWellfoundJobListing(url)) {
     console.log("  [invalid] Wellfound search URL is not an application listing — skipping");
@@ -2525,7 +2544,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     // Dead-listing guard: never attempt submits on 404/expired job pages
     const deadHit = await page.evaluate(() => {
       const t = (document.body?.innerText || "").slice(0, 2000);
-      return /404|no longer exists|no longer available|no longer accepting applications|job (has )?expired|position (has been )?filled|this job is no longer/i.test(t);
+      return /404|page not found|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i.test(t);
     }).catch(() => false);
     if (deadHit && !(await hasCaptcha(page))) {
       console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
@@ -4030,6 +4049,7 @@ export {
   isGreenhouseJobListing,
   isLeverJobListing,
   isWellfoundJobListing,
+  isNaukriJobListing,
   hasSimulationFragment,
   matchChipOption,
   matchSalaryOption,
