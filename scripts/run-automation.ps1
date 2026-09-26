@@ -4,7 +4,9 @@ param(
     [switch]$NoPush
 )
 
-$ErrorActionPreference = "Stop"
+# Native CLIs (Python/Node) may write warnings to stderr without failing.
+# Keep command output visible, but decide success from each process exit code.
+$ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 $weeklyExit = 0
