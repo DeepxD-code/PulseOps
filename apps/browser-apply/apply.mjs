@@ -1381,11 +1381,10 @@ async function waitForApplicationSurface(page, timeoutMs = 30000) {
   return false;
 }
 
-// Off-site ("Responses managed off LinkedIn") applies land on the employer's
-// own careers site, which is not a known ATS host. This is an explicit,
-// operator-approved relaxation and stays off unless enabled. Only the first
-// off-site hop is allowed and the boundary is re-pinned to it, so a redirect
-// chain still cannot walk further.
+// Off-site applies land on the employer's own careers site, which is not a
+// known ATS host. This is an explicit, operator-approved relaxation and stays
+// off unless enabled. Only the first off-site hop is allowed and the boundary
+// is re-pinned to it, so a redirect chain still cannot walk further.
 const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
   String(process.env.PULSEOPS_ALLOW_EXTERNAL_APPLY || "").trim(),
 );
@@ -1396,8 +1395,6 @@ const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
   if (!enabled) return false;
   if (!isNavigationBoundary(boundary)) return false;
-  const effectiveAts = ats || boundary.ats;
-  if (effectiveAts !== "linkedin") return false;
   const url = parseHttpUrl(landingUrl);
   if (!url || url.protocol !== "https:" || url.port) return false;
   const host = canonicalHost(url.hostname);

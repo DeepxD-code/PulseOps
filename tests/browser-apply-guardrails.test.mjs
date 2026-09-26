@@ -187,17 +187,33 @@ test("off-site apply hosts are blocked unless explicitly enabled", () => {
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://autter.dev/careers/x", "linkedin", false), false);
   assert.equal(boundary.pinnedOrigin, null);
 
-  // Enabled: a LinkedIn off-site apply pins exactly one HTTPS host.
+  // Enabled: an off-site apply pins exactly one HTTPS host.
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://autter.dev/careers/x", "linkedin", true), true);
   assert.equal(boundary.pinnedOrigin, "https://autter.dev");
 
-  // Never for a non-LinkedIn ATS, plain HTTP, or a shortener/paste host.
-  assert.equal(tryPinExternalApplyOrigin(boundary, "https://evil.example/x", "generic", true), false);
+  // Never plain HTTP, a shortener/paste host, or a second hop.
   assert.equal(tryPinExternalApplyOrigin(boundary, "http://autter.dev/x", "linkedin", true), false);
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://bit.ly/x", "linkedin", true), false);
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://pastebin.com/x", "linkedin", true), false);
   // The pin never moves back to the ATS origin.
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://www.linkedin.com/jobs/view/1", "linkedin", true), false);
+  // And never to a second external host.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://other.example/x", "linkedin", true), false);
+});
+
+test("an aggregator page may cross once onto the employer's own careers site", () => {
+  const boundary = {
+    ats: "generic",
+    initialOrigin: "https://www.simplyhired.co.in",
+    initialHost: "www.simplyhired.co.in",
+    pinnedOrigin: null,
+  };
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://careers.hancod.io/apply/12", "generic", true), true);
+  assert.equal(boundary.pinnedOrigin, "https://careers.hancod.io");
+  // One hop only, even for aggregators.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://ats.example.co/x", "generic", true), false);
+  // Still HTTPS-only and no port.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "http://careers.hancod.io/x", "generic", true), false);
 });
 
 test("Ashby company boards are rejected but job-scoped listings are allowed", () => {
