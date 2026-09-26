@@ -25,6 +25,8 @@ import {
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
+  advanceMultiStepFlow,
+  missingContactFields,
   manualUrlDatabaseGuard,
   persistBrowserResult,
   pinNavigationOrigin,
@@ -104,6 +106,69 @@ test("a generic type=submit is only final when its label states submission inten
   }
 });
 
+test("multi-step flow walks Continue then stops when no navigation remains", async () => {
+  const clicked = [];
+  let step = 0;
+  const page = {
+    url: () => "https://jobs.ashbyhq.com/acme/9f1c",
+    locator: () => ({
+      first() { return this; },
+      async count() { return step === 0 ? 1 : 0; },
+      async innerText() { return "Continue"; },
+      async getAttribute() { return null; },
+      async isDisabled() { return false; },
+      async scrollIntoViewIfNeeded() {},
+      async click() { clicked.push("Continue"); step += 1; },
+    }),
+    waitForTimeout: async () => {},
+    evaluate: async () => false,
+  };
+  const result = await advanceMultiStepFlow(page, {
+    ats: "generic", navBoundary: "https://jobs.ashbyhq.com", profile: {}, job: {},
+    finalGuard: {},
+  });
+  assert.equal(result.stopped, "no-navigation");
+  assert.deepEqual(clicked, ["Continue"]);
+});
+
+test("multi-step flow refuses to click a non-navigation control", async () => {
+  const clicked = [];
+  const page = {
+    url: () => "https://jobs.ashbyhq.com/acme/9f1c",
+    locator: () => ({
+      first() { return this; },
+      async count() { return 1; },
+      async innerText() { return "Search Jobs"; },
+      async getAttribute() { return null; },
+      async isDisabled() { return false; },
+      async scrollIntoViewIfNeeded() {},
+      async click() { clicked.push("Search Jobs"); },
+    }),
+    waitForTimeout: async () => {},
+    evaluate: async () => false,
+  };
+  const result = await advanceMultiStepFlow(page, {
+    ats: "generic", navBoundary: "https://jobs.ashbyhq.com", profile: {}, job: {},
+    finalGuard: {},
+  });
+  assert.equal(result.stopped, "non-navigation-label");
+  assert.deepEqual(clicked, []);
+});
+
+test("a missing phone is reported instead of silently fabricating contact details", () => {
+  // Regression: the engine filled 9999999999 into real applications.
+  assert.deepEqual(
+    missingContactFields({ candidate: { name: "Test", email: "t@example.com" } }),
+    ["phone"],
+  );
+  assert.deepEqual(
+    missingContactFields({ candidate: { name: "Test", email: "t@example.com", phone: "+91 99999 99999" } }),
+    [],
+  );
+  assert.deepEqual(missingContactFields({ candidate: {} }), ["name", "email", "phone"]);
+  assert.deepEqual(missingContactFields(undefined), ["name", "email", "phone"]);
+});
+
 test("Ashby company boards are rejected but job-scoped listings are allowed", () => {
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel"), false);
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/sprinto"), false);
@@ -111,14 +176,29 @@ test("Ashby company boards are rejected but job-scoped listings are allowed", ()
   assert.equal(isAshbyJobListing("not-a-url"), false);
 });
 
-test("application surface waits through resume-loader screens", async () => {
+test("application surface waits until real form controls render", async () => {
   let calls = 0;
   const page = {
-    evaluate: async () => ({ loading: calls++ < 2 }),
+    evaluate: async () => calls++ >= 2,
     waitForTimeout: async () => {},
   };
   assert.equal(await waitForApplicationSurface(page, 5000), true);
   assert.equal(calls, 3);
+});
+
+test("application surface does not treat stale loader copy as readiness", async () => {
+  // Regression: "Picking up your details" stays in the DOM after parsing ends,
+  // so text matching never cleared and the run stalled before the form.
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return true; // controls present on the first poll
+    },
+    waitForTimeout: async () => {},
+  };
+  assert.equal(await waitForApplicationSurface(page, 5000), true);
+  assert.equal(calls, 1);
 });
 
 test("CAPTCHA is fail-closed instead of falling through", async () => {

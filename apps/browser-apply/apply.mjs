@@ -1080,6 +1080,8 @@ const ATS_SELECTORS = {
 };
 
 async function tryFill(page, selectors, value) {
+  // An empty value is a missing fact, not something to write into a form.
+  if (!String(value ?? "").trim()) return false;
   for (const sel of selectors) {
     const el = page.locator(sel).first();
     if (await el.count() > 0) {
@@ -1270,17 +1272,31 @@ async function installNavigationGuard(page, ats, originUrl) {
 async function waitForApplicationSurface(page, timeoutMs = 30000) {
   if (!page || typeof page.evaluate !== "function") return true;
   const deadline = Date.now() + Math.max(1000, timeoutMs);
+  let polls = 0;
   while (Date.now() < deadline) {
-    const state = await page.evaluate(() => {
-      const text = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 1600);
-      return {
-        loading: /reading your resume|uploading your resume|loading application|please wait|just a moment/i.test(text),
+    // Readiness is the presence of real form controls. Loader copy such as
+    // "Reading Your Resume" stays in the DOM after parsing finishes, so text
+    // matching alone would block forever.
+    const ready = await page.evaluate(() => {
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
       };
-    }).catch(() => ({ loading: false }));
-    if (!state.loading) return true;
-    await page.waitForTimeout(500).catch(() => {});
+      const entry = [...document.querySelectorAll("input, textarea, select")].filter(visible)
+        .filter((el) => !/hidden|submit|button|file|checkbox|radio/i.test(`${el.type || ""}`));
+      if (entry.length) return true;
+      return [...document.querySelectorAll("button, a, [role='button']")].filter(visible).some((el) => {
+        const label = ((el.innerText || el.value || "") || "").trim();
+        return /\b(?:submit|apply|send application|continue|next)\b/i.test(label);
+      });
+    }).catch(() => false);
+    if (ready) return true;
+    if (polls % 15 === 0) console.log("    [wait] waiting for the application form to render…");
+    polls += 1;
+    await page.waitForTimeout(1000).catch(() => {});
   }
-  console.log("    [wait] application surface still loading; continuing conservatively");
+  console.log("    [wait] application form did not render in time; continuing conservatively");
   return false;
 }
 
@@ -1369,17 +1385,17 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
             const detail = page.locator("div.jobs-details button:has-text('Easy Apply'), div.jobs-search__job-details button:has-text('Easy Apply'), button.jobs-apply-button").first();
             if ((await detail.count()) > 0) {
               console.log("    [easy-apply] clicking detail-pane button");
-              await detail.click({ timeout: 5000 });
+              if (!(await clickTriggerControl(detail))) throw new Error("easy-apply detail trigger did not respond");
             } else {
               // Current LinkedIn markup may expose the Easy Apply control
               // outside the legacy detail-pane containers. The matched
               // control is already a button on the trusted job page, so use
               // it as the modal trigger rather than declaring a false dead end.
               console.log("    [easy-apply] clicking matched job-page control");
-              await el.click({ timeout: 5000 });
+              if (!(await clickTriggerControl(el))) throw new Error("easy-apply trigger did not respond");
             }
           } else {
-            await el.click({ timeout: 5000 });
+            if (!(await clickTriggerControl(el))) throw new Error("apply trigger did not respond");
           }
           await page.waitForTimeout(1500);
         } catch (error) {
@@ -1406,6 +1422,112 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
   return { clicked: false, blocked: false, finalAction: false, missingState };
 }
 
+/**
+ * List visible required inputs that are still empty. A disabled final control
+ * is almost always caused by one of these, and the operator needs to know
+ * which answers only the candidate can give.
+ */
+async function describeMissingRequiredFields(page) {
+  if (!page || typeof page.evaluate !== "function") return [];
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const out = [];
+    document.querySelectorAll("input, select, textarea").filter(visible).forEach((el) => {
+      const type = String(el.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "file", "checkbox", "radio"].includes(type)) return;
+      const required = el.required
+        || el.getAttribute("aria-required") === "true"
+        || /\brequired\b/i.test(String(el.className || ""));
+      if (required && !String(el.value || "").trim()) {
+        out.push(String(el.getAttribute("aria-label") || el.name || el.id || el.placeholder || type).slice(0, 40));
+      }
+    });
+    return [...new Set(out)].slice(0, 8);
+  }).catch(() => []);
+}
+
+/**
+ * Click an intermediate Apply/modal trigger. These controls are frequently
+ * below the fold or briefly covered by a sticky header, so scroll first, allow
+ * a longer budget, and retry once through the overlay. Triggers are never
+ * final submissions, so this stays on the plain click path.
+ */
+async function clickTriggerControl(el) {
+  await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+  try {
+    await el.click({ timeout: 12000 });
+    return true;
+  } catch {
+    await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    try {
+      await el.click({ timeout: 8000, force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * Walk a multi-step application form (Continue/Next -> ... -> Submit) for
+ * portals that expose no single visible submit control. Intermediate steps are
+ * clicked directly; a step whose label states submission intent goes through
+ * the normal final-action guard instead. Returns a `stopped` reason rather than
+ * throwing so the caller decides the recorded outcome.
+ */
+async function advanceMultiStepFlow(page, {
+  ats, navBoundary, profile, job, finalGuard, maxSteps = 6, tag = "flow",
+} = {}) {
+  const navSelector = [
+    "button:has-text('Continue')",
+    "button:has-text('Next')",
+    "button:has-text('Proceed')",
+    "[role='button']:has-text('Continue')",
+    "[role='button']:has-text('Next')",
+  ].join(", ");
+  for (let step = 0; step < maxSteps; step++) {
+    if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) return { stopped: "redirect" };
+    await fillCommonFields(page, ats, profile, job, navBoundary);
+    const next = page.locator(navSelector).first();
+    if ((await next.count()) === 0) return { stopped: "no-navigation" };
+    const label = (((await next.innerText().catch(() => "")) || "")
+      || (await next.getAttribute("aria-label").catch(() => ""))
+      || (await next.getAttribute("value").catch(() => ""))).trim().slice(0, 60);
+    // A navigation control must either be an explicit intermediate step or
+    // state submission intent. Anything else is left untouched.
+    if (!intermediateActionLabel(label) && !isSubmissionControlLabel(label)) {
+      console.log(`  [${tag}] step ${step + 1}: refusing to click non-navigation control ("${label || "no label"})`);
+      return { stopped: "non-navigation-label" };
+    }
+    if (await next.isDisabled().catch(() => true)) {
+      console.log(`  [${tag}] step ${step + 1}: "${label}" disabled — a required input is missing`);
+      return { stopped: "disabled" };
+    }
+    if (!intermediateActionLabel(label)) {
+      const finalClick = await clickFinalControl(page, next, label, finalGuard);
+      if (finalClick.captcha) return { stopped: "captcha" };
+      if (!finalClick.clicked) {
+        return { stopped: finalGuardAction(finalClick) || (finalClick.allowed ? "needs-verification" : "needs-review") };
+      }
+      await page.waitForTimeout(3000);
+      return { stopped: "submitted" };
+    }
+    console.log(`  [${tag}] step ${step + 1}: clicking "${label}"`);
+    await next.scrollIntoViewIfNeeded().catch(() => {});
+    await next.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+    const confirmed = await page.evaluate(() =>
+      /application submitted|you applied|application received|thank you for applying|successfully applied/i.test(document.body?.innerText || "")
+    ).catch(() => false);
+    if (confirmed) return { stopped: "confirmed" };
+  }
+  return { stopped: "max-steps" };
+}
+
 // Every final control goes through this one guard. A live run without --auto
 // may fill and advance intermediate steps, but it must never click a final
 // application action on behalf of the user.
@@ -1416,6 +1538,11 @@ async function checkFinalActionGuards(options = {}) {
   const auto = guard.auto ?? AUTO;
   if (!finalSubmissionAllowed({ dryRun, auto })) {
     return { allowed: false, reason: "auto-required" };
+  }
+  // Never submit an application that would carry invented contact details.
+  const missingContact = missingContactFields(guard.profile);
+  if (guard.profile && missingContact.length) {
+    return { allowed: false, reason: "profile-incomplete", missing: missingContact };
   }
   if (typeof guard.page?.url === "function") {
     let currentUrl = "";
@@ -1464,6 +1591,8 @@ async function clickFinalControl(page, locator, label, options = {}) {
   if (!first.allowed) {
     if (first.reason === "auto-required") {
       console.log(`  [human-in-loop] final ${label} requires --auto; leaving it for the operator`);
+    } else if (first.reason === "profile-incomplete") {
+      console.log(`  [contact-block] not submitting "${label}": profile is missing ${(first.missing || []).join(", ")}`);
     } else {
       console.log(`  [final-block] ${label}: ${first.reason}`);
     }
@@ -1479,7 +1608,11 @@ async function clickFinalControl(page, locator, label, options = {}) {
     return { allowed: true, clicked: false };
   }
   const disabled = await locator.isDisabled().catch(() => true);
-  if (disabled) return { allowed: true, clicked: false, disabled: true };
+  if (disabled) {
+    const missing = await describeMissingRequiredFields(page);
+    console.log(`  [final-disabled] "${label}" is disabled${missing.length ? ` — unanswered required fields: ${missing.join(", ")}` : ""}`);
+    return { allowed: true, clicked: false, disabled: true, missing };
+  }
 
   // Re-read both global pause and the exact claim after CAPTCHA/field work and
   // immediately before the final click. This closes the mid-run pause race.
@@ -1560,7 +1693,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     return false;
   }
   const candidate = profile.candidate || {};
-  const fullName = candidate.name || "Test User";
+  const fullName = candidate.name || "";
   const [firstName, ...rest] = fullName.split(" ");
   const lastName = rest.join(" ") || "User";
   const sels = ATS_SELECTORS[ats]?.fields || ATS_SELECTORS.generic.fields;
@@ -1569,8 +1702,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   if (sels.firstName) await tryFill(page, sels.firstName, firstName);
   if (sels.lastName)  await tryFill(page, sels.lastName, lastName);
   if (sels.name)      await tryFill(page, sels.name, fullName);
-  if (sels.email)     await tryFill(page, sels.email, candidate.email || "test@example.com");
-  if (sels.phone)     await tryFill(page, sels.phone, candidate.phone || "9999999999");
+  if (sels.email)     await tryFill(page, sels.email, candidate.email || "");
+  // Never invent a phone number for a live application. Leave the field empty
+  // and let the final-action guard refuse the submit instead.
+  if (sels.phone)     await tryFill(page, sels.phone, candidate.phone || "");
 
   // LinkedIn / website if present
   await tryFill(page, ['input[name*="linkedin"]', 'input[autocomplete="url"]'], candidate.linkedin || "");
@@ -1761,8 +1896,20 @@ function finalGuardAction(result) {
   if (["send-paused", "db-missing", "settings-unavailable", "pause-query-failed"].includes(reason)) return "send-paused";
   if (["claim-lost", "claim-required", "claim-blocked"].includes(reason)) return "claim-blocked";
   if (reason === "redirect-blocked") return "redirect-blocked";
+  if (reason === "profile-incomplete") return "profile-incomplete";
   if (result?.error) return "needs-verification";
   return null;
+}
+
+// Contact details are factual claims to an employer. A missing value must stop
+// the submission rather than be replaced by a placeholder, because a recruiter
+// cannot reach a fabricated number and the application is misrepresenting the
+// candidate.
+const REQUIRED_CONTACT_FIELDS = ["name", "email", "phone"];
+
+function missingContactFields(profile) {
+  const candidate = profile?.candidate || {};
+  return REQUIRED_CONTACT_FIELDS.filter((field) => !String(candidate[field] || "").trim());
 }
 
 async function processJob(browser, job, profile, runtime = {}) {
@@ -1810,7 +1957,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       claimToken: prepared.claimToken || job?._claimToken || null,
     };
   }
-  const finalGuard = { ...(prepared.guard || {}), navigationBoundary: navBoundary };
+  const finalGuard = { ...(prepared.guard || {}), navigationBoundary: navBoundary, profile };
   if (!DRY_RUN) {
     const beforeOpen = finalGuard.jobId
       ? await readFinalActionState(finalGuard.dbPath, finalGuard.jobId, finalGuard.claimToken)
@@ -2253,7 +2400,19 @@ async function processJob(browser, job, profile, runtime = {}) {
         return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
       }
     }
-    await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary);
+    const uploaded = await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary);
+
+    // A resume upload usually triggers a server-side parse that reveals the
+    // real form only minutes later (e.g. Shine "Reading Your Resume"). Fields
+    // were filled before the form existed, so wait for it and fill again —
+    // otherwise required inputs such as phone stay empty and the final action
+    // remains disabled.
+    if (uploaded) {
+      const formWaitMs = Number.parseInt(process.env.PULSEOPS_FORM_WAIT_MS || "150000", 10);
+      if (await waitForApplicationSurface(page, Number.isFinite(formWaitMs) ? formWaitMs : 150000)) {
+        await fillCommonFields(page, ats, profile, job, navBoundary);
+      }
+    }
 
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(()=>{});
     console.log(`  [preview] screenshot → ${path.relative(ROOT, screenshotPath)}`);
@@ -2662,6 +2821,10 @@ async function processJob(browser, job, profile, runtime = {}) {
         console.log(`  [indeed] step ${step + 1}: clicking "${label}"`);
         await next.scrollIntoViewIfNeeded().catch(() => {});
         let clicked = false;
+        if (!intermediateActionLabel(label) && !isSubmissionControlLabel(label)) {
+          console.log(`  [indeed] step ${step + 1}: refusing to click non-submit control ("${label}")`);
+          break;
+        }
         if (!intermediateActionLabel(label)) {
           const finalClick = await clickFinalControl(page, next, label, finalGuard);
           if (finalClick.captcha) {
@@ -2702,6 +2865,29 @@ async function processJob(browser, job, profile, runtime = {}) {
         console.log(`  [easy-apply] step ${step + 1}: clicking "${label}"`);
         await next.click({ timeout: 5000 }).catch(() => {});
         await page.waitForTimeout(2000);
+      }
+    }
+
+    // Most portals (Shine, Naukri-free aggregators, Greenhouse mirrors, custom
+    // ATS front-ends) drive a multi-step form with no single submit control.
+    // Walk it instead of stalling at "no Submit button detected".
+    if (!DRY_RUN && !["linkedin", "naukri", "indeed"].includes(ats)) {
+      const flow = await advanceMultiStepFlow(page, { ats, navBoundary, profile, job, finalGuard, tag: ats });
+      if (flow.stopped === "redirect" || flow.stopped === "captcha") {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: flow.stopped === "captcha" ? "captcha-blocked" : "redirect-blocked", pdf: resumePdf };
+      }
+      if (flow.stopped === "submitted" || flow.stopped === "confirmed") {
+        const ok = await page.evaluate(() =>
+          /application submitted|you applied|application received|thank you for applying|successfully applied/i.test(document.body?.innerText || "")
+        ).catch(() => false);
+        await page.screenshot({ path: screenshotPath.replace("preview", "submitted"), fullPage: true }).catch(() => {});
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: ok ? "verified" : "needs-verification", pdf: resumePdf };
+      }
+      if (["send-paused", "claim-blocked", "claim-lost", "needs-review", "needs-verification", "db-missing", "profile-incomplete"].includes(flow.stopped)) {
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: flow.stopped, pdf: resumePdf };
       }
     }
 
@@ -2759,6 +2945,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     console.log(`\n  [AUTO] --auto flag: submitting without prompt for ${job.company}`);
     let clicked = false;
     let clickError = false;
+    let blockedFields = [];
     for (const sel of submitSels) {
       const el = page.locator(sel).first();
       if ((await el.count()) > 0) {
@@ -2781,6 +2968,9 @@ async function processJob(browser, job, profile, runtime = {}) {
           return { company: job.company, title: job.title, link: url, ats, action: guardAction, pdf: resumePdf };
         }
         if (finalClick.error) clickError = true;
+        if (finalClick.disabled && Array.isArray(finalClick.missing)) {
+          blockedFields = [...new Set([...blockedFields, ...finalClick.missing])];
+        }
         if (finalClick.clicked) {
           clicked = true;
           await page.waitForTimeout(3000);
@@ -2793,7 +2983,11 @@ async function processJob(browser, job, profile, runtime = {}) {
         }
       }
     }
-    if (!clicked) console.log(`  [warn] no clickable final Submit found — recording NeedsReview`);
+    if (!clicked) {
+      console.log(blockedFields.length
+        ? `  [needs-candidate] final action is blocked on candidate-only answers: ${blockedFields.join(", ")} — recording NeedsReview`
+        : "  [warn] no clickable final Submit found — recording NeedsReview");
+    }
     // Verify before claiming: a click alone is never treated as Applied.
     const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats) && await hasVisibleAppliedBadge(page);
     const confirmed = clicked && (serverApplied || await page.evaluate(() =>
@@ -3061,7 +3255,7 @@ function statusForBrowserResult(result) {
   const action = String(result?.action || "");
   if (action === "verified" || (action === "submitted" && result?.confirmed === true)) return "Verified";
   if (action === "submitted" || ["unverified", "chat-incomplete", "needs-verification", "no-submit", "not-submitted", "click-failed", "error"].includes(action)) return "NeedsVerification";
-  if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled"].includes(action)) return "NeedsReview";
+  if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled", "profile-incomplete"].includes(action)) return "NeedsReview";
   if (action === "dead-link" || action === "invalid-listing") return "Expired";
   // A pause/claim miss is deliberately not written.  The existing Applying
   // marker remains recoverable instead of being downgraded to Evaluated.
@@ -3334,6 +3528,8 @@ export {
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
+  advanceMultiStepFlow,
+  missingContactFields,
   isAllowedAssetRequest,
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
