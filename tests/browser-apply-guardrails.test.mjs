@@ -27,6 +27,8 @@ import {
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
+  isWellfoundJobListing,
+  hasSimulationFragment,
   matchChipOption,
   matchSalaryOption,
   advanceMultiStepFlow,
@@ -235,6 +237,25 @@ test("a stated salary band maps onto the offered band that contains it", () => {
   assert.equal(matchSalaryOption(offered, ""), null);
   assert.equal(matchSalaryOption(offered, undefined), null);
   assert.equal(matchSalaryOption([], "4-5 LPA"), null);
+});
+
+test("Wellfound search pages are rejected but real postings are allowed", () => {
+  // Regression: a search page's "Applied" chip belonged to a different posting
+  // and was recorded as a verified submission.
+  assert.equal(isWellfoundJobListing("https://wellfound.com/india/role/r/backend-engineer"), false);
+  assert.equal(isWellfoundJobListing("https://wellfound.com/india/role/intern/backend-engineer"), false);
+  assert.equal(isWellfoundJobListing("https://wellfound.com/jobs/3405119-associate-software-engineer"), true);
+  assert.equal(isWellfoundJobListing("not-a-url"), false);
+});
+
+test("simulation fragments are refused before any submission path", () => {
+  assert.equal(hasSimulationFragment("https://wellfound.com/india/role/r/backend-engineer#mock-2"), true);
+  assert.equal(hasSimulationFragment("https://wellfound.com/jobs/123-x#simulated"), true);
+  assert.equal(hasSimulationFragment("https://wellfound.com/jobs/3405119-associate-software-engineer"), false);
+  assert.equal(hasSimulationFragment("https://boards.greenhouse.io/acme/jobs/1#mock"), true);
+  // Real anchors must not be mistaken for simulation markers.
+  assert.equal(hasSimulationFragment("https://example.com/jobs/1#testimonials"), false);
+  assert.equal(hasSimulationFragment("https://example.com/jobs/1#apply-now"), false);
 });
 
 test("Lever company boards are rejected but role listings are allowed", () => {

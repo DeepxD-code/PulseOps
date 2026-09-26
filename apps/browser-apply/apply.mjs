@@ -356,6 +356,27 @@ function isLeverJobListing(url) {
   }
 }
 
+// wellfound.com/<country>/role/<...> is a search page. A real posting lives
+// under /jobs/<id>-<slug>.
+function isWellfoundJobListing(url) {
+  try {
+    return /\/jobs\/\d+/i.test(new URL(String(url || "")).pathname);
+  } catch {
+    return false;
+  }
+}
+
+// A "#mock-N" style fragment marks a simulated row that must never be applied
+// to. The whole fragment must be the marker so real anchors like
+// "#testimonials" are not mistaken for one.
+function hasSimulationFragment(url) {
+  const raw = String(url || "");
+  const index = raw.indexOf("#");
+  if (index < 0) return false;
+  const hash = raw.slice(index + 1).trim();
+  return /^(?:mock|sim\w*|fake|fixture|demo|test)(?:[-_].*)?$/i.test(hash);
+}
+
 // Distinguish "closed", "already applied", and "apply on the company site" from
 // a genuinely missing control, so the run records an accurate outcome instead
 // of a blanket NeedsReview.
@@ -2150,11 +2171,17 @@ async function hasVisibleAppliedBadge(page) {
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
     };
     const nodes = [...document.querySelectorAll("button, a, [role='button'], [role='status'], span, div")];
-    if (nodes.some((el) => visible(el) && statusText.test((el.innerText || el.textContent || "").trim().replace(/\s+/g, " ")))) return true;
     const body = (document.body?.innerText || "").replace(/\s+/g, " ");
-    return (/you (?:already )?applied|application (?:submitted|sent)|applied successfully|applied on/i.test(body)
-      && !/apply now|apply for this job|not applied/i.test(body))
-      || nodes.some((el) => visible(el) && statusAria.test((el.getAttribute("aria-label") || "").trim()));
+    const strong = /you (?:already )?applied|application (?:submitted|sent)|applied successfully|applied on/i.test(body)
+      && !/apply now|apply for this job|not applied/i.test(body);
+    // A search or results page shows many postings. A bare "Applied" chip
+    // there belongs to a different job and must never mark this row verified.
+    const jobLinks = [...document.querySelectorAll('a[href*="/jobs/"], a[href*="/role/"], a[href*="/company/"]')]
+      .filter(visible).length;
+    const multiJob = jobLinks > 1;
+    if (multiJob && !strong) return false;
+    if (!multiJob && nodes.some((el) => visible(el) && statusText.test((el.innerText || el.textContent || "").trim().replace(/\s+/g, " ")))) return true;
+    return strong || nodes.some((el) => visible(el) && statusAria.test((el.getAttribute("aria-label") || "").trim()));
   }).catch(() => false);
   if (pageHit) return true;
   for (const frame of page.frames?.() || []) {
@@ -2427,6 +2454,18 @@ async function processJob(browser, job, profile, runtime = {}) {
   if (ats === "lever" && !isLeverJobListing(url)) {
     console.log("  [invalid] Lever company board URL is not an application listing — skipping");
     return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
+  // Wellfound search/category pages are not listings either.
+  if (ats === "wellfound" && !isWellfoundJobListing(url)) {
+    console.log("  [invalid] Wellfound search URL is not an application listing — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "invalid-listing", pdf: resumePdf };
+  }
+
+  // Simulated rows must never reach a live submission path.
+  if (hasSimulationFragment(url)) {
+    console.log("  [invalid] URL carries a simulation marker — skipping");
+    return { company: job.company, title: job.title, link: url, ats, action: "simulation-blocked", pdf: resumePdf };
   }
 
   if (!isAllowedNavigationUrl(url, ats, navBoundary)) {
@@ -3993,6 +4032,8 @@ export {
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
+  isWellfoundJobListing,
+  hasSimulationFragment,
   matchChipOption,
   matchSalaryOption,
   answerCandidateQuestions,
