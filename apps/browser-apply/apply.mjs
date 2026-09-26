@@ -45,6 +45,12 @@ const HEADED = process.argv.includes("--headed");
 // Operator-supplied SMS verification. Never automated: the human types the code
 // they received on their own phone.
 const ENTER_OTP = process.argv.includes("--enter-otp");
+// Headed runs can simply pause and let the operator finish in the browser.
+const OTP_PAUSE = process.argv.includes("--otp-pause");
+const OTP_PAUSE_MS = (() => {
+  const parsed = Number.parseInt(process.env.PULSEOPS_OTP_PAUSE_MS || "240000", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 240000;
+})();
 const AUTO = process.argv.includes("--auto");
 const LOAD_EMAIL_QUEUE = process.argv.includes("--email-queue");
 const INCLUDE_INDEED = process.argv.includes("--include-indeed");
@@ -1744,13 +1750,37 @@ async function answerCandidateQuestions(page, profile) {
  * from anywhere else. Returns the submitted state so the caller can verify.
  */
 async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
-  if (!ENTER_OTP) return { state: "not-requested" };
-  const prompt = page.locator(
-    'text=/verification code|enter.*otp|one.time password/i, [class*="otp"], [class*="OTP"]',
-  ).first();
-  if (!(await prompt.count())) return { state: "not-present" };
+  if (!ENTER_OTP && !OTP_PAUSE) return { state: "not-requested" };
+  // Gate on page text rather than fragile class names: the dialog copy is the
+  // reliable signal that a code is actually being requested.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const asking = await page.evaluate(() =>
+      /verification code|enter otp|one[-\s]?time password|\botp\b|code (?:we|we've) sent/i.test(document.body?.innerText || "")
+    ).catch(() => false);
+    if (asking) break;
+    if (attempt === 9) {
+      console.log("  [otp] no code prompt detected — leaving for manual completion");
+      return { state: "not-present" };
+    }
+    await page.waitForTimeout(1000);
+  }
 
   console.log("\n  [otp] This portal sent a verification code to your phone.");
+  if (OTP_PAUSE) {
+    // The browser is headed, so let the operator finish in the visible window
+    // and poll for the result rather than reading a code out of thin air.
+    console.log(`  [otp] complete the code in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
+    const deadline = Date.now() + OTP_PAUSE_MS;
+    while (Date.now() < deadline) {
+      const done = await page.evaluate(() =>
+        /application submitted|applied successfully|thank you for applying|you applied|application received/i.test(document.body?.innerText || "")
+      ).catch(() => false);
+      if (done) return { state: "submitted" };
+      await page.waitForTimeout(2000);
+    }
+    console.log("  [otp] no confirmation appeared — leaving for manual completion");
+    return { state: "unconfirmed" };
+  }
   process.stdout.write("  [otp] Enter the code you received (blank to skip): ");
   const code = await readLineFromStdin(timeoutMs);
   const digits = String(code || "").replace(/\D/g, "");
@@ -1759,14 +1789,27 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
     return { state: "skipped" };
   }
 
-  const boxes = page.locator('input[inputmode="numeric"], input[autocomplete="one-time-code"]');
-  const count = await boxes.count().catch(() => 0);
-  if (count >= digits.length) {
+  // Prefer explicit one-time-code inputs; otherwise scope to the dialog so the
+  // underlying form's phone field is never targeted.
+  const explicit = page.locator('input[autocomplete="one-time-code"]');
+  let target = explicit;
+  if ((await explicit.count().catch(() => 0)) < digits.length) {
+    const dialog = page.locator('[role="dialog"], [class*="modal"], [class*="Modal"]').last();
+    const scoped = (await dialog.count().catch(() => 0))
+      ? dialog.locator("input")
+      : page.locator('input[inputmode="numeric"]');
+    if ((await scoped.count().catch(() => 0)) >= digits.length) target = scoped;
+  }
+  const available = await target.count().catch(() => 0);
+  if (available >= digits.length) {
     for (let i = 0; i < digits.length; i++) {
-      await boxes.nth(i).fill(digits[i], { timeout: 3000 }).catch(() => {});
+      await target.nth(i).fill(digits[i], { timeout: 3000 }).catch(() => {});
     }
+  } else if (available === 1) {
+    await target.first().fill(digits, { timeout: 3000 }).catch(() => {});
   } else {
-    await boxes.first().fill(digits, { timeout: 3000 }).catch(() => {});
+    console.log("  [otp] could not locate the code boxes — leaving for manual completion");
+    return { state: "no-inputs" };
   }
   const confirm = page.locator(
     'button:has-text("Verify & Submit"), button:has-text("Verify and Submit"), button:has-text("Verify"), button:has-text("Submit")',
