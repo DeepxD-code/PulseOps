@@ -2547,7 +2547,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     // Dead-listing guard: never attempt submits on 404/expired job pages
     const deadHit = await page.evaluate(() => {
       const t = (document.body?.innerText || "").slice(0, 2000);
-      return /404|page not found|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i.test(t);
+      return /404|page not found|unable to load the page|may not be valid|posting has been removed|job (?:posting )?(?:has been|was) removed|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i.test(t);
     }).catch(() => false);
     if (deadHit && !(await hasCaptcha(page))) {
       console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");

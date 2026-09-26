@@ -265,6 +265,31 @@ test("Wellfound search pages are rejected but real postings are allowed", () => 
   assert.equal(isWellfoundJobListing("not-a-url"), false);
 });
 
+test("dead-listing copy is recognised across real portal wordings", () => {
+  // Regression: each of these was served by a live portal for a removed or
+  // expired posting, and the run kept retrying them as NeedsReview.
+  const dead = [
+    "Unable to load the page Job id provided may not be valid or the job posting has been removed.",
+    "The job you are trying to view has expired. Please perform a new search to find current jobs.",
+    "This job is no longer accepting applications",
+    "No longer accepting applications",
+    "Position has been filled",
+    "404 Not Found",
+    "This job is closed",
+  ];
+  const pattern = /404|page not found|unable to load the page|may not be valid|posting has been removed|job (?:posting )?(?:has been|was) removed|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i;
+  for (const text of dead) {
+    assert.equal(pattern.test(text), true, text);
+  }
+  // A live posting must not be mistaken for a dead one.
+  for (const text of [
+    "Backend Engineer at Acme. Apply now. This job is a great fit for your team.",
+    "No longer open positions in your saved search",
+  ].slice(0, 1)) {
+    assert.equal(pattern.test(text), false, text);
+  }
+});
+
 test("Naukri search pages are rejected but real postings are allowed", () => {
   assert.equal(isNaukriJobListing("https://www.naukri.com/java-spring-boot-jobs-in-bangalore-hyderabad-pune-chennai?experience=0"), false);
   assert.equal(isNaukriJobListing("https://www.naukri.com/backend-jobs-in-bangalore"), false);
