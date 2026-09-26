@@ -1507,6 +1507,233 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
   return { clicked: false, blocked: false, finalAction: false, missingState };
 }
 
+// Chip-style questions expose fixed option sets. Map the candidate's stated
+// preference onto the nearest offered option instead of inventing an answer.
+function matchChipOption(options, desired) {
+  const wanted = String(desired || "").trim().toLowerCase();
+  if (!wanted || !Array.isArray(options) || !options.length) return null;
+  const days = Number.parseInt(wanted, 10);
+  const toDays = (text) => {
+    const t = String(text || "").trim().toLowerCase();
+    if (/immediate/.test(t)) return 0;
+    const d = t.match(/(\d+)\s*day/);
+    if (d) return Number.parseInt(d[1], 10);
+    const m = t.match(/(\d+)\s*month/);
+    if (m) return Number.parseInt(m[1], 10) * 30;
+    if (/\b1\s*month\b/.test(t)) return 30;
+    return null;
+  };
+  if (Number.isFinite(days)) {
+    let best = null;
+    let bestDelta = Infinity;
+    for (const option of options) {
+      const value = toDays(option);
+      if (value === null) continue;
+      const delta = Math.abs(value - days);
+      if (delta < bestDelta) { bestDelta = delta; best = option; }
+    }
+    if (best) return best;
+  }
+  const exact = options.find((o) => String(o).trim().toLowerCase() === wanted);
+  return exact || null;
+}
+
+// Salary bands are ranges, so pick the offered band that actually contains the
+// stated expectation rather than the nearest label.
+function matchSalaryOption(options, desired) {
+  const nums = String(desired || "").match(/\d+(?:\.\d+)?/g);
+  if (!nums || !Array.isArray(options) || !options.length) return null;
+  const want = nums.map(Number);
+  // A stated range is represented by its midpoint so that "4 to 5" lands in
+  // 4-6 rather than only touching the upper bound of 2-4.
+  const target = want.length > 1 ? (Math.min(...want) + Math.max(...want)) / 2 : want[0];
+  let containing = null;
+  let closest = null;
+  let closestDelta = Infinity;
+  for (const option of options) {
+    const values = String(option).match(/\d+(?:\.\d+)?/g);
+    if (!values) continue;
+    const v = values.map(Number);
+    const optLow = Math.min(...v);
+    const optHigh = v.length > 1 ? Math.max(...v) : optLow;
+    if (optLow <= target && optHigh >= target) { containing = option; break; }
+    const delta = target < optLow ? optLow - target : target - optHigh;
+    if (delta < closestDelta) { closestDelta = delta; closest = option; }
+  }
+  return containing || closest;
+}
+
+/**
+ * Answer the candidate-specific questions that gate a disabled final action
+ * (Shine: Current Location, Notice Period, Salary). Only values the candidate
+ * actually supplied are used; anything unknown is left for a human.
+ */
+async function answerCandidateQuestions(page, profile) {
+  const candidate = profile?.candidate || {};
+  const answered = [];
+  const unanswered = [];
+
+  const location = String(candidate.current_location || "").trim();
+  if (location) {
+    const box = page.locator(
+      'div[role="combobox"][aria-label*="ocation" i], input[aria-label*="ocation" i], input[placeholder*="ocation" i]',
+    ).first();
+    if (await box.count()) {
+      await box.click({ timeout: 4000 }).catch(() => {});
+      await box.fill(location, { timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      // Option labels live in .combobox-input-option-label. Pick the closest
+      // match to what was typed rather than blindly taking the first row.
+      const options = await page.locator(".combobox-input-option-label").allInnerTexts().catch(() => []);
+      const wanted = location.toLowerCase().split(",")[0].trim();
+      const best = options.find((o) => o.trim().toLowerCase() === wanted)
+        || options.find((o) => o.toLowerCase().includes(wanted))
+        || options[0];
+      if (best) {
+        await page.locator(".combobox-input-option-label").filter({ hasText: best }).first()
+          .click({ timeout: 4000 }).catch(() => {});
+        console.log(`    [answer] current location → "${best.trim()}"`);
+        answered.push("current_location");
+      } else {
+        unanswered.push("current_location");
+      }
+      await page.waitForTimeout(600);
+    }
+  }
+
+  // Chip groups: pick the offered option closest to the stated preference.
+  const groups = await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+    };
+    const out = [];
+    [...document.querySelectorAll("div")].filter(visible).forEach((el) => {
+      const chips = [...el.querySelectorAll("button")].filter(visible);
+      if (chips.length < 2 || chips.length > 8) return;
+      const parentChips = el.parentElement
+        ? [...el.parentElement.querySelectorAll("button")].filter(visible).length : 0;
+      if (parentChips === chips.length) return;
+      out.push(chips.map((c) => ((c.innerText || "") || "").trim()).filter(Boolean));
+    });
+    return out;
+  }).catch(() => []);
+
+  for (const labels of groups) {
+    const joined = labels.join(" ").toLowerCase();
+    if (/notice|join|days?|months?/.test(joined) && candidate.notice_period) {
+      const pick = matchChipOption(labels, candidate.notice_period);
+      if (pick) {
+        const chip = page.locator("button").filter({ hasText: new RegExp(`^\\s*${pick.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i") }).first();
+        if (await chip.count()) {
+          await chip.click({ timeout: 4000 }).catch(() => {});
+          console.log(`    [answer] notice period → "${pick}"`);
+          answered.push("notice_period");
+          continue;
+        }
+      }
+    }
+    if (/salary|ctc|compensation|lpa|lakh/.test(joined)) {
+      unanswered.push(`salary (offered: ${labels.join(" / ")})`);
+      continue;
+    }
+    if (/experience|exp\b/.test(joined)) {
+      unanswered.push(`experience (offered: ${labels.join(" / ")})`);
+    }
+  }
+
+  // Native selects and custom comboboxes both gate the final action.
+  const selects = await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+    };
+    return [...document.querySelectorAll("select")].filter(visible).map((el) => ({
+      kind: "select",
+      id: el.id || "",
+      name: el.name || "",
+      label: (el.getAttribute("aria-label") || el.id || el.name || "").replace(/\s+/g, " ").trim().slice(0, 40),
+      options: [...el.options].map((o) => String(o.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean),
+    }));
+  }).catch(() => []);
+
+  for (const select of selects) {
+    const hint = `${select.id} ${select.name} ${select.label}`.toLowerCase();
+    if (!/salary|ctc|compensation|lpa|lakh|year|month/.test(hint)) continue;
+    let pick = null;
+    if (/salary|ctc|compensation|lpa|lakh/.test(hint)) {
+      pick = matchSalaryOption(select.options, candidate.expected_salary);
+    } else if (/year/.test(hint)) {
+      const years = Number.parseInt(String(candidate.experience_years ?? ""), 10);
+      if (Number.isFinite(years)) {
+        pick = select.options.find((o) => new RegExp(`^\\s*${years}\\s+year`, "i").test(o)) || null;
+      }
+    }
+    if (!pick) {
+      unanswered.push(`${hint.split(" ")[0] || "field"} (offered: ${select.options.join(" / ")})`);
+      continue;
+    }
+    await page.locator("select").filter({ has: page.locator(`option:text-is("${pick}")`) }).first()
+      .selectOption({ label: pick }).catch(() => {});
+    console.log(`    [answer] ${hint.split(" ")[0] || "field"} → "${pick}"`);
+    answered.push(hint.split(" ")[0] || "field");
+  }
+
+  // Custom dropdowns (Shine) render options as .select-option-label inside
+  // li[role="option"]; the trigger is identified by the text it currently shows.
+  const DROPDOWN_OPTION_SELECTOR = '.select-option-label, li[role="option"], .combobox-input-option-label';
+  const dropdowns = await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+    };
+    const found = [];
+    [...document.querySelectorAll("div,button,span")].filter(visible).forEach((el) => {
+      const text = ((el.textContent || "") || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 40) return;
+      if (/^select current salary$/i.test(text)) found.push({ text, kind: "salary" });
+      else if (/^\d+\s+years?$/i.test(text)) found.push({ text, kind: "experience years" });
+      else if (/^\d+\s+months?$/i.test(text)) found.push({ text, kind: "experience months" });
+    });
+    return [...new Map(found.map((f) => [f.kind, f])).values()];
+  }).catch(() => []);
+
+  for (const dropdown of dropdowns) {
+    const kind = dropdown.kind;
+    const years = Number.parseInt(String(candidate.experience_years ?? ""), 10);
+    const matcher = (options) => {
+      if (kind === "salary") return matchSalaryOption(options, candidate.expected_salary);
+      if (kind === "experience years") {
+        if (!Number.isFinite(years)) return null;
+        return options.find((o) => new RegExp(`^\\s*${years}\\s+year`, "i").test(o)) || null;
+      }
+      return options.find((o) => /^\s*0\s+month/i.test(o)) || null;
+    };
+    const trigger = page.getByText(dropdown.text, { exact: true }).first();
+    if (!(await trigger.count())) continue;
+    await trigger.click({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    const options = (await page.locator(DROPDOWN_OPTION_SELECTOR).allInnerTexts().catch(() => []))
+      .map((o) => o.trim()).filter(Boolean);
+    const pick = matcher(options);
+    if (!pick) {
+      unanswered.push(`${kind} (offered: ${options.join(" / ") || "none"})`);
+      await page.keyboard.press("Escape").catch(() => {});
+      continue;
+    }
+    await page.locator(DROPDOWN_OPTION_SELECTOR).filter({ hasText: pick }).first()
+      .click({ timeout: 4000 }).catch(() => {});
+    console.log(`    [answer] ${kind} → "${pick}"`);
+    answered.push(kind);
+    await page.waitForTimeout(600);
+  }
+
+  return { answered, unanswered };
+}
+
 /**
  * List visible required inputs that are still empty. A disabled final control
  * is almost always caused by one of these, and the operator needs to know
@@ -2508,6 +2735,11 @@ async function processJob(browser, job, profile, runtime = {}) {
       const formWaitMs = Number.parseInt(process.env.PULSEOPS_FORM_WAIT_MS || "150000", 10);
       if (await waitForApplicationSurface(page, Number.isFinite(formWaitMs) ? formWaitMs : 150000)) {
         await fillCommonFields(page, ats, profile, job, navBoundary);
+        // Answer the candidate-only questions that gate a disabled final
+        // action, using only values the candidate actually supplied.
+        const answers = await answerCandidateQuestions(page, profile);
+        if (answers.answered.length) console.log(`    [answer] completed: ${answers.answered.join(", ")}`);
+        if (answers.unanswered.length) console.log(`    [answer] needs a human: ${answers.unanswered.join("; ")}`);
       }
     }
 
@@ -3641,6 +3873,9 @@ export {
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
+  matchChipOption,
+  matchSalaryOption,
+  answerCandidateQuestions,
   advanceMultiStepFlow,
   missingContactFields,
   tryPinExternalApplyOrigin,

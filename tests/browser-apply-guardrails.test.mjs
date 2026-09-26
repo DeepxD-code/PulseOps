@@ -27,6 +27,8 @@ import {
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
+  matchChipOption,
+  matchSalaryOption,
   advanceMultiStepFlow,
   missingContactFields,
   tryPinExternalApplyOrigin,
@@ -208,6 +210,31 @@ test("Greenhouse company boards are rejected but job listings are allowed", () =
   assert.equal(isGreenhouseJobListing("https://job-boards.greenhouse.io/chargebee"), false);
   assert.equal(isGreenhouseJobListing("https://boards.greenhouse.io/freshworks/jobs/4012345"), true);
   assert.equal(isGreenhouseJobListing("not-a-url"), false);
+});
+
+test("a stated notice period maps onto the nearest offered chip, never invented", () => {
+  const offered = ["Immediate Joiner", "15 days", "1 month", "2 months", "2+ months"];
+  // 30 days is not offered; the nearest real option is "1 month".
+  assert.equal(matchChipOption(offered, "30 days"), "1 month");
+  assert.equal(matchChipOption(offered, "15 days"), "15 days");
+  assert.equal(matchChipOption(offered, "Immediate Joiner"), "Immediate Joiner");
+  assert.equal(matchChipOption(offered, "60 days"), "2 months");
+  // No stated preference, no options, or no match must not guess.
+  assert.equal(matchChipOption(offered, ""), null);
+  assert.equal(matchChipOption([], "30 days"), null);
+  assert.equal(matchChipOption(["Select", "Other"], "30 days"), null);
+});
+
+test("a stated salary band maps onto the offered band that contains it", () => {
+  const offered = ["Select Current Salary", "Below 2 LPA", "2-4 LPA", "4-6 LPA", "6-8 LPA", "8+ LPA"];
+  // "4 to 5 lpa" is contained by the 4-6 band.
+  assert.equal(matchSalaryOption(offered, "4 to 5 lpa"), "4-6 LPA");
+  assert.equal(matchSalaryOption(offered, "4-5 LPA"), "4-6 LPA");
+  assert.equal(matchSalaryOption(offered, "3 LPA"), "2-4 LPA");
+  // No stated expectation must not guess a band.
+  assert.equal(matchSalaryOption(offered, ""), null);
+  assert.equal(matchSalaryOption(offered, undefined), null);
+  assert.equal(matchSalaryOption([], "4-5 LPA"), null);
 });
 
 test("Lever company boards are rejected but role listings are allowed", () => {
