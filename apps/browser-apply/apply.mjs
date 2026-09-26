@@ -47,6 +47,9 @@ const HEADED = process.argv.includes("--headed");
 const ENTER_OTP = process.argv.includes("--enter-otp");
 // Headed runs can simply pause and let the operator finish in the browser.
 const OTP_PAUSE = process.argv.includes("--otp-pause");
+// Operator-authorised acceptance of a portal's terms/privacy checkbox. Never on
+// by default: it is a legal agreement, so it is an explicit, logged act.
+const ACCEPT_TERMS = process.argv.includes("--accept-terms");
 const OTP_PAUSE_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_OTP_PAUSE_MS || "240000", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 240000;
@@ -1967,6 +1970,47 @@ async function describeEmptyEntryFields(page) {
 }
 
 /**
+ * Tick required terms/privacy agreement boxes, but only under the explicit
+ * operator flag. Marketing opt-ins and unrelated boxes are never touched, and
+ * every acceptance is logged so the action is auditable.
+ */
+async function acceptRequiredTerms(page) {
+  if (!ACCEPT_TERMS) return [];
+  if (!page || typeof page.evaluate !== "function") return [];
+  const accepted = await page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const agreement = /\b(terms|privacy policy|privacy notice|acceptable use|consent|agree|i understand|i acknowledge)\b/i;
+    const marketing = /\b(newsletter|marketing|promotional|offers|subscribe|product updates|marketing communications)\b/i;
+    const ticked = [];
+    [...document.querySelectorAll('input[type="checkbox"]')].filter(visible).forEach((el) => {
+      if (el.checked) return;
+      const required = el.required
+        || el.getAttribute("aria-required") === "true"
+        || /\brequired\b/i.test(String(el.className || ""));
+      if (!required) return;
+      const label = el.getAttribute("aria-label")
+        || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent)
+        || (el.closest("label")?.textContent)
+        || el.name
+        || "";
+      const text = String(label).replace(/\s+/g, " ").trim();
+      if (!agreement.test(text) || marketing.test(text)) return;
+      el.click();
+      ticked.push(text.slice(0, 70));
+    });
+    return [...new Set(ticked)];
+  }).catch(() => []);
+  for (const text of accepted) {
+    console.log(`  [terms-accepted] ticked under operator authorisation: "${text}"`);
+  }
+  return accepted;
+}
+
+/**
  * List unticked required checkboxes. These are usually legal attestations
  * ("I agree to the Terms of Use"), which the candidate must give themselves, so
  * they are reported rather than clicked.
@@ -2182,6 +2226,10 @@ async function clickFinalControl(page, locator, label, options = {}) {
   if (!locator || (await locator.count().catch(() => 0)) === 0) {
     return { allowed: true, clicked: false };
   }
+  // An operator-authorised terms acceptance must land before the final click,
+  // otherwise required-field validation silently swallows the submission.
+  if (ACCEPT_TERMS) await acceptRequiredTerms(page).catch(() => []);
+
   const disabled = await locator.isDisabled().catch(() => true);
   if (disabled) {
     const missing = await describeMissingRequiredFields(page);
