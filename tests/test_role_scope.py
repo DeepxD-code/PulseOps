@@ -55,6 +55,23 @@ def test_excluded_families_are_rejected_at_stage_1(title):
     assert result.stage == 1
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Backend Developer Intern | Entry Level | Fresher | Node.js, Python",
+        "Node.js Backend Engineer",
+        "Backend Developer (NodeJS)",
+        "Full Stack Engineer (Next.js)",
+    ],
+)
+def test_node_js_web_stack_is_rejected_even_when_the_title_says_backend(title):
+    # Regression: Node.js roles were passing because the title also contained
+    # "Backend", but Node/JS is outside the candidate's language set.
+    assert is_strict_target_role(title) is False
+    assert is_hard_excluded_role(title) is True
+    assert hard_filter({"title": title, "description": ""}, {}).passed is False
+
+
 @pytest.mark.parametrize("title", AMBIGUOUS_BUT_POTENTIALLY_ON_TARGET)
 def test_ambiguous_titles_reach_stage_2_instead_of_being_dropped(title):
     # Regression: dropping every unkeyworded title silently discarded real
@@ -66,6 +83,29 @@ def test_ambiguous_titles_reach_stage_2_instead_of_being_dropped(title):
 @pytest.mark.parametrize("title", EXPLICITLY_ON_TARGET)
 def test_on_target_titles_pass_the_strict_gate(title):
     assert is_strict_target_role(title) is True
+    assert is_hard_excluded_role(title) is False
+    assert hard_filter({"title": title, "description": ""}, {}).passed is True
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "RationalFirst Zero-human Accounting FirmMachine Learning Researcher Full-time",
+        "Research Engineer, Chip Design RL (Reinforcement Learning)San Francisco, CA",
+    ],
+)
+def test_scraped_titles_with_company_joined_to_role_still_match(title):
+    # Regression: scraped titles concatenate company and role, so
+    # "FirmMachine Learning Researcher" has no word boundary before
+    # "machine" and the strict gate used to drop real ML roles.
+    assert is_strict_target_role(title) is True
+
+
+def test_research_titles_without_an_in_domain_keyword_are_deferred_not_dropped():
+    # "Production Model Post-Training" says nothing about the domain in the
+    # title, so Stage 1 must defer it to the Stage 2 model rather than drop it.
+    title = "Research Engineer, Production Model Post-TrainingSan Francisco, CA"
+    assert is_strict_target_role(title) is False
     assert is_hard_excluded_role(title) is False
     assert hard_filter({"title": title, "description": ""}, {}).passed is True
 

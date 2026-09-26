@@ -358,6 +358,34 @@ test("strict role gate excludes full-stack, frontend, Laravel, mobile, and embed
   }
 });
 
+test("strict role gate excludes Node.js roles even when they say backend", () => {
+  for (const title of [
+    "Backend Developer Intern | Entry Level | Fresher | Node.js, Python",
+    "Node.js Backend Engineer",
+    "Backend Developer (NodeJS)",
+    "Full Stack Engineer (Next.js)",
+  ]) {
+    assert.equal(isStrictTargetRole(title), false, title);
+  }
+  // Genuine backend/AI titles in the candidate's stack still pass.
+  for (const title of ["Backend Engineer", "Java Backend Developer", "C++ Backend Engineer"]) {
+    assert.equal(isStrictTargetRole(title), true, title);
+  }
+});
+
+test("scraped titles with the company joined to the role still match", () => {
+  // Regression: "FirmMachine Learning Researcher" has no word boundary
+  // before "machine", so these real ML roles were being dropped.
+  for (const title of [
+    "RationalFirst Zero-human Accounting FirmMachine Learning Researcher Full-time",
+    "Research Engineer, Chip Design RL (Reinforcement Learning)San Francisco, CA",
+  ]) {
+    assert.equal(isStrictTargetRole(title), true, title);
+  }
+  // No in-domain keyword at all: stays out of the browser's PII path.
+  assert.equal(isStrictTargetRole("Research Engineer, Production Model Post-Training"), false);
+});
+
 test("job selection refuses terminal, review, paused, low-score, and Indeed rows", () => {
   for (const status of [
     "Applied", "Sent", "FollowupSent", "Expired", "Skipped", "Verified",

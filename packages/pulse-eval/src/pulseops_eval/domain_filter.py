@@ -77,11 +77,18 @@ _STRICT_ROLE_EXCLUDES = (
     "full stack", "full-stack", "fullstack", "frontend", "front-end",
     "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
     "ios", "embedded", "firmware", "hardware",
+    # The Node/JS web stack is outside the candidate's language set even when
+    # the title also says "backend".
+    "node.js", "nodejs", "node js", "next.js", "nuxt", "express.js",
 )
 _STRICT_ROLE_ALLOWED = re.compile(
-    r"\b(?:backend|back[\s-]end|machine[\s-]+learning|ml|artificial[\s-]+intelligence|"
+    r"\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|"
     r"ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|"
-    r"deep[\s-]+learning|java)\b|\bc\b|c\+\+|c\s*/\s*c\+\+",
+    r"deep[\s-]+learning|java)\b"
+    # Scraped titles concatenate company and role ("FirmMachine Learning
+    # Researcher"), so these two must match without a leading word boundary.
+    r"|machine[\s-]+learning|reinforcement[\s-]+learning"
+    r"|\bc\b|c\+\+|c\s*/\s*c\+\+",
     re.IGNORECASE,
 )
 

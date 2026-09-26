@@ -111,8 +111,11 @@ const STRICT_ROLE_EXCLUDES = [
   "full stack", "full-stack", "fullstack", "frontend", "front-end",
   "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
   "ios", "embedded", "firmware", "hardware",
+  // The Node/JS web stack is outside the candidate's language set even when
+  // the title also says "backend".
+  "node.js", "nodejs", "node js", "next.js", "nuxt", "express.js",
 ];
-const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|machine[\s-]+learning|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java)\b|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
+const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java)\b|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
 
 function isStrictTargetRole(title) {
   const value = String(title || "").trim().toLowerCase().replace(/\s+/g, " ");
