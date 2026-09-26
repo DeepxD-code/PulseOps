@@ -1167,11 +1167,13 @@ async function tryFill(page, selectors, value) {
   // An empty value is a missing fact, not something to write into a form.
   if (!String(value ?? "").trim()) return false;
   for (const sel of selectors) {
-    const el = page.locator(sel).first();
+    // Pages often ship a hidden mobile/desktop duplicate of the same form, so
+    // resolve to the first visible match rather than the first in the DOM.
+    const el = await pickVisible(page.locator(sel));
     if (await el.count() > 0) {
       try {
-        await el.waitFor({ state: "visible", timeout: 2000 });
-        await el.fill(value, { timeout: 2000 });
+        await el.waitFor({ state: "visible", timeout: 2500 });
+        await el.fill(value, { timeout: 2500 });
         console.log(`    [fill] ${sel} → "${value.slice(0,30)}"`);
         return true;
       } catch {}
