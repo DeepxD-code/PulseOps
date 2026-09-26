@@ -1,5 +1,5 @@
 // Verifies the post-submit confirmation wording the portals actually use.
-const pattern = /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|you applied/i;
+const pattern = /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied/i;
 
 const cases = [
   ["Thanks for applying!", true],
@@ -7,9 +7,11 @@ const cases = [
   ["We've received your application for Backend Engineer.", true],
   ["Thank you for applying", true],
   ["Application submitted", true],
+  ["/pages/myshine/job-apply-flow/application-sent?redirectTo=x", true],
   ["Apply now", false],
   ["Backend Engineer at Autter. Apply for this role", false],
   ["No open roles right now", false],
+  ["Application tracking is now open", false],
 ];
 
 let failed = 0;
