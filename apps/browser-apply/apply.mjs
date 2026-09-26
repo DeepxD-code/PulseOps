@@ -1229,6 +1229,11 @@ async function hasCrossOriginFormOrFrame(page, originUrl = null) {
   }, permittedHosts).catch(() => true);
 }
 
+// True once an approved off-site hop has moved us off the originating ATS.
+function onExternalAts(boundary) {
+  return !!(isNavigationBoundary(boundary) && boundary.externalApplyHost);
+}
+
 // has-text matches hidden nodes too, so always resolve to the first *visible*
 // match before reading a label or clicking.
 async function pickVisible(locator) {
@@ -2278,7 +2283,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // After an approved off-site hop the page is a corporate careers site, so the
   // originating ATS field set (e.g. LinkedIn's) no longer describes it. Use the
   // generic set, which covers split first/last name fields.
-  const onExternalHost = !!(isNavigationBoundary(originUrl) && originUrl.externalApplyHost);
+  const onExternalHost = onExternalAts(originUrl);
   const effectiveAts = onExternalHost ? "generic" : ats;
   const sels = ATS_SELECTORS[effectiveAts]?.fields || ATS_SELECTORS.generic.fields;
 
@@ -2710,16 +2715,24 @@ async function processJob(browser, job, profile, runtime = {}) {
     // the originating ATS selectors no longer exist. Re-detect with the
     // generic set (e.g. "Apply for this role"). The hop itself already counts
     // as a click, so this must not depend on that flag.
-    if (!applyNavigation.blocked
-        && isNavigationBoundary(navBoundary) && navBoundary.externalApplyHost) {
+    if (!applyNavigation.blocked && onExternalAts(navBoundary)) {
       const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
       if (retry.clicked) applyNavigation = retry;
     }
-    // The trigger may only scroll to a lazily rendered form, and a cookie
-    // notice can be covering it. Clear the banner and wait for real fields.
+    // Opening the form is racy: the trigger may only scroll to a lazily
+    // rendered section, a cookie notice can cover it, and hydration timing
+    // varies. Retry the trigger and wait for real fields before giving up.
     if (!applyNavigation.blocked) {
-      await dismissConsentBanners(page);
-      await waitForApplicationSurface(page, 20000);
+      let surfaceReady = false;
+      for (let attempt = 1; attempt <= 3 && !surfaceReady; attempt++) {
+        await dismissConsentBanners(page);
+        surfaceReady = await waitForApplicationSurface(page, 12000);
+        if (surfaceReady) break;
+        console.log(`  [form-open] attempt ${attempt}: form not rendered, re-triggering Apply`);
+        const again = await detectAndClickApply(page, onExternalAts(navBoundary) ? "generic" : ats, navBoundary, finalGuard);
+        if (again.blocked) break;
+      }
+      if (surfaceReady) await fillCommonFields(page, ats, profile, job, navBoundary);
     }
     if (applyNavigation.blocked) {
       if (!sharedCtx) await context.close();
@@ -3553,7 +3566,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
 
     // Detect submit button
-    const onExternalHost = !!(isNavigationBoundary(navBoundary) && navBoundary.externalApplyHost);
+    const onExternalHost = onExternalAts(navBoundary);
     const submitSels = onExternalHost
       ? [...new Set([...(ATS_SELECTORS[ats]?.submitBtn || []), ...ATS_SELECTORS.generic.submitBtn])]
       : (ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn);
