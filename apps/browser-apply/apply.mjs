@@ -1227,6 +1227,42 @@ async function hasCrossOriginFormOrFrame(page, originUrl = null) {
   }, permittedHosts).catch(() => true);
 }
 
+// has-text matches hidden nodes too, so always resolve to the first *visible*
+// match before reading a label or clicking.
+async function pickVisible(locator) {
+  const count = await locator.count().catch(() => 0);
+  if (count <= 1) return locator.first();
+  for (let i = 0; i < Math.min(count, 12); i++) {
+    const candidate = locator.nth(i);
+    if (await candidate.isVisible().catch(() => false)) return candidate;
+  }
+  return locator.first();
+}
+
+// Consent banners sit over the form and swallow clicks. Dismissing the cookie
+// notice is not a legal agreement, so it is safe to clear automatically.
+async function dismissConsentBanners(page) {
+  const patterns = [
+    'button:has-text("I understand")',
+    'button:has-text("Accept all")',
+    'button:has-text("Accept All")',
+    'button:has-text("Got it")',
+    'button:has-text("Allow all")',
+    '[id*="onetrust"] button[id*="accept"]',
+    '[class*="ketch"] button:has-text("I understand")',
+  ];
+  for (const pattern of patterns) {
+    const el = await pickVisible(page.locator(pattern));
+    if ((await el.count().catch(() => 0)) === 0) continue;
+    if (!(await el.isVisible().catch(() => false))) continue;
+    await el.click({ timeout: 4000 }).catch(() => {});
+    console.log("    [consent-banner] dismissed a cookie notice to reach the form");
+    await page.waitForTimeout(500);
+    return true;
+  }
+  return false;
+}
+
 async function tryUpload(page, selectors, filePath, ats = null, originUrl = null) {
   const currentUrl = typeof page?.url === "function" ? page.url() : "";
   const effectiveAts = ats || (isNavigationBoundary(originUrl) ? originUrl.ats : "generic");
@@ -2677,6 +2713,12 @@ async function processJob(browser, job, profile, runtime = {}) {
       const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
       if (retry.clicked) applyNavigation = retry;
     }
+    // The trigger may only scroll to a lazily rendered form, and a cookie
+    // notice can be covering it. Clear the banner and wait for real fields.
+    if (!applyNavigation.blocked) {
+      await dismissConsentBanners(page);
+      await waitForApplicationSurface(page, 20000);
+    }
     if (applyNavigation.blocked) {
       if (!sharedCtx) await context.close();
       const action = ["send-paused", "claim-blocked", "claim-lost"].includes(applyNavigation.reason)
@@ -3515,7 +3557,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       : (ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn);
     let submitFound = false;
     for (const sel of submitSels) {
-      const probe = page.locator(sel).first();
+      const probe = await pickVisible(page.locator(sel));
       if ((await probe.count()) > 0) {
         const label = ((await probe.innerText().catch(() => "")) || "").trim().slice(0, 60);
         if (!isSubmissionControlLabel(label)) {
@@ -3546,7 +3588,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     let clickError = false;
     let blockedFields = [];
     for (const sel of submitSels) {
-      const el = page.locator(sel).first();
+      const el = await pickVisible(page.locator(sel));
       if ((await el.count()) > 0) {
         const label = ((await el.innerText().catch(() => sel)) || sel).trim().slice(0, 60);
         // Fail closed: a control only counts as the final submission when its
