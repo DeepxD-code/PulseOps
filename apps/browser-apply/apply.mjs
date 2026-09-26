@@ -2576,7 +2576,15 @@ async function processJob(browser, job, profile, runtime = {}) {
         await page.waitForTimeout(1000);
       }
     }
-    const applyNavigation = await detectAndClickApply(page, ats, navBoundary, finalGuard);
+    let applyNavigation = await detectAndClickApply(page, ats, navBoundary, finalGuard);
+    // After an approved off-site hop the page is a corporate careers site, so
+    // the originating ATS selectors no longer exist. Re-detect with the
+    // generic set (e.g. "Apply for this role").
+    if (!applyNavigation.blocked && !applyNavigation.clicked
+        && isNavigationBoundary(navBoundary) && navBoundary.externalApplyHost) {
+      const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
+      if (retry.clicked) applyNavigation = retry;
+    }
     if (applyNavigation.blocked) {
       if (!sharedCtx) await context.close();
       const action = ["send-paused", "claim-blocked", "claim-lost"].includes(applyNavigation.reason)
@@ -3409,7 +3417,10 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
 
     // Detect submit button
-    const submitSels = ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn;
+    const onExternalHost = !!(isNavigationBoundary(navBoundary) && navBoundary.externalApplyHost);
+    const submitSels = onExternalHost
+      ? [...new Set([...(ATS_SELECTORS[ats]?.submitBtn || []), ...ATS_SELECTORS.generic.submitBtn])]
+      : (ATS_SELECTORS[ats]?.submitBtn || ATS_SELECTORS.generic.submitBtn);
     let submitFound = false;
     for (const sel of submitSels) {
       const probe = page.locator(sel).first();
