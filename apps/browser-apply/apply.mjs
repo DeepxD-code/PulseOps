@@ -2160,7 +2160,10 @@ async function clickFinalControl(page, locator, label, options = {}) {
     return { allowed: false, clicked: false, blocked: last.reason, reason: last.reason };
   }
   try {
-    await locator.click({ timeout: 5000 });
+    // Sticky headers can cover a long form's submit control; scroll it into
+    // view and allow a longer budget before giving up.
+    await locator.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+    await locator.click({ timeout: 15000 });
     console.log(`  [submit] clicked final ${label}`);
     return { allowed: true, clicked: true };
   } catch (e) {
@@ -2234,7 +2237,12 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   const fullName = candidate.name || "";
   const [firstName, ...rest] = fullName.split(" ");
   const lastName = rest.join(" ") || "User";
-  const sels = ATS_SELECTORS[ats]?.fields || ATS_SELECTORS.generic.fields;
+  // After an approved off-site hop the page is a corporate careers site, so the
+  // originating ATS field set (e.g. LinkedIn's) no longer describes it. Use the
+  // generic set, which covers split first/last name fields.
+  const onExternalHost = !!(isNavigationBoundary(originUrl) && originUrl.externalApplyHost);
+  const effectiveAts = onExternalHost ? "generic" : ats;
+  const sels = ATS_SELECTORS[effectiveAts]?.fields || ATS_SELECTORS.generic.fields;
 
   // Try name fields (split or combined)
   if (sels.firstName) await tryFill(page, sels.firstName, firstName);
