@@ -337,7 +337,7 @@ async function classifyMissingApplyState(page) {
     if (/no longer accepting applications|this job is no longer|job (has )?expired|position (has been )?filled|no longer available/i.test(text)) {
       return "closed-listing";
     }
-    if (/apply on (?:the )?(?:company|employer)|apply on company website|external apply|go to (?:the )?(?:company|employer)(?:'s)? website/i.test(text)) {
+    if (/apply on (?:the )?(?:company|employer)|apply on company website|external apply|go to (?:the )?(?:company|employer)(?:'s)? website|responses managed off linkedin/i.test(text)) {
       return "external-apply";
     }
     if (/\byou applied\b|application submitted|applied successfully|already applied/i.test(text)) {
@@ -1047,7 +1047,23 @@ const ATS_SELECTORS = {
     submitBtn: ['button[type="submit"]']
   },
   linkedin: {
-    applyBtn: ['button[aria-label*="Easy Apply"]', 'button:has-text("Easy Apply")', 'button.jobs-apply-button'],
+    // Most LinkedIn roles are off-site applies ("Responses managed off
+    // LinkedIn") and expose a plain Apply control, not Easy Apply. Without
+    // these the button is never even seen.
+    applyBtn: [
+      'button[aria-label*="Easy Apply"]',
+      'button:has-text("Easy Apply")',
+      'button.jobs-apply-button',
+      'a[data-tracking-control-name*="public_jobs_apply"]',
+      'button[data-tracking-control-name*="public_jobs_apply"]',
+      'a.jobs-apply-button',
+      'div.jobs-details a:has-text("Apply")',
+      'div.jobs-details button:has-text("Apply")',
+      '.jobs-view-container a:has-text("Apply")',
+      'a:has-text("Apply now")',
+      'a:has-text("Apply")',
+      'button:has-text("Apply")',
+    ],
     fields: {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
     },
