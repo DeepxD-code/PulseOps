@@ -1153,8 +1153,8 @@ const ATS_SELECTORS = {
     applyBtn: ['a:has-text("Apply")', 'a:has-text("Apply now")', 'button:has-text("Apply")', 'button:has-text("Apply now")', '[data-testid*="apply"]'],
     fields: {
       name: ['input[name="name"]', '#name', 'input[autocomplete="name"]', 'input[placeholder*="Full name"]'],
-      firstName: ['input[name="firstName"]', 'input[name="first_name"]', 'input[name="firstname"]', 'input[autocomplete="given-name"]', 'input[placeholder*="First name" i]'],
-      lastName: ['input[name="lastName"]', 'input[name="last_name"]', 'input[name="lastname"]', 'input[autocomplete="family-name"]', 'input[placeholder*="Last name" i]'],
+      firstName: ['input[name="firstName"]', 'input[name="first_name"]', 'input[name="firstname"]', 'input[autocomplete="given-name"]', 'input[id*="first-name" i]', 'input[placeholder*="irst name"]'],
+      lastName: ['input[name="lastName"]', 'input[name="last_name"]', 'input[name="lastname"]', 'input[autocomplete="family-name"]', 'input[id*="last-name" i]', 'input[placeholder*="ast name"]'],
       email: ['input[type="email"]', 'input[name="email"]', '#email'],
       phone: ['input[type="tel"]', 'input[name="phone"]'],
       resume: ['input[type="file"]'],
@@ -3595,13 +3595,14 @@ async function processJob(browser, job, profile, runtime = {}) {
         confirmed = false;
       }
     }
-    if (!sharedCtx) await context.close();
+    // Diagnose before the context closes, otherwise the page is gone.
     if (clicked && !confirmed) {
       const empty = await describeEmptyEntryFields(page).catch(() => []);
       const consents = await describeUncheckedConsents(page).catch(() => []);
       if (empty.length) console.log(`  [blocked-by] empty fields still on the form: ${empty.join(", ")}`);
       if (consents.length) console.log(`  [consent] needs your tick: ${consents.join(" | ")}`);
     }
+    if (!sharedCtx) await context.close();
     return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
   } catch (e) {
     console.log(`  [error] ${e.message.slice(0,300)}`);
