@@ -655,6 +655,39 @@ test("navigation trust uses exact hosts/origins and pins after a service crossin
   assert.equal(isAllowedNavigationUrl("https://job-boards.greenhouse.io/form", "lever", boundary), false);
 });
 
+test("vendor form data and the resume upload ticket are readable", () => {
+  // Without these the Greenhouse form renders without labels and cannot
+  // attach a CV at all.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://job-boards.cdn.greenhouse.io/locales/en/job_post.json", "fetch", "GET", "greenhouse",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://boards.greenhouse.io/uncacheable_attributes/presigned_fields?fields%5B%5D=resume",
+      "fetch", "GET", "greenhouse",
+    ),
+    true,
+  );
+  // A write is never allowed, and neither is another vendor's path or ATS.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://boards.greenhouse.io/uncacheable_attributes/presigned_fields", "fetch", "POST", "greenhouse",
+    ),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://evil.example/locales/en/job_post.json", "fetch", "GET", "greenhouse"),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://job-boards.cdn.greenhouse.io/locales/en/x.json", "fetch", "GET", "lever"),
+    false,
+  );
+});
+
 test("an ATS's own CDN may serve its scripts, but no other host may", () => {
   // Greenhouse ships the entire application runtime from its CDN; blocking it
   // leaves the form inert with empty dropdowns.

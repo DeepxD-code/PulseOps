@@ -222,6 +222,13 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
     { host: "static.licdn.com", pathPrefix: "/aero-v1/sc/h/", types: ["xhr", "fetch", "script", "stylesheet", "image", "font", "media", "other"] },
     { host: "media.licdn.com", pathPrefix: "/dms/", types: ["xhr", "fetch", "image"] },
   ],
+  greenhouse: [
+    // The form's own label/summary copy, without which the fields render
+    // without text or validation.
+    { host: "job-boards.cdn.greenhouse.io", pathPrefix: "/locales/", types: ["xhr", "fetch"] },
+    // Presigned upload attributes: this is what makes attaching a CV possible.
+    { host: "boards.greenhouse.io", pathPrefix: "/uncacheable_attributes/", types: ["xhr", "fetch"] },
+  ],
 });
 const CLAIM_RECOVERY_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_BROWSER_CLAIM_RECOVERY_MS || "3600000", 10);
