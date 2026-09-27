@@ -2131,23 +2131,24 @@ function controlSignatureMatcher() {
       el.getAttribute("id") || "",
       el.getAttribute("name") || "",
     ].join(" ");
-    let wrap = el;
-    for (let i = 0; i < 8 && wrap; i++) {
-      const len = String(wrap.textContent || "").replace(/\s+/g, " ").trim().length;
-      if (len > 0 && len <= 260) break;
-      wrap = wrap.parentElement;
-    }
     let question = "";
-    // `document` is absent when this runs outside a page, e.g. in a unit test.
-    if (wrap && !(typeof document !== "undefined" && wrap === document.body)) {
-      const clone = wrap.cloneNode(true);
+    let node = el;
+    for (let i = 0; i < 8 && node; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      // `document` is absent when this runs outside a page, e.g. in a unit test.
+      if (typeof document !== "undefined" && node === document.body) break;
+      const clone = node.cloneNode(true);
       clone.querySelectorAll(
         "input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
         + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
-      ).forEach((node) => node.remove());
+      ).forEach((n) => n.remove());
       const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
-      // A remainder this long is not a question; more of the form leaked in.
-      if (text.length <= 260) question = text;
+      // The nearest wrappers of a dropdown hold only the input and its
+      // "Select…" placeholder, so stripping them leaves nothing. Keep climbing
+      // until an ancestor yields real prompt text — and stop there, because an
+      // ancestor further up wraps the whole form and would match everything.
+      if (text && text.length <= 260) { question = text; break; }
     }
     return `${own} ${question}`.trim().toLowerCase();
   };

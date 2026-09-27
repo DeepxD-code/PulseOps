@@ -692,13 +692,15 @@ test("vendor form data and the resume upload ticket are readable", () => {
 test("a control's question text is its own prompt, never the whole form", () => {
   // A few ancestors up is often a wrapper holding the entire form. If its text
   // were used as the label, every pattern would match every field.
-  const mkNode = (text, children = []) => ({
+  // `stripped` models what the clone's textContent becomes once the widget
+  // internals are removed; a real clone recomputes it, this mock must too.
+  const mkNode = (text, children = [], stripped = text) => ({
     textContent: text,
     getAttribute: () => "",
     parentElement: null,
     cloneNode() {
       return {
-        textContent: text,
+        textContent: stripped,
         querySelectorAll: () => children.map((c) => ({ remove() {} })),
       };
     },
@@ -729,6 +731,24 @@ test("a control's question text is its own prompt, never the whole form", () => 
   named.parentElement = null;
   named.getAttribute = (a) => ({ id: a === "id" ? "country" : "" })[a] || "";
   assert.match(signature(named), /country/);
+
+  // A dropdown's nearest wrappers hold only the input and its "Select…"
+  // placeholder, so stripping them leaves nothing. The matcher must keep
+  // climbing to reach the prompt, or every question-based match fails.
+  const control = mkNode("", [mkNode(""), mkNode("")]);
+  const valueBox = mkNode("Select...", [control, mkNode("Select...")], "");
+  const fieldBox = mkNode(
+    "Are you open to working in-person in one of our offices 25% of the time? Select...",
+    [valueBox],
+    "Are you open to working in-person in one of our offices 25% of the time?",
+  );
+  control.parentElement = valueBox;
+  valueBox.parentElement = fieldBox;
+  fieldBox.parentElement = null;
+  const dropdownSig = signature(control);
+  assert.match(dropdownSig, /in-person/);
+  // The placeholder must not be mistaken for the question.
+  assert.doesNotMatch(dropdownSig, /select\.\.\./);
 });
 
 test("the page-side matcher is self-contained so it can be serialised", () => {
