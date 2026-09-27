@@ -773,20 +773,22 @@ try:
                         if "job_id" in oc:
                             predicates = []
                             if "status" in oc:
-                                predicates.append("LOWER(COALESCE(status,'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+                                # Only states where this listing is genuinely
+                                # finished block a browser claim. A pending G10
+                                # review means "awaiting a human decision about
+                                # emailing"; it is not evidence the application
+                                # was already made, and it must not stop us from
+                                # applying to an open role.
+                                predicates.append("LOWER(COALESCE(status,'')) IN ('sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
                             if "channel" in oc:
                                 predicates.append("LOWER(COALESCE(channel,''))='referral'")
                             if "notes" in oc:
                                 predicates.append("LOWER(COALESCE(notes,'')) LIKE '%g4:%' OR LOWER(COALESCE(notes,'')) LIKE '%g5:%' OR LOWER(COALESCE(notes,'')) LIKE '%cooldown%'")
                             if predicates:
+                                # Scope strictly to this listing: a company-wide
+                                # match let one outreach block every other role.
                                 scope = ["job_id=?"]
                                 scope_params = [job_id]
-                                if "company" in oc and "company" in job_cols:
-                                    scope.append("LOWER(TRIM(COALESCE(company,''))) = LOWER(TRIM(?))")
-                                    scope_params.append(str(row["company"] or ""))
-                                if "company_normalised" in oc and "company_normalised" in job_cols:
-                                    scope.append("LOWER(COALESCE(company_normalised,'')) = LOWER(COALESCE(?, ''))")
-                                    scope_params.append(str(row["company_normalised"] or ""))
                                 outreach_blocked = conn.execute("SELECT 1 FROM outreach WHERE (" + " OR ".join(scope) + ") AND (" + " OR ".join(predicates) + ") LIMIT 1", scope_params).fetchone() is not None
                     if status in protected:
                         result["reason"] = "protected-status"
@@ -3880,7 +3882,9 @@ outreach_columns = columns("outreach") if "outreach" in {str(row[0]) for row in 
 if outreach_columns and "job_id" in outreach_columns and mode != "job":
     blocked = []
     if "status" in outreach_columns:
-        blocked.append("LOWER(COALESCE(o.\"status\",'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+        # Terminal states only. A pending G10 review gates the email channel, not
+        # a browser application to an open role.
+        blocked.append("LOWER(COALESCE(o.\"status\",'')) IN ('sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
     if "channel" in outreach_columns:
         blocked.append("LOWER(COALESCE(o.\"channel\",''))='referral'")
     if "notes" in outreach_columns:
