@@ -36,9 +36,45 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
+import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
+
+/**
+ * Read a job page as plain text, falling back to the raw HTML when the rendered
+ * DOM yields nothing. Some employer career sites are effectively static, and a
+ * stylesheet-free read beats fighting their script bundle.
+ */
+async function readPageText(page) {
+  if (page && typeof page.evaluate === "function") {
+    const text = await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ")).catch(() => "");
+    if (text && text.trim().length > 80) return text;
+    let html = "";
+    try { html = await page.content(); } catch { html = ""; }
+    const basic = basicHtmlTextFromHtml(html).replace(/\s+/g, " ");
+    if (basic && basic.trim().length > 80) {
+      console.log("    [basic-html] using stylesheet-free page text");
+      return basic;
+    }
+    if (text && text.trim()) return text;
+  }
+  return "";
+}
+
+/**
+ * Skip a posting that states a salary under the floor. A role with no stated
+ * pay is never skipped for this reason.
+ */
+async function rejectLowStatedSalary(page, job) {
+  const text = await readPageText(page);
+  if (!text) return null;
+  const { skip, monthly } = statedSalaryTooLow(`${job.title || ""} ${text}`);
+  if (!skip) return null;
+  const shown = Math.round(monthly).toLocaleString("en-IN");
+  console.log(`  [salary] stated Rs ${shown}/month is under the Rs 10,000 floor — not applying`);
+  return { action: "salary-below-threshold", monthly };
+}
 
 const DRY_RUN = !process.argv.includes("--live");
 const HEADED = process.argv.includes("--headed");
@@ -2757,6 +2793,13 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
 
+    // A posting that states pay under the floor is not worth an application.
+    const salaryBlock = await rejectLowStatedSalary(page, job);
+    if (salaryBlock) {
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: salaryBlock.action, pdf: resumePdf };
+    }
+
     // A CAPTCHA is a hard stop. In live/auto mode the only way onward is an
     // actual disappearance of the challenge; a timeout or stale marker returns
     // captcha-blocked and can never fall through to Apply/Submit.
@@ -4022,6 +4065,7 @@ function statusForBrowserResult(result) {
   if (action === "submitted" || ["unverified", "chat-incomplete", "needs-verification", "no-submit", "not-submitted", "click-failed", "error"].includes(action)) return "NeedsVerification";
   if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled", "profile-incomplete"].includes(action)) return "NeedsReview";
   if (action === "dead-link" || action === "invalid-listing") return "Expired";
+  if (action === "salary-below-threshold") return "Skipped";
   // A pause/claim miss is deliberately not written.  The existing Applying
   // marker remains recoverable instead of being downgraded to Evaluated.
   return null;
