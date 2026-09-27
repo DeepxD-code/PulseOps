@@ -2698,7 +2698,13 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   const answerQuestion = async (hintRe, value, tag) => {
     const text = String(value ?? "").trim();
     if (!text) return null;
-    const fields = page.locator('input[type="text"], input[type="url"], input[type="tel"], textarea');
+    // `input[type="text"]` is an attribute selector and misses every input that
+    // relies on the HTML default, which is most of them. `input:not([type])`
+    // picks those up.
+    const fields = page.locator(
+      'input:not([type]), input[type="text"], input[type="url"], input[type="tel"], '
+      + 'input[type="email"], input[type="search"], textarea',
+    );
     const total = await fields.count().catch(() => 0);
     for (let i = 0; i < total && i < 40; i++) {
       const field = fields.nth(i);
@@ -2711,6 +2717,13 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       if (!hintRe.test(String(signature))) continue;
       await field.fill(text).catch(() => {});
       await page.waitForTimeout(150);
+      // A controlled input can reject the value it was given. Say so, rather
+      // than logging a fill that did not happen.
+      const landed = String(await field.inputValue().catch(() => "")).trim();
+      if (landed !== text) {
+        console.log(`    [answer] ${tag}: value did not stick (got "${landed.slice(0, 40)}")`);
+        continue;
+      }
       console.log(`    [fill] ${tag} → "${text.slice(0, 40)}"`);
       return text;
     }
@@ -2774,7 +2787,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // candidate.application_answers, which the operator supplies explicitly. A
     // missing key leaves the question untouched rather than guessing, and each
     // answer is logged.
-    const stated = profile?.application_answers || {};
+    const stated = profile?.candidate?.application_answers || {};
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously)|previous(?:ly)? interview|applied (?:here|before|previously)/, tag: "prior interview history" },
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
