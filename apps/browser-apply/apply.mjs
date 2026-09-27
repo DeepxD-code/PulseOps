@@ -2109,33 +2109,48 @@ function readLineFromStdin(timeoutMs = 180000) {
  * close over anything.
  */
 /**
- * Read just the question text belonging to one control.
+ * Build the page-side matcher for one form control.
  *
- * Walking ancestors and taking their text is not enough: a few levels up is
- * often a wrapper holding the entire form, so the "label" becomes every
- * question on the page and any pattern matches any field. Instead, find the
- * smallest wrapper that holds the control, clone it, strip the widget internals
- * and the live region, and keep only what is left — which is the prompt.
+ * Two Playwright constraints shape this. `evaluate` serialises the callback and
+ * evaluates it in the page, so it cannot close over module scope, and a
+ * function passed as an argument fails to serialise. Everything it needs must
+ * therefore live inside the returned function, which is why this is a factory
+ * rather than a plain helper.
+ *
+ * The label it produces is the question belonging to that one control. Walking
+ * ancestors and taking their text is not enough: a few levels up is often a
+ * wrapper holding the whole form, so the "label" becomes every question on the
+ * page and any pattern matches any field. Instead it finds the smallest wrapper
+ * that could be this field's own prompt, clones it, strips the widget internals
+ * and the live region, and keeps only what is left.
  */
-function fieldQuestionText(el) {
-  let wrap = el;
-  for (let i = 0; i < 8 && wrap; i++) {
-    const len = String(wrap.textContent || "").replace(/\s+/g, " ").trim().length;
-    if (len > 0 && len <= 260) break;
-    wrap = wrap.parentElement;
-  }
-  // Guarded so the helper is also callable outside a page (it is unit-tested
-  // directly), where `document` does not exist.
-  if (!wrap) return "";
-  if (typeof document !== "undefined" && wrap === document.body) return "";
-  const clone = wrap.cloneNode(true);
-  clone.querySelectorAll(
-    "input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
-    + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
-  ).forEach((node) => node.remove());
-  const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
-  // A remainder this long is not a question, it leaked in more of the form.
-  return text.length <= 260 ? text : "";
+function controlSignatureMatcher() {
+  return (el) => {
+    const own = [
+      el.getAttribute("aria-label") || "",
+      el.getAttribute("id") || "",
+      el.getAttribute("name") || "",
+    ].join(" ");
+    let wrap = el;
+    for (let i = 0; i < 8 && wrap; i++) {
+      const len = String(wrap.textContent || "").replace(/\s+/g, " ").trim().length;
+      if (len > 0 && len <= 260) break;
+      wrap = wrap.parentElement;
+    }
+    let question = "";
+    // `document` is absent when this runs outside a page, e.g. in a unit test.
+    if (wrap && !(typeof document !== "undefined" && wrap === document.body)) {
+      const clone = wrap.cloneNode(true);
+      clone.querySelectorAll(
+        "input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
+        + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
+      ).forEach((node) => node.remove());
+      const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
+      // A remainder this long is not a question; more of the form leaked in.
+      if (text.length <= 260) question = text;
+    }
+    return `${own} ${question}`.trim().toLowerCase();
+  };
 }
 
 async function describeEmptyEntryFields(page) {
@@ -2635,19 +2650,9 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
-      // Match on the question this control belongs to, falling back to its own
-      // attributes. Never on surrounding form text, which matches everything.
-      // The helper is passed in as an argument: evaluate() serialises the
-      // callback, so a module-scope function called from inside it is simply
-      // undefined in the page.
-      const signature = await control.evaluate((el, questionText) => {
-        const own = [
-          el.getAttribute("aria-label") || "",
-          el.getAttribute("id") || "",
-          el.getAttribute("name") || "",
-        ].join(" ");
-        return `${own} ${questionText(el)}`.trim().toLowerCase();
-      }, fieldQuestionText).catch((e) => {
+      // Match on the question this control belongs to, never on surrounding
+      // form text, which would make any pattern match any field.
+      const signature = await control.evaluate(controlSignatureMatcher()).catch((e) => {
         console.log(`    [combo] ${hintRe.source}: matcher failed (${String(e.message || e).slice(0, 80)})`);
         return "";
       });
@@ -2698,14 +2703,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const field = fields.nth(i);
       if (!(await field.isVisible().catch(() => false))) continue;
       if (String(await field.inputValue().catch(() => "")).trim()) continue;
-      const signature = await field.evaluate((el, questionText) => {
-        const own = [
-          el.getAttribute("aria-label") || "",
-          el.getAttribute("id") || "",
-          el.getAttribute("name") || "",
-        ].join(" ");
-        return `${own} ${questionText(el)}`.trim().toLowerCase();
-      }, fieldQuestionText).catch((e) => {
+      const signature = await field.evaluate(controlSignatureMatcher()).catch((e) => {
         console.log(`    [answer] ${tag}: matcher failed (${String(e.message || e).slice(0, 80)})`);
         return "";
       });
@@ -4775,7 +4773,7 @@ export {
   isCurrentPageTrusted,
   isEligibleJob,
   isMockJob,
-  fieldQuestionText,
+  controlSignatureMatcher,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,

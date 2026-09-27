@@ -22,7 +22,7 @@ import {
   isBlacklistedJob,
   isEligibleJob,
   isSimulationJob,
-  fieldQuestionText,
+  controlSignatureMatcher,
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
@@ -694,6 +694,7 @@ test("a control's question text is its own prompt, never the whole form", () => 
   // were used as the label, every pattern would match every field.
   const mkNode = (text, children = []) => ({
     textContent: text,
+    getAttribute: () => "",
     parentElement: null,
     cloneNode() {
       return {
@@ -702,6 +703,8 @@ test("a control's question text is its own prompt, never the whole form", () => 
       };
     },
   });
+  const signature = controlSignatureMatcher();
+
   const field = mkNode("", []);
   const wrapper = mkNode("Are you open to relocation for this role?", []);
   const wholeForm = mkNode("Are you open to relocation for this role? Country * Why Anthropic? * Have you ever interviewed here?", []);
@@ -709,22 +712,33 @@ test("a control's question text is its own prompt, never the whole form", () => 
   wrapper.parentElement = wholeForm;
   wholeForm.parentElement = null;
 
-  const q = fieldQuestionText(field);
-  assert.match(q, /relocation/);
+  const sig = signature(field);
+  assert.match(sig, /relocation/);
   // The rest of the form must not leak in.
-  assert.doesNotMatch(q, /Anthropic/);
-  assert.doesNotMatch(q, /Country/);
+  assert.doesNotMatch(sig, /anthropic/);
+  assert.doesNotMatch(sig, /country/);
 
-  // A wrapper that is still just the body is not a question either.
-  const bare = mkNode("everything", []);
-  bare.parentElement = null;
-  assert.equal(fieldQuestionText(bare), "everything");
-
-  // When no ancestor is small enough to be a question, there is no question to
+  // When no ancestor is small enough to be a question, there is nothing to
   // match on — returning "" keeps the caller from matching unrelated text.
   const huge = mkNode("x".repeat(400), []);
   huge.parentElement = null;
-  assert.equal(fieldQuestionText(huge), "");
+  assert.equal(signature(huge), "");
+
+  // The control's own attributes are always part of the signature.
+  const named = mkNode("Select...", []);
+  named.parentElement = null;
+  named.getAttribute = (a) => ({ id: a === "id" ? "country" : "" })[a] || "";
+  assert.match(signature(named), /country/);
+});
+
+test("the page-side matcher is self-contained so it can be serialised", () => {
+  // Playwright serialises the evaluate callback into the page. If it referenced
+  // anything outside its own body, the reference would be undefined in the page
+  // and every field would fail to match — silently, before this guard existed.
+  const src = controlSignatureMatcher().toString();
+  for (const forbidden of ["fieldQuestionText", "controlSignatureMatcher(", "require(", "process."]) {
+    assert.equal(src.includes(forbidden), false, `matcher must not reference ${forbidden}`);
+  }
 });
 
 test("an ATS's own CDN may serve its scripts, but no other host may", () => {
