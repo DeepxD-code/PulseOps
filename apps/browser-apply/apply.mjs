@@ -4151,8 +4151,11 @@ print(json.dumps(result))
   try {
     const rows = queryRows("default").filter((row) => isEligibleJob(row));
     if (rows.length) {
-      console.log(`[DB] loaded ${rows.length} recent eligible Evaluated jobs`);
-      return rows.slice(0, 5).map((row) => ({ ...row, job_id: row.id, _db_path: dbPath }));
+      // Batch size is a throughput knob, not a safety limit: every job still
+      // passes its own claim/pause/guard checks before anything is submitted.
+      const batch = Math.max(1, Number.parseInt(process.env.PULSEOPS_BATCH_SIZE || "5", 10) || 5);
+      console.log(`[DB] loaded ${rows.length} eligible Evaluated jobs (batch ${batch})`);
+      return rows.slice(0, batch).map((row) => ({ ...row, job_id: row.id, _db_path: dbPath }));
     }
   } catch (e) {
     console.log(`[DB] eligible-jobs load failed: ${e.message?.slice(0, 120)}`);
