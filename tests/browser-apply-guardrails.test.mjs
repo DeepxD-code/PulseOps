@@ -760,7 +760,10 @@ test("DB claim is exact-ID, recoverable, and result persistence never returns Ev
   }
 });
 
-test("a G10 review created after claim revokes final-action ownership", async () => {
+test("a pending G10 email review does not revoke a browser-apply claim", async () => {
+  // G10 fires when there is no verified company domain to email, so the review
+  // is a Discord decision about *emailing*. It is not a judgement on whether we
+  // may apply to an open role, and must not stall the browser channel.
   const { dir, dbPath } = makeGuardrailDb();
   try {
     const claim = await claimJobForApply(1, { dbPath, ownerId: "owner-g10" });
@@ -778,17 +781,55 @@ CREATE TABLE outreach (
   notes TEXT
 );
 INSERT INTO outreach(job_id,company,status,channel,notes)
-VALUES(1,'Example Company','needs_review','discord_review','G10');
+VALUES(1,'Example Company','review_posted','discord_review','G10');
 """)
 conn.commit()
 conn.close()
 `;
     execFileSync("python", ["-c", code, dbPath], { encoding: "utf8", windowsHide: true });
     const state = await verifyJobClaim(1, "owner-g10", dbPath);
-    assert.equal(state.owned, false);
-    assert.equal(state.reason, "g10-review");
+    assert.equal(state.owned, true);
+    assert.equal(state.reason, "owned");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a terminal outreach outcome for this listing still revokes the claim", async () => {
+  // The protection the G10 test used to provide: once this listing is actually
+  // handled, we must not submit a second application.
+  for (const status of ["sent", "followup_sent", "cooldown", "blacklisted", "bounced"]) {
+    const { dir, dbPath } = makeGuardrailDb();
+    try {
+      const claim = await claimJobForApply(1, { dbPath, ownerId: `owner-${status}` });
+      assert.equal(claim.claimed, true, status);
+      const code = [
+        "import sqlite3, sys",
+        "conn = sqlite3.connect(sys.argv[1])",
+        "conn.executescript('''",
+        "CREATE TABLE IF NOT EXISTS outreach (",
+        "  id INTEGER PRIMARY KEY,",
+        "  job_id INTEGER,",
+        "  company TEXT,",
+        "  status TEXT,",
+        "  channel TEXT,",
+        "  notes TEXT",
+        ");",
+        "''')",
+        "conn.execute(",
+        "  'INSERT INTO outreach(job_id,company,status,channel,notes) VALUES(?,?,?,?,?)',",
+        "  (1, 'Example Company', sys.argv[2], '', ''),",
+        ")",
+        "conn.commit()",
+        "conn.close()",
+      ].join("\n");
+      execFileSync("python", ["-c", code, dbPath, status], { encoding: "utf8", windowsHide: true });
+      const state = await verifyJobClaim(1, `owner-${status}`, dbPath);
+      assert.equal(state.owned, false, status);
+      assert.equal(state.reason, "g10-review", status);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

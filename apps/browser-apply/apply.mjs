@@ -635,20 +635,18 @@ try:
                         outreach_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(outreach)")}
                         predicates = []
                         if "status" in outreach_cols:
-                            predicates.append("LOWER(COALESCE(status,'')) IN ('needs_review','needsreview','review_pending','reviewpending','pending_review','pendingreview','review_sending','review_posted','reviewposted','review_sending','review_sending','sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
+                            # Terminal states only: a pending G10 review gates the
+                            # email channel, not a browser application.
+                            predicates.append("LOWER(COALESCE(status,'')) IN ('sent','simulated','cooldown','referral','blacklisted','bounced','followup_sent','followupsent')")
                         if "channel" in outreach_cols:
                             predicates.append("LOWER(COALESCE(channel,''))='referral'")
                         if "notes" in outreach_cols:
                             predicates.append("LOWER(COALESCE(notes,'')) LIKE '%g4:%' OR LOWER(COALESCE(notes,'')) LIKE '%g5:%' OR LOWER(COALESCE(notes,'')) LIKE '%cooldown%'")
                         if predicates and "job_id" in outreach_cols:
+                            # Strictly this listing; a company-wide scope let one
+                            # outreach block every other role at that company.
                             scope = ["job_id=?"]
                             scope_params = [job_id]
-                            if "company" in outreach_cols and "company" in job_cols:
-                                scope.append("LOWER(TRIM(COALESCE(company,''))) = LOWER(TRIM(?))")
-                                scope_params.append(str(conn.execute("SELECT company FROM jobs WHERE id=?", (job_id,)).fetchone()[0] or ""))
-                            if "company_normalised" in outreach_cols and "company_normalised" in job_cols:
-                                scope.append("LOWER(COALESCE(company_normalised,'')) = LOWER(COALESCE(?, ''))")
-                                scope_params.append(str(conn.execute("SELECT company_normalised FROM jobs WHERE id=?", (job_id,)).fetchone()[0] or ""))
                             outreach_blocked = conn.execute(
                                 "SELECT 1 FROM outreach WHERE (" + " OR ".join(scope) + ") AND (" +
                                 " OR ".join(predicates) + ") LIMIT 1",
