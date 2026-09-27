@@ -383,6 +383,31 @@ test("strict role gate excludes full-stack, frontend, Laravel, mobile, and embed
   }
 });
 
+test("strict role gate matches the candidate's stack: python in, node/mongo/django/design out", () => {
+  for (const title of [
+    "Python Developer",
+    "Python Backend Engineer",
+    "Machine Learning Engineer (Python)",
+    "Java Backend Developer",
+    "C++ Systems Engineer Intern",
+    "Backend Engineer",
+  ]) {
+    assert.equal(isStrictTargetRole(title), true, title);
+  }
+  for (const title of [
+    "Node.js Backend Engineer",
+    "JavaScript Developer",
+    "MongoDB Engineer",
+    "Django Back-End Development Intern",
+    "Frontend Engineer",
+    "UI/UX Designer",
+    "Product Designer",
+    "Figma Designer",
+  ]) {
+    assert.equal(isStrictTargetRole(title), false, title);
+  }
+});
+
 test("strict role gate excludes Node.js roles even when they say backend", () => {
   for (const title of [
     "Backend Developer Intern | Entry Level | Fresher | Node.js, Python",

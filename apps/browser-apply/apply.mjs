@@ -110,6 +110,10 @@ const ATS_ALLOWED_HOSTS = Object.freeze({
   generic: [],
 });
 const ATS_SERVICE_HOSTS = ATS_ALLOWED_HOSTS;
+// On these ATS the job page's "Apply" control only *opens* the application form
+// (a modal or embedded panel). Treating it as the final submission fills the
+// fields after the "submit" and never actually applies.
+const APPLY_IS_ALWAYS_INTERMEDIATE = new Set(["greenhouse", "lever", "ashby"]);
 const STRICT_ROLE_EXCLUDES = [
   "full stack", "full-stack", "fullstack", "frontend", "front-end",
   "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
@@ -117,8 +121,15 @@ const STRICT_ROLE_EXCLUDES = [
   // The Node/JS web stack is outside the candidate's language set even when
   // the title also says "backend".
   "node.js", "nodejs", "node js", "next.js", "nuxt", "express.js",
+  "javascript", "java script", "typescript",
+  // Data stores and frameworks the candidate does not work with.
+  "mongo", "mongodb", "django",
+  // Design roles are not software engineering roles.
+  "ui/ux", "ui ux", "ux/ui", "ui designer", "ux designer", "product designer",
+  "graphic design", "product design", "web design", "figma",
+  "interaction design", "visual design", "brand design",
 ];
-const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java)\b|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
+const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
 
 function isStrictTargetRole(title) {
   const value = String(title || "").trim().toLowerCase().replace(/\s+/g, " ");

@@ -58,6 +58,50 @@ def test_excluded_families_are_rejected_at_stage_1(title):
 @pytest.mark.parametrize(
     "title",
     [
+        "Python Developer",
+        "Python Backend Engineer",
+        "Senior Python Developer",
+        "Machine Learning Engineer (Python)",
+        "Java Backend Developer",
+        "C++ Systems Engineer Intern",
+        "Backend Engineer",
+    ],
+)
+def test_python_and_the_rest_of_the_target_stack_are_accepted(title):
+    assert is_strict_target_role(title) is True, title
+    assert is_hard_excluded_role(title) is False, title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Node.js Backend Engineer",
+        "JavaScript Developer",
+        "Backend Developer (NodeJS)",
+        "MongoDB Engineer",
+        "Django Back-End Development Intern",
+        "Frontend Engineer",
+        "UI/UX Designer",
+        "Product Designer",
+        "Figma Designer",
+        "Full Stack Engineer (Next.js)",
+    ],
+)
+def test_node_js_mongo_django_frontend_and_design_roles_are_rejected(title):
+    assert is_strict_target_role(title) is False, title
+    assert is_hard_excluded_role(title) is True, title
+    assert hard_filter({"title": title, "description": ""}, {}).passed is False, title
+
+
+def test_python_is_allowed_even_though_django_is_not():
+    # Both are Python, but Django is explicitly out of scope.
+    assert is_strict_target_role("Python Developer") is True
+    assert is_strict_target_role("Django Developer") is False
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
         "Backend Developer Intern | Entry Level | Fresher | Node.js, Python",
         "Node.js Backend Engineer",
         "Backend Developer (NodeJS)",
@@ -113,5 +157,6 @@ def test_research_titles_without_an_in_domain_keyword_are_deferred_not_dropped()
 def test_strict_gate_stays_narrow_for_browser_apply():
     # Browser apply sends PII, so it must not act on a merely ambiguous title.
     assert is_strict_target_role("Research Engineer, Pretraining") is False
-    assert is_strict_target_role("Python Developer") is False
+    assert is_strict_target_role("Tech Intern") is False
     assert is_strict_target_role("Backend Engineer") is True
+    assert is_strict_target_role("Python Developer") is True
