@@ -4394,9 +4394,14 @@ async function processJob(browser, job, profile, runtime = {}) {
       if (requiredEmpty.length) console.log(`  [blocked-by] required fields still empty: ${requiredEmpty.join(", ")}`);
       if (optionalEmpty.length) console.log(`  [skipped] optional questions left blank: ${optionalEmpty.join(", ")}`);
       if (consents.length) console.log(`  [consent] needs your tick: ${consents.join(" | ")}`);
+      // A refused submit with a captcha on the page is a human gate, not a bug.
+      // Hold the window open so it can be completed by hand; the row is only
+      // marked verified if the portal then confirms.
+      const captchaRefused = Boolean(outcome?.captcha);
+      if (captchaRefused) console.log("  [captcha] the board refused the submit and a captcha is present — this needs you");
       // A headed run can simply be finished by hand: hold the window open and
       // poll for the confirmation rather than dead-ending the row.
-      if (OTP_PAUSE && (requiredEmpty.length || consents.length)) {
+      if (OTP_PAUSE && (requiredEmpty.length || consents.length || captchaRefused)) {
         console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
