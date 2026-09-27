@@ -1460,9 +1460,18 @@ async function installNavigationGuard(page, ats, originUrl) {
           return;
         }
         if (!isAllowedNavigationUrl(requestUrl, ats, boundary)) {
-          console.log(`    [redirect-block] ${requestUrl}`);
-          await route.abort("blockedbyclient");
-          return;
+          // Allow a shortener hop and an operator-approved off-site apply host
+          // through; the destination itself is still validated above and the
+          // boundary re-pins to it below.
+          let shortener = false;
+          try { shortener = URL_SHORTENER_HOST.test(canonicalHost(new URL(requestUrl).hostname)); }
+          catch { shortener = false; }
+          if (!shortener && !tryPinExternalApplyOrigin(boundary, requestUrl, ats)) {
+            console.log(`    [redirect-block] ${requestUrl}`);
+            await route.abort("blockedbyclient");
+            return;
+          }
+          if (shortener) console.log(`    [shortener] allowing hop ${requestUrl}`);
         }
         // Leave the initial origin unpinned until page.goto finishes: a
         // server redirect from that origin to an approved service host must
@@ -1470,7 +1479,12 @@ async function installNavigationGuard(page, ats, originUrl) {
         // is then pinned immediately.
         const wasPinned = !!boundary.pinnedOrigin;
         if (wasPinned || !sameOrigin(requestUrl, boundary.initialOrigin)) {
-          pinNavigationOrigin(boundary, requestUrl);
+          // A shortener must never become the pinned origin; the redirect that
+          // follows it is what gets pinned.
+          let hop = false;
+          try { hop = URL_SHORTENER_HOST.test(canonicalHost(new URL(requestUrl).hostname)); }
+          catch { hop = false; }
+          if (!hop) pinNavigationOrigin(boundary, requestUrl);
         }
       } else {
         // While filling/uploading, permit only same-origin HTTP(S) resources.
