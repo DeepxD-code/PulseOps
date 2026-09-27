@@ -2647,7 +2647,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     const controls = page.locator('[role="combobox"]');
     const total = await controls.count().catch(() => 0);
     if (typeof controls.nth !== "function") return null;
-    const OPTION = '[role="option"]';
+    // Only the open menu's options count. A closed react-select menu can leave
+    // its option nodes in the DOM, and matching those made a Yes/No question
+    // read the previous dropdown's country list.
+    const OPTION = '[role="option"]:visible';
     for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
