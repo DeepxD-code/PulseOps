@@ -1506,6 +1506,24 @@ function collectPresignedUploadHosts(payload, uploadHosts) {
   return added;
 }
 
+/**
+ * Allow the captcha vendor's own token call.
+ *
+ * reCAPTCHA Enterprise fetches challenge state with a POST, so a read-only
+ * allowance is not enough and the submit is refused with a bare server error.
+ * This is a deliberate, narrow exception to the no-PII-egress rule: the host
+ * and path are the vendor's captcha endpoints exactly, the body is produced by
+ * Google's own script and carries the site key and challenge state rather than
+ * anything typed into the form, and no other host or path is opened.
+ */
+function isAllowedCaptchaTokenRequest(requestUrl, requestType) {
+  const url = parseHttpUrl(requestUrl);
+  if (!url || url.protocol !== "https:") return false;
+  if (!/^www\.(recaptcha\.net|google\.com)$/i.test(canonicalHost(url.hostname))) return false;
+  if (!url.pathname.startsWith("/recaptcha/enterprise")) return false;
+  return ["xhr", "fetch"].includes(String(requestType || "").toLowerCase());
+}
+
 async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) {
   if (!page) throw new Error("navigation guard unavailable");
   const boundary = isNavigationBoundary(originUrl)
@@ -1582,10 +1600,12 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
         const trustedPresignedUpload = isAllowedPresignedUploadRequest(
           requestUrl, requestType, requestMethod, uploadHosts
         );
+        const trustedCaptchaToken = isAllowedCaptchaTokenRequest(requestUrl, requestType);
         if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
+            && !trustedCaptchaToken
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
-          console.log(`    [subresource-block] ${kind} ${requestUrl}`);
+          console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
           await route.abort("blockedbyclient");
           return;
         }
@@ -4974,6 +4994,7 @@ export {
   isAllowedPresignedUploadRequest,
   collectPresignedUploadHosts,
   isInteractiveChallengeUrl,
+  isAllowedCaptchaTokenRequest,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,

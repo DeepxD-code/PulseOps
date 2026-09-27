@@ -21,6 +21,7 @@ import {
   isAllowedPresignedUploadRequest,
   collectPresignedUploadHosts,
   isInteractiveChallengeUrl,
+  isAllowedCaptchaTokenRequest,
   isAllowedNavigationUrl,
   isBlacklistedJob,
   isEligibleJob,
@@ -802,6 +803,21 @@ test("an invisible captcha is not a human obstacle, a checkbox is", () => {
   // Ordinary frames are never challenges.
   assert.equal(isInteractiveChallengeUrl("https://job-boards.greenhouse.io/embed/job_board"), false);
   assert.equal(isInteractiveChallengeUrl(""), false);
+});
+
+test("the captcha token call is allowed, and nothing else on that host is", () => {
+  // reCAPTCHA fetches challenge state with a POST, so the read-only allowance
+  // was not enough and the submit was refused with a bare server error.
+  const token = "https://www.recaptcha.net/recaptcha/enterprise/reload?k=KEY";
+  assert.equal(isAllowedCaptchaTokenRequest(token, "xhr"), true);
+  assert.equal(isAllowedCaptchaTokenRequest(token, "fetch"), true);
+  // Exact hosts and the enterprise path only.
+  assert.equal(
+    isAllowedCaptchaTokenRequest("https://evil.recaptcha.net/recaptcha/enterprise/reload?k=KEY", "xhr"), false,
+  );
+  assert.equal(isAllowedCaptchaTokenRequest("https://www.recaptcha.net/other/collect", "xhr"), false);
+  assert.equal(isAllowedCaptchaTokenRequest(token, "script"), false);
+  assert.equal(isAllowedCaptchaTokenRequest("http://www.recaptcha.net/recaptcha/enterprise/reload", "xhr"), false);
 });
 
 test("a CV may upload only to the host the ATS itself named", () => {
