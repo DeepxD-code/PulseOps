@@ -205,6 +205,13 @@ function isStrictTargetRole(title) {
 // requests remain blocked by the origin guard below.
 const ATS_ASSET_HOSTS = Object.freeze({
   linkedin: ["static.licdn.com", "media.licdn.com"],
+  // Greenhouse serves the whole application runtime (including the widget that
+  // populates dropdowns) from its own CDN. Blocking those scripts leaves the
+  // form inert, so the vendor's declared asset host is trusted exactly.
+  greenhouse: ["job-boards.cdn.greenhouse.io"],
+  lever: ["cdn.lever.co"],
+  ashby: ["cdn.ashbyhq.com"],
+  workday: ["assets.ctfassets.net"],
 });
 const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
 // Static resources that cannot execute or read data, so a CDN origin is safe.

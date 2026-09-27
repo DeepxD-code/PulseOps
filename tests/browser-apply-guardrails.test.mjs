@@ -655,6 +655,18 @@ test("navigation trust uses exact hosts/origins and pins after a service crossin
   assert.equal(isAllowedNavigationUrl("https://job-boards.greenhouse.io/form", "lever", boundary), false);
 });
 
+test("an ATS's own CDN may serve its scripts, but no other host may", () => {
+  // Greenhouse ships the entire application runtime from its CDN; blocking it
+  // leaves the form inert with empty dropdowns.
+  assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root.js", "script", "greenhouse"), true);
+  assert.equal(isAllowedAssetRequest("https://cdn.ashbyhq.com/app.js", "script", "ashby"), true);
+  // The same script is not trusted for a different ATS, nor for a lookalike host.
+  assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root.js", "script", "lever"), false);
+  assert.equal(isAllowedAssetRequest("https://evil.job-boards.cdn.greenhouse.io.attacker.net/root.js", "script", "greenhouse"), false);
+  // And a different ATS gets no blanket trust.
+  assert.equal(isAllowedAssetRequest("https://cdn.lever.co/app.js", "script", "greenhouse"), false);
+});
+
 test("inert static assets load from any CDN, but scripts stay host-restricted", () => {
   // A blocked stylesheet leaves the application unstyled and its dropdowns
   // inert, which makes the form impossible to complete.
