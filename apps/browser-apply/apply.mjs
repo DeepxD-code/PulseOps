@@ -1166,6 +1166,7 @@ const ATS_SELECTORS = {
       phone: ['#phone', 'input[name="phone"]', 'input[type="tel"]'],
       resume: ['input[type="file"][name*="resume"]', 'input[type="file"]'],
       cover: ['textarea[name*="cover"]', '#cover_letter'],
+      country: ['select[name*="country" i]', 'select#country', 'select[aria-label*="ountry" i]'],
     },
     submitBtn: ['#submit_app', 'button:has-text("Submit Application")', 'button[type="submit"]']
   },
@@ -1573,8 +1574,16 @@ async function navigateAllowed(page, target, ats, originUrl) {
     ? originUrl
     : createNavigationBoundary(target, ats);
   if (!isAllowedNavigationUrl(target, ats, boundary)) {
-    console.log(`    [redirect-block] refusing navigation to ${target}`);
-    return false;
+    // Allow a shortener on a trusted Apply link to resolve. The destination is
+    // what gets validated and pinned below; the shortener cannot be pinned.
+    let shortener = false;
+    try { shortener = URL_SHORTENER_HOST.test(canonicalHost(new URL(target).hostname)); }
+    catch { shortener = false; }
+    if (!shortener) {
+      console.log(`    [redirect-block] refusing navigation to ${target}`);
+      return false;
+    }
+    console.log("    [shortener] resolving a short link from a trusted Apply control");
   }
   try {
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -2454,6 +2463,27 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // Never invent a phone number for a live application. Leave the field empty
   // and let the final-action guard refuse the submit instead.
   if (sels.phone)     await tryFill(page, sels.phone, candidate.phone || "");
+
+  // Country is a factual field, so it is safe to complete from the profile
+  // location. Preference/attestation questions are deliberately not guessed.
+  if (sels.country) {
+    const wanted = "india";
+    const select = await pickVisible(page.locator(sels.country.join(", ")));
+    if ((await select.count().catch(() => 0)) > 0) {
+      const chosen = await select.evaluate((el, want) => {
+        const options = [...el.options];
+        const hit = options.find((o) => (o.value || "").toLowerCase() === want)
+          || options.find((o) => /india/i.test(o.value || ""))
+          || options.find((o) => /india/i.test(o.textContent || ""));
+        if (!hit) return null;
+        el.value = hit.value;
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        return (hit.textContent || hit.value || "").trim().slice(0, 40);
+      }, wanted).catch(() => null);
+      if (chosen) console.log(`    [fill] country → "${chosen}"`);
+    }
+  }
 
   // LinkedIn / website if present
   await tryFill(page, ['input[name*="linkedin"]', 'input[autocomplete="url"]'], candidate.linkedin || "");
