@@ -2163,6 +2163,34 @@ function controlSignatureMatcher() {
   };
 }
 
+/**
+ * Report what the page says after a submit click that produced no
+ * confirmation. Without this a refused submit is indistinguishable from a
+ * missing form field, and the only signal is the absence of a success message.
+ */
+async function describeSubmitOutcome(page) {
+  if (!page || typeof page.evaluate !== "function") return null;
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0
+        && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const text = (el) => String(el.innerText || "").replace(/\s+/g, " ").trim();
+    const take = (sel, n) => [...document.querySelectorAll(sel)]
+      .filter(visible).map(text).filter(Boolean).slice(0, n);
+    return {
+      heading: take("h1, h2, h3", 3),
+      messages: take("[role='alert'], [role='status'], [class*='error'], [class*='Error'], [class*='invalid']", 6),
+      captcha: Boolean(document.querySelector(
+        "iframe[src*='recaptcha'], iframe[title*='recaptcha' i], [class*='recaptcha'], [data-sitekey]",
+      )),
+      stillOnForm: Boolean(document.querySelector("input[type='file'], textarea")),
+    };
+  }).catch(() => null);
+}
+
 async function describeEmptyEntryFields(page) {
   if (!page || typeof page.evaluate !== "function") return [];
   return page.evaluate(() => {
@@ -4223,6 +4251,16 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
     // Diagnose before the context closes, otherwise the page is gone.
     if (clicked && !confirmed) {
+      // Say what the page actually says. A silent refusal is otherwise
+      // indistinguishable from an unfilled field.
+      const outcome = await describeSubmitOutcome(page).catch(() => null);
+      if (outcome) {
+        if (outcome.heading.length) console.log(`  [page] heading → ${outcome.heading.join(" | ").slice(0, 140)}`);
+        if (outcome.messages.length) console.log(`  [page] message → ${outcome.messages.join(" | ").slice(0, 400)}`);
+        if (outcome.captcha) console.log("  [page] a captcha widget is present on the page");
+        if (outcome.stillOnForm) console.log("  [page] still showing the application form (not accepted)");
+        await page.screenshot({ path: screenshotPath.replace("preview", "unconfirmed"), fullPage: true }).catch(() => {});
+      }
       const empty = await describeEmptyEntryFields(page).catch(() => []);
       const consents = await describeUncheckedConsents(page).catch(() => []);
       // Only a required blank actually stops the form. An unanswered optional
@@ -4829,6 +4867,7 @@ export {
   isEligibleJob,
   isMockJob,
   controlSignatureMatcher,
+  describeSubmitOutcome,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,
