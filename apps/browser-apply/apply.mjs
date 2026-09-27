@@ -3886,10 +3886,6 @@ if outreach_columns and "job_id" in outreach_columns and mode != "job":
     if "notes" in outreach_columns:
         blocked.append("LOWER(COALESCE(o.\"notes\",'')) LIKE '%g4:%' OR LOWER(COALESCE(o.\"notes\",'')) LIKE '%g5:%' OR LOWER(COALESCE(o.\"notes\",'')) LIKE '%cooldown%'")
     scope = ["o.\"job_id\"=j.\"id\""]
-    if "company" in outreach_columns:
-        scope.append("LOWER(TRIM(COALESCE(o.\"company\",''))) = LOWER(TRIM(COALESCE(j.\"company\",'')))")
-    if "company_normalised" in outreach_columns and "company_normalised" in job_columns:
-        scope.append("LOWER(COALESCE(o.\"company_normalised\",'')) = LOWER(COALESCE(j.\"company_normalised\",''))")
     if blocked:
         where.append("NOT EXISTS (SELECT 1 FROM outreach o WHERE (" + " OR ".join(scope) + ") AND (" + " OR ".join(blocked) + "))")
 
@@ -3925,15 +3921,12 @@ for row in rows:
     if outreach_columns and "id" in item:
         outreach_rows = []
         if "job_id" in outreach_columns:
-            scope = ["o.\"job_id\"=?"]
-            scope_params = [item["id"]]
-            if "company" in outreach_columns:
-                scope.append("LOWER(TRIM(COALESCE(o.\"company\",''))) = LOWER(TRIM(?))")
-                scope_params.append(str(item.get("company", "")))
-            if "company_normalised" in outreach_columns and "company_normalised" in item:
-                scope.append("LOWER(COALESCE(o.\"company_normalised\",'')) = LOWER(COALESCE(?, ''))")
-                scope_params.append(str(item.get("company_normalised", "")))
-            outreach_rows = conn.execute("SELECT o.* FROM outreach o WHERE " + " OR ".join(scope), scope_params).fetchall()
+            # Scope strictly to this listing. Matching on company as well meant a
+            # single outreach to one role silently blocked every other role at
+            # that company, which is not what the cooldown is for.
+            outreach_rows = conn.execute(
+                'SELECT o.* FROM outreach o WHERE o."job_id"=?', [item["id"]],
+            ).fetchall()
         item["_outreach_statuses"] = [str(r["status"]) for r in outreach_rows] if "status" in outreach_columns else []
         item["_outreach_channels"] = [str(r["channel"]) for r in outreach_rows] if "channel" in outreach_columns else []
         item["_outreach_notes"] = [str(r["notes"]) for r in outreach_rows] if "notes" in outreach_columns else []
