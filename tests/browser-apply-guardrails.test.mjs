@@ -655,13 +655,20 @@ test("navigation trust uses exact hosts/origins and pins after a service crossin
   assert.equal(isAllowedNavigationUrl("https://job-boards.greenhouse.io/form", "lever", boundary), false);
 });
 
-test("only exact LinkedIn passive asset hosts are exempted from the origin guard", () => {
+test("inert static assets load from any CDN, but scripts stay host-restricted", () => {
+  // A blocked stylesheet leaves the application unstyled and its dropdowns
+  // inert, which makes the form impossible to complete.
   assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.css", "stylesheet", "linkedin"), true);
   assert.equal(isAllowedAssetRequest("https://media.licdn.com/image.png", "image", "linkedin"), true);
+  assert.equal(isAllowedAssetRequest("https://cdn.example.com/site.css", "stylesheet", "generic"), true);
+  assert.equal(isAllowedAssetRequest("https://cdn.example.com/font.woff2", "font", "generic"), true);
+  // Scripts can exfiltrate, so they remain restricted to exact known hosts.
   assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.js", "fetch", "linkedin"), false);
   assert.equal(isAllowedAssetRequest("https://static.licdn.com/a.js", "script", "generic"), false);
   assert.equal(isAllowedAssetRequest("https://evil.static.licdn.com/a.js", "script", "linkedin"), false);
   assert.equal(isAllowedAssetRequest("http://static.licdn.com/a.js", "script", "linkedin"), false);
+  // Plain HTTP is never allowed, even for inert assets.
+  assert.equal(isAllowedAssetRequest("http://cdn.example.com/a.css", "stylesheet", "generic"), false);
 });
 
 test("only exact LinkedIn read-only API requests are exempted", () => {

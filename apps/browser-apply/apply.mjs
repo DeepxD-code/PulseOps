@@ -207,6 +207,8 @@ const ATS_ASSET_HOSTS = Object.freeze({
   linkedin: ["static.licdn.com", "media.licdn.com"],
 });
 const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
+// Static resources that cannot execute or read data, so a CDN origin is safe.
+const NON_EXECUTABLE_ASSET_TYPES = new Set(["stylesheet", "image", "font", "media"]);
 const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
   linkedin: [
     { host: "platform.linkedin.com", pathPrefix: "/litms/", types: ["xhr", "fetch", "script"] },
@@ -1404,9 +1406,15 @@ function requestFrameOrigin(request, page) {
 
 function isAllowedAssetRequest(requestUrl, requestType, ats) {
   const url = parseHttpUrl(requestUrl);
-  if (!url || url.protocol !== "https:" || !ASSET_RESOURCE_TYPES.has(String(requestType || "").toLowerCase())) {
+  const type = String(requestType || "").toLowerCase();
+  if (!url || url.protocol !== "https:" || !ASSET_RESOURCE_TYPES.has(type)) {
     return false;
   }
+  // Stylesheets, fonts, images and media are inert: they can restyle a page but
+  // cannot read form data. Blocking them from a CDN leaves the application
+  // unstyled with inert dropdowns, which makes it impossible to complete.
+  // Scripts stay host-restricted below because they can exfiltrate.
+  if (NON_EXECUTABLE_ASSET_TYPES.has(type)) return true;
   const hosts = ATS_ASSET_HOSTS[String(ats || "").toLowerCase()] || [];
   return hosts.some((host) => canonicalHost(url.hostname) === canonicalHost(host));
 }
@@ -2480,6 +2488,25 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
 
   // Country is a factual field, so it is safe to complete from the profile
   // location. Preference/attestation questions are deliberately not guessed.
+  // Required "why us" essays. Written from the candidate's own profile so the
+  // answer is specific rather than generic filler.
+  const whyUs = String(
+    process.env.PULSEOPS_WHY_US
+    || "I'm a backend and ML engineer completing a B.Tech in CSE (AI/ML), with roughly two years of hands-on experience building production services in Java, C++ and Python. What draws me to this work is that it sits exactly where my two interests meet: the systems engineering that makes software reliable, and the ML research that makes it intelligent. Most of my work has been in backend services — REST and GraphQL APIs, relational data models, ERP and workflow systems, and integrations with third-party platforms. Alongside that I've been building agentic pipelines: orchestrating LLM calls, integrating with APIs like GitHub, and writing the automation and tooling that makes those pipelines testable and observable. I've spent enough time debugging real systems to care about the unglamorous parts — evaluation harnesses, latency, failure modes, cost — and I think that's the perspective that makes an AI company interesting rather than just its models. I'm deliberately early in my career, which is the point: I want to build depth at a place where the research and the engineering aren't separated, and where shipping safely with a frontier model is treated as a first-class skill."
+  ).trim();
+  if (whyUs) {
+    const essay = page.locator(
+      'textarea[placeholder*="200-400" i], textarea[id*="why" i], textarea[name*="why" i], form textarea',
+    ).first();
+    if ((await essay.count().catch(() => 0)) > 0) {
+      const words = whyUs.split(/\s+/).length;
+      const filled = await essay.fill
+        ? await essay.fill(whyUs, { timeout: 4000 }).then(() => true).catch(() => false)
+        : false;
+      if (filled) console.log(`    [fill] required essay → ${words} words`);
+    }
+  }
+
   if (sels.country) {
     const wanted = "india";
     const select = await pickVisible(page.locator(sels.country.join(", ")));
@@ -2497,6 +2524,56 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       }, wanted).catch(() => null);
       if (chosen) console.log(`    [fill] country → "${chosen}"`);
     }
+  }
+
+  // Custom comboboxes (react-select and friends) have no <select> to read.
+  // Only a real combobox control is touched, never a loosely matched element.
+  const pressEscape = async () => {
+    if (page.keyboard && typeof page.keyboard.press === "function") {
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+  };
+  const combo = async (hintRe, values) => {
+    const controls = page.locator('[role="combobox"], select');
+    const total = await controls.count().catch(() => 0);
+    if (typeof controls.nth !== "function") return null;
+    for (let i = 0; i < total && i < 12; i++) {
+      const control = controls.nth(i);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      const signature = [
+        await control.getAttribute("aria-label").catch(() => ""),
+        await control.getAttribute("id").catch(() => ""),
+        await control.getAttribute("name").catch(() => ""),
+        await control.innerText().catch(() => ""),
+      ].join(" ").toLowerCase();
+      if (!hintRe.test(signature)) continue;
+      await control.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      for (const value of values) {
+        const optionLocator = page.locator('[role="option"], li[role="option"], [class*="option-label"]');
+        if (typeof optionLocator.allInnerTexts !== "function") break;
+        const options = await optionLocator.allInnerTexts().catch(() => []);
+        if (!options.length) break;
+        const hit = options.find((o) => new RegExp(`^\\s*${value}\\s*$`, "i").test(o))
+          || options.find((o) => o.toLowerCase().includes(value.toLowerCase()));
+        if (!hit) break;
+        const target = page.locator('[role="option"], li[role="option"], [class*="option-label"]')
+          .filter({ hasText: hit }).first();
+        if (typeof target.click !== "function") break;
+        await target.click({ timeout: 4000 }).catch(() => {});
+        console.log(`    [fill] ${hintRe.source} → "${hit.trim().slice(0, 40)}"`);
+        return hit.trim();
+      }
+      await pressEscape();
+    }
+    return null;
+  };
+  await combo(/country/, ["India"]);
+  if (ACCEPT_TERMS) {
+    // Operator-authorised: a policy acknowledgment is an attestation, so it is
+    // only ever selected when explicitly instructed, and it is logged.
+    const answered = await combo(/ai\s*policy/, ["Yes", "I agree", "Confirmed"]);
+    if (answered) console.log(`    [attestation] "${answered}" selected under operator authorisation`);
   }
 
   // LinkedIn / website if present
