@@ -2534,43 +2534,40 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     }
   };
   const combo = async (hintRe, values) => {
-    const controls = page.locator('[role="combobox"], select');
+    const controls = page.locator('[role="combobox"]');
     const total = await controls.count().catch(() => 0);
     if (typeof controls.nth !== "function") return null;
-    for (let i = 0; i < total && i < 12; i++) {
+    const OPTION = '[role="option"]';
+    for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
       const signature = [
         await control.getAttribute("aria-label").catch(() => ""),
         await control.getAttribute("id").catch(() => ""),
         await control.getAttribute("name").catch(() => ""),
-        await control.innerText().catch(() => ""),
       ].join(" ").toLowerCase();
       if (!hintRe.test(signature)) continue;
+      const wanted = values[0] || "";
+      // react-select is driven by keyboard: focus, type to filter, then Enter
+      // to commit the highlighted option. Clicking an option element is
+      // unreliable because the menu is re-rendered on every keystroke.
       await control.click({ timeout: 4000 }).catch(() => {});
-      await page.waitForTimeout(900);
-      // react-select and friends render options as role="option" or as elements
-      // whose class simply contains "option"; match on visible short text only.
-      const optionLocator = page.locator(
-        '[role="option"], li[role="option"], [class*="option"], [class*="Option"]',
-      );
-      if (typeof optionLocator.allInnerTexts !== "function") break;
-      const options = (await optionLocator.allInnerTexts().catch(() => []))
-        .map((o) => String(o).replace(/\s+/g, " ").trim())
-        .filter((o) => o && o.length <= 60);
-      if (!options.length) break;
-      for (const value of values) {
-        const hit = options.find((o) => new RegExp(`^${value}$`, "i").test(o))
-          || options.find((o) => new RegExp(`^${value}\\b`, "i").test(o))
-          || options.find((o) => o.toLowerCase() === value.toLowerCase());
-        if (!hit) continue;
-        const target = page.locator(
-          '[role="option"], li[role="option"], [class*="option"], [class*="Option"]',
-        ).filter({ hasText: hit }).first();
-        if (typeof target.click !== "function") continue;
-        await target.click({ timeout: 4000 }).catch(() => {});
-        console.log(`    [fill] ${hintRe.source} → "${hit.slice(0, 40)}"`);
-        return hit;
+      await page.waitForTimeout(300);
+      if (page.keyboard && typeof page.keyboard.type === "function") {
+        await page.keyboard.type(wanted.slice(0, 4), { delay: 45 }).catch(() => {});
+        await page.waitForTimeout(800);
+        const count = await page.locator(OPTION).count().catch(() => 0);
+        console.log(`    [combo] ${hintRe.source}: ${count} option(s) after typing "${wanted.slice(0, 4)}"`);
+        if (count > 0) {
+          const label = ((await page.locator(OPTION).first().innerText().catch(() => "")) || "")
+            .replace(/\s+/g, " ").trim().slice(0, 40);
+          if (typeof page.keyboard.press === "function") {
+            await page.keyboard.press("Enter").catch(() => {});
+          }
+          await page.waitForTimeout(600);
+          console.log(`    [fill] ${hintRe.source} → "${label}"`);
+          return label;
+        }
       }
       await pressEscape();
     }
