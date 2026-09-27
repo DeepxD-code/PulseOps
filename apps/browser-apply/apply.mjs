@@ -2249,19 +2249,16 @@ async function describeEmptyEntryFields(page) {
       if (["hidden", "submit", "button", "file", "checkbox", "radio"].includes(type)) return;
       if (String(el.value || "").trim()) return;
       // A react-select keeps its chosen value in a sibling element and leaves
-      // the search input blank, so a filled widget looks empty here. Two
-      // reliable signals: the rendered single-value node, or the live region
-      // announcing "option … selected" (which is also the only description
-      // this markup gives, since the inputs carry no name or aria-label).
+      // the search input blank, so a filled widget looks empty here. Only the
+      // rendered value counts: the live region always contains the word
+      // "selected" as boilerplate, so matching on text reported unanswered
+      // questions as answered and hid them from the diagnostic.
       if (el.getAttribute("role") === "combobox") {
         const wrapper = el.closest("[class*='select__control']")
           || el.closest("[class*='select__container']")
           || el.parentElement;
-        if (wrapper) {
-          const chosen = wrapper.querySelector("[class*='single-value']");
-          if (chosen && String(chosen.textContent || "").trim()) return;
-          if (/selected/i.test(String(wrapper.textContent || ""))) return;
-        }
+        const chosen = wrapper && wrapper.querySelector("[class*='single-value']");
+        if (chosen && String(chosen.textContent || "").trim()) return;
       }
       // Internal a11y mirror inputs are not fields a human completes.
       if (el.getAttribute("aria-hidden") === "true") return;
@@ -2745,14 +2742,16 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       // Never overwrite a question that is already answered. A broad hint can
       // match a different question entirely, and re-selecting here would
       // silently write the wrong answer into the wrong field.
+      //
+      // Only the rendered value counts. The live region always contains the
+      // word "selected" as boilerplate, so matching on text made every dropdown
+      // look pre-answered and left required fields empty.
       const already = await control.evaluate((el) => {
         const wrap = el.closest("[class*='select__control']")
           || el.closest("[class*='select__container']")
           || el.parentElement;
-        if (!wrap) return "";
-        const value = wrap.querySelector("[class*='single-value']");
-        if (value && String(value.textContent || "").trim()) return String(value.textContent).trim();
-        return /selected/i.test(String(wrap.textContent || "")) ? "(already set)" : "";
+        const value = wrap && wrap.querySelector("[class*='single-value']");
+        return value ? String(value.textContent || "").trim() : "";
       }).catch(() => "");
       if (already) {
         console.log(`    [combo] ${hintRe.source}: already answered "${already.slice(0, 30)}" — not overwriting`);

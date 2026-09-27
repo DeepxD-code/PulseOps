@@ -763,6 +763,24 @@ test("the page-side matcher is self-contained so it can be serialised", () => {
   }
 });
 
+test("a dropdown is never treated as answered by matching loose text", () => {
+  // react-select's live region always contains the word "selected" as
+  // boilerplate. Treating that as an answer made every dropdown look
+  // pre-answered, so required questions were silently left empty and the
+  // submit was refused with "This field is required".
+  const source = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "apps", "browser-apply", "apply.mjs"),
+    "utf8",
+  );
+  assert.equal(
+    /\/selected\/i\s*\.\s*test|selected"\)\s*\?/i.test(source),
+    false,
+    "answer detection must rely on the rendered value, not on the word 'selected'",
+  );
+  // The precise signal must still be present.
+  assert.match(source, /single-value/);
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.
