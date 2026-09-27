@@ -37,37 +37,63 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
+import { BASIC_HTML, detectBasicHtml } from "./page-probe.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
 
 /**
- * Read a job page as plain text, falling back to the raw HTML when the rendered
- * DOM yields nothing. Some employer career sites are effectively static, and a
- * stylesheet-free read beats fighting their script bundle.
+ * Read the rendered page as text, falling back to stylesheet-free HTML when the
+ * DOM is empty. Only used once a browser already exists.
  */
 async function readPageText(page) {
-  if (page && typeof page.evaluate === "function") {
-    const text = await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ")).catch(() => "");
-    if (text && text.trim().length > 80) return text;
-    let html = "";
-    try { html = await page.content(); } catch { html = ""; }
-    const basic = basicHtmlTextFromHtml(html).replace(/\s+/g, " ");
-    if (basic && basic.trim().length > 80) {
-      console.log("    [basic-html] using stylesheet-free page text");
-      return basic;
+  if (!page || typeof page.evaluate !== "function") return "";
+  const text = await page.evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ")).catch(() => "");
+  if (text && text.trim().length > 80) return text;
+  let html = "";
+  try { html = await page.content(); } catch { html = ""; }
+  const basic = basicHtmlTextFromHtml(html).replace(/\s+/g, " ");
+  if (basic && basic.trim().length > 80) return basic;
+  return text && text.trim() ? text : "";
+}
+
+/**
+ * Classify a job page with a plain HTTP fetch, before any browser exists.
+ * Basic server-rendered pages are read straight from that HTML; only styled or
+ * script-driven pages are worth a full browser.
+ */
+async function probeJobPage(url) {
+  let html = "";
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        // Identify honestly; some career pages reject a bare browser UA.
+        "User-Agent": "Mozilla/5.0 (compatible; PulseOpsJobBot/1.0)",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) {
+      return { mode: "unavailable", reason: `HTTP ${response.status}`, basic: false, text: "", html: "" };
     }
-    if (text && text.trim()) return text;
+    html = await response.text();
+  } catch (error) {
+    return { mode: "unavailable", reason: String(error).slice(0, 80), basic: false, text: "", html: "" };
   }
-  return "";
+  return { ...detectBasicHtml(html), html };
 }
 
 /**
  * Skip a posting that states a salary under the floor. A role with no stated
- * pay is never skipped for this reason.
+ * pay is never skipped for this reason. Uses the cheap probe when available so
+ * an unstyled page never needs a browser at all.
  */
-async function rejectLowStatedSalary(page, job) {
-  const text = await readPageText(page);
+async function rejectLowStatedSalary(page, job, probe = null) {
+  let text = probe && probe.basic ? probe.text : "";
+  if (!text) {
+    text = await readPageText(page);
+  }
   if (!text) return null;
   const { skip, monthly } = statedSalaryTooLow(`${job.title || ""} ${text}`);
   if (!skip) return null;
@@ -2736,6 +2762,15 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "authwall-skip", pdf: resumePdf };
   }
 
+  // Cheap pre-flight: classify the page over plain HTTP first. Unstyled
+  // server-rendered pages can be read (and salary-checked) with no browser.
+  const pageProbe = await probeJobPage(url);
+  if (pageProbe.mode === BASIC_HTML) {
+    console.log(`  [probe] basic HTML page (${pageProbe.reason}) — ${pageProbe.signals.textLength} chars of text`);
+  } else if (pageProbe.mode !== "unavailable") {
+    console.log(`  [probe] needs a browser (${pageProbe.reason})`);
+  }
+
   // EDGE mode: share one persistent Edge context across jobs (never close it)
   const context = sharedCtx || await browser.newContext({
     viewport: { width: 1366, height: 900 },
@@ -2794,7 +2829,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
 
     // A posting that states pay under the floor is not worth an application.
-    const salaryBlock = await rejectLowStatedSalary(page, job);
+    const salaryBlock = await rejectLowStatedSalary(page, job, pageProbe);
     if (salaryBlock) {
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: salaryBlock.action, pdf: resumePdf };
