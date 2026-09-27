@@ -217,6 +217,28 @@ test("an aggregator page may cross once onto the employer's own careers site", (
   assert.equal(tryPinExternalApplyOrigin(boundary, "http://careers.hancod.io/x", "generic", true), false);
 });
 
+test("a shortener can never become the pinned apply origin", () => {
+  const boundary = {
+    ats: "linkedin",
+    initialOrigin: "https://www.linkedin.com",
+    initialHost: "www.linkedin.com",
+    pinnedOrigin: null,
+  };
+  // The shortener itself must never be pinned, even when policy is on.
+  for (const hop of [
+    "https://bit.ly/afpsafety",
+    "https://t.co/abc",
+    "https://tinyurl.com/x",
+    "https://is.gd/x",
+  ]) {
+    assert.equal(tryPinExternalApplyOrigin(boundary, hop, "linkedin", true), false, hop);
+  }
+  assert.equal(boundary.pinnedOrigin, null);
+  // The resolved destination is fine.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://anthropic.com/apply", "linkedin", true), true);
+  assert.equal(boundary.pinnedOrigin, "https://anthropic.com");
+});
+
 test("Ashby company boards are rejected but job-scoped listings are allowed", () => {
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/vercel"), false);
   assert.equal(isAshbyJobListing("https://jobs.ashbyhq.com/sprinto"), false);

@@ -1542,7 +1542,11 @@ const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
 );
 
 // Hosts that must never become an application target regardless of policy.
-const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|pastebin\.com|discord\.gg|wa\.me)\b/i;
+// Hosts that must never become an application target regardless of policy.
+// Shorteners are handled separately: they are legitimate when they merely
+// forward to a real application page, so the *resolved* host is what matters.
+const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:pastebin\.com|discord\.gg|wa\.me|bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
+const URL_SHORTENER_HOST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
 
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
   if (!enabled) return false;
@@ -1550,7 +1554,11 @@ function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EX
   const url = parseHttpUrl(landingUrl);
   if (!url || url.protocol !== "https:" || url.port) return false;
   const host = canonicalHost(url.hostname);
-  if (!host || EXTERNAL_APPLY_HOST_DENYLIST.test(host)) return false;
+  if (!host) return false;
+  // A shortener is fine as a hop, but the host we actually pin must be the
+  // destination it resolves to, never the shortener itself.
+  if (URL_SHORTENER_HOST.test(host)) return false;
+  if (EXTERNAL_APPLY_HOST_DENYLIST.test(host)) return false;
   // Exactly one off-site hop is ever granted, and the pin never returns to the
   // ATS host, so a redirect chain still cannot walk further.
   if (boundary.externalApplyHost) return false;
@@ -1609,7 +1617,14 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
           target = new URL(href, page.url()).toString();
           if (/^https?:/i.test(target)) httpTarget = target;
         } catch { target = null; }
-        if (httpTarget && !isAllowedNavigationUrl(httpTarget, ats, originUrl)) {
+        // A shortener on a trusted Apply link (Anthropic uses bit.ly) is allowed
+        // to resolve. navigateAllowed pins the real destination, and the
+        // shortener host itself can never become the pinned origin.
+        const isShortenerHop = (() => {
+          try { return URL_SHORTENER_HOST.test(canonicalHost(new URL(httpTarget).hostname)); }
+          catch { return false; }
+        })();
+        if (httpTarget && !isAllowedNavigationUrl(httpTarget, ats, originUrl) && !isShortenerHop) {
           console.log(`    [redirect-block] apply link is outside the exact ATS boundary`);
           return { clicked: false, blocked: true, reason: "redirect" };
         }
@@ -1617,7 +1632,21 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
 
       const oneStep = await pageHasOneStepApplicationForm(page);
       const type = typeof el.getAttribute === "function" ? await el.getAttribute("type").catch(() => "") : "";
-      const classification = classifyApplyControl({ label, href, selector: sel, oneStep, isSubmit: type === "submit" });
+      // On these ATS the job page's Apply control only opens the form. The
+      // one-step heuristic cannot tell that apart from a real submit, so force
+      // it to intermediate or the fields get filled *after* the "submission".
+      const forceIntermediate = APPLY_IS_ALWAYS_INTERMEDIATE.has(ats) && type !== "submit";
+      const classification = classifyApplyControl({
+        label, href, selector: sel,
+        oneStep: forceIntermediate ? false : oneStep,
+        isSubmit: type === "submit",
+      });
+      if (forceIntermediate && classification.final) {
+        classification.classification = "intermediate";
+        classification.final = false;
+        classification.intermediate = true;
+        classification.safeToClick = true;
+      }
       console.log(`    [apply-class] ${classification.classification} (${label})`);
       if (classification.classification === "unknown") {
         return { clicked: false, blocked: true, reason: "unknown-control" };
