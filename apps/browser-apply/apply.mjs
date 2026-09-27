@@ -233,9 +233,13 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
     // Client-side email validation.
     { host: "email-address-validator.us.greenhouse.io", pathPrefix: "/address/", types: ["xhr", "fetch"] },
     // reCAPTCHA Enterprise runs on submit. Without it the submit cannot be
-    // validated and the board fails it silently, with no error to read.
-    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/", types: ["script"] },
-    { host: "www.google.com", pathPrefix: "/recaptcha/", types: ["script"] },
+    // validated and the board fails it with a bare "There was an error
+    // processing your application". Invisible reCAPTCHA executes inside a
+    // cross-origin iframe, so "document" is required as well as "script" —
+    // that iframe is the vendor's own and receives only the site key, never
+    // the form contents.
+    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/", types: ["script", "document"] },
+    { host: "www.google.com", pathPrefix: "/recaptcha/", types: ["script", "document"] },
     { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image"] },
   ],
 });

@@ -832,6 +832,15 @@ test("the submit-time captcha and vendor data are reachable, writes are not", ()
     ),
     true,
   );
+  // Invisible reCAPTCHA executes in a cross-origin iframe, so the anchor must
+  // load as a document or no token is ever produced and the submit is refused.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://www.recaptcha.net/recaptcha/enterprise/anchor?ar=1&k=KEY&size=invisible",
+      "document", "GET", "greenhouse",
+    ),
+    true,
+  );
   // A captcha script is not a general-purpose exemption: no writes, and the
   // same trust is not extended to another ATS.
   assert.equal(
