@@ -22,6 +22,7 @@ import {
   isBlacklistedJob,
   isEligibleJob,
   isSimulationJob,
+  fieldQuestionText,
   isStrictTargetRole,
   isSubmissionControlLabel,
   isAshbyJobListing,
@@ -686,6 +687,44 @@ test("vendor form data and the resume upload ticket are readable", () => {
     isAllowedReadOnlyApiRequest("https://job-boards.cdn.greenhouse.io/locales/en/x.json", "fetch", "GET", "lever"),
     false,
   );
+});
+
+test("a control's question text is its own prompt, never the whole form", () => {
+  // A few ancestors up is often a wrapper holding the entire form. If its text
+  // were used as the label, every pattern would match every field.
+  const mkNode = (text, children = []) => ({
+    textContent: text,
+    parentElement: null,
+    cloneNode() {
+      return {
+        textContent: text,
+        querySelectorAll: () => children.map((c) => ({ remove() {} })),
+      };
+    },
+  });
+  const field = mkNode("", []);
+  const wrapper = mkNode("Are you open to relocation for this role?", []);
+  const wholeForm = mkNode("Are you open to relocation for this role? Country * Why Anthropic? * Have you ever interviewed here?", []);
+  field.parentElement = wrapper;
+  wrapper.parentElement = wholeForm;
+  wholeForm.parentElement = null;
+
+  const q = fieldQuestionText(field);
+  assert.match(q, /relocation/);
+  // The rest of the form must not leak in.
+  assert.doesNotMatch(q, /Anthropic/);
+  assert.doesNotMatch(q, /Country/);
+
+  // A wrapper that is still just the body is not a question either.
+  const bare = mkNode("everything", []);
+  bare.parentElement = null;
+  assert.equal(fieldQuestionText(bare), "everything");
+
+  // When no ancestor is small enough to be a question, there is no question to
+  // match on — returning "" keeps the caller from matching unrelated text.
+  const huge = mkNode("x".repeat(400), []);
+  huge.parentElement = null;
+  assert.equal(fieldQuestionText(huge), "");
 });
 
 test("an ATS's own CDN may serve its scripts, but no other host may", () => {

@@ -2101,6 +2101,43 @@ function readLineFromStdin(timeoutMs = 180000) {
  * confirmation is almost always blocked by one of these, and many portals
  * mark requiredness with a CSS asterisk rather than the required attribute.
  */
+/**
+ * Build a searchable signature for a form control: its own attributes plus the
+ * text of the surrounding wrapper. Many widgets carry no aria-label or name
+ * (id="question_123…"), so the human-readable prompt only exists in an
+ * ancestor — up to five levels up. Serialised into the page, so it must not
+ * close over anything.
+ */
+/**
+ * Read just the question text belonging to one control.
+ *
+ * Walking ancestors and taking their text is not enough: a few levels up is
+ * often a wrapper holding the entire form, so the "label" becomes every
+ * question on the page and any pattern matches any field. Instead, find the
+ * smallest wrapper that holds the control, clone it, strip the widget internals
+ * and the live region, and keep only what is left — which is the prompt.
+ */
+function fieldQuestionText(el) {
+  let wrap = el;
+  for (let i = 0; i < 8 && wrap; i++) {
+    const len = String(wrap.textContent || "").replace(/\s+/g, " ").trim().length;
+    if (len > 0 && len <= 260) break;
+    wrap = wrap.parentElement;
+  }
+  // Guarded so the helper is also callable outside a page (it is unit-tested
+  // directly), where `document` does not exist.
+  if (!wrap) return "";
+  if (typeof document !== "undefined" && wrap === document.body) return "";
+  const clone = wrap.cloneNode(true);
+  clone.querySelectorAll(
+    "input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
+    + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
+  ).forEach((node) => node.remove());
+  const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
+  // A remainder this long is not a question, it leaked in more of the form.
+  return text.length <= 260 ? text : "";
+}
+
 async function describeEmptyEntryFields(page) {
   if (!page || typeof page.evaluate !== "function") return [];
   return page.evaluate(() => {
@@ -2114,14 +2151,57 @@ async function describeEmptyEntryFields(page) {
       const type = String(el.type || "").toLowerCase();
       if (["hidden", "submit", "button", "file", "checkbox", "radio"].includes(type)) return;
       if (String(el.value || "").trim()) return;
+      // A react-select keeps its chosen value in a sibling element and leaves
+      // the search input blank, so a filled widget looks empty here. Two
+      // reliable signals: the rendered single-value node, or the live region
+      // announcing "option … selected" (which is also the only description
+      // this markup gives, since the inputs carry no name or aria-label).
+      if (el.getAttribute("role") === "combobox") {
+        const wrapper = el.closest("[class*='select__control']")
+          || el.closest("[class*='select__container']")
+          || el.parentElement;
+        if (wrapper) {
+          const chosen = wrapper.querySelector("[class*='single-value']");
+          if (chosen && String(chosen.textContent || "").trim()) return;
+          if (/selected/i.test(String(wrapper.textContent || ""))) return;
+        }
+      }
+      // Internal a11y mirror inputs are not fields a human completes.
+      if (el.getAttribute("aria-hidden") === "true") return;
+      if (el.readOnly && el.getAttribute("tabindex") === "-1") return;
+      // Required-ness decides whether a blank actually blocks the form. A
+      // "*" in the prompt is the convention these boards use, and the native
+      // required attribute covers the rest. Optional blanks must not be
+      // reported as a blocker, or every run dead-ends on a fair question.
+      let prompt = "";
+      for (let node = el, i = 0; node && i < 6; i++) {
+        node = node.parentElement;
+        const text = String(node?.textContent || "").replace(/\s+/g, " ").trim();
+        if (text) { prompt = text; break; }
+      }
+      const required = Boolean(el.required)
+        || el.getAttribute("aria-required") === "true"
+        || prompt.includes("*");
       const label = el.getAttribute("aria-label")
         || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent)
         || el.placeholder
         || el.name
-        || type;
-      out.push(String(label).replace(/\s+/g, " ").trim().slice(0, 40));
+        // Falling back to the input type reports every unlabelled field as
+        // "text", which is useless for diagnosis. Prefer the surrounding
+        // prompt, which is the only description such a field has.
+        || (prompt ? prompt : type);
+      out.push({
+        label: String(label).replace(/\s+/g, " ").trim().slice(0, 40),
+        required,
+      });
     });
-    return [...new Set(out)].slice(0, 8);
+    const seen = new Set();
+    return out.filter((f) => {
+      const key = `${f.label}|${f.required}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 8);
   }).catch(() => []);
 }
 
@@ -2555,36 +2635,88 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
-      const signature = [
-        await control.getAttribute("aria-label").catch(() => ""),
-        await control.getAttribute("id").catch(() => ""),
-        await control.getAttribute("name").catch(() => ""),
-      ].join(" ").toLowerCase();
-      if (!hintRe.test(signature)) continue;
+      // Match on the question this control belongs to, falling back to its own
+      // attributes. Never on surrounding form text, which matches everything.
+      // The helper is passed in as an argument: evaluate() serialises the
+      // callback, so a module-scope function called from inside it is simply
+      // undefined in the page.
+      const signature = await control.evaluate((el, questionText) => {
+        const own = [
+          el.getAttribute("aria-label") || "",
+          el.getAttribute("id") || "",
+          el.getAttribute("name") || "",
+        ].join(" ");
+        return `${own} ${questionText(el)}`.trim().toLowerCase();
+      }, fieldQuestionText).catch((e) => {
+        console.log(`    [combo] ${hintRe.source}: matcher failed (${String(e.message || e).slice(0, 80)})`);
+        return "";
+      });
+      if (!hintRe.test(String(signature))) continue;
       const wanted = values[0] || "";
-      // react-select is driven by keyboard: focus, type to filter, then Enter
-      // to commit the highlighted option. Clicking an option element is
-      // unreliable because the menu is re-rendered on every keystroke.
+      // Type to filter, then pick the option that actually matches. Taking the
+      // first option is wrong: "Indian Ocean Territory" sorts before "India".
       await control.click({ timeout: 4000 }).catch(() => {});
       await page.waitForTimeout(300);
       if (page.keyboard && typeof page.keyboard.type === "function") {
-        await page.keyboard.type(wanted.slice(0, 4), { delay: 45 }).catch(() => {});
-        await page.waitForTimeout(800);
-        const count = await page.locator(OPTION).count().catch(() => 0);
-        console.log(`    [combo] ${hintRe.source}: ${count} option(s) after typing "${wanted.slice(0, 4)}"`);
-        if (count > 0) {
-          const label = ((await page.locator(OPTION).first().innerText().catch(() => "")) || "")
-            .replace(/\s+/g, " ").trim().slice(0, 40);
-          if (typeof page.keyboard.press === "function") {
-            await page.keyboard.press("Enter").catch(() => {});
-          }
-          await page.waitForTimeout(600);
-          console.log(`    [fill] ${hintRe.source} → "${label}"`);
-          return label;
+        await page.keyboard.type(wanted.slice(0, 5), { delay: 45 }).catch(() => {});
+      }
+      await page.waitForTimeout(900);
+      const texts = (await page.locator(OPTION).allInnerTexts().catch(() => []))
+        .map((t) => String(t).replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      console.log(`    [combo] ${hintRe.source}: ${texts.length} option(s) after typing "${wanted.slice(0, 5)}"`);
+      if (texts.length) {
+        const hit = texts.find((t) => new RegExp(`^${wanted}\\b`, "i").test(t))
+          || texts.find((t) => new RegExp(`^${wanted}`, "i").test(t));
+        if (hit) {
+          await page.locator(OPTION).filter({ hasText: hit }).first()
+            .click({ timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(500);
+          console.log(`    [fill] ${hintRe.source} → "${hit.slice(0, 40)}"`);
+          return hit;
         }
+        console.log(`    [combo] ${hintRe.source}: no option matched "${wanted}" (${texts.slice(0, 4).join(" | ")})`);
       }
       await pressEscape();
     }
+    // Never fail silently: a hint that matches no control is a bug worth seeing.
+    console.log(`    [combo] ${hintRe.source}: no control matched (${total} combobox checked)`);
+    return null;
+  };
+
+  /**
+   * Answer a free-text question from real profile data, matched on the prompt
+   * the way combo() matches a dropdown. Never invents a value: callers pass
+   * only facts already held in the profile, and skip when the fact is absent.
+   */
+  const answerQuestion = async (hintRe, value, tag) => {
+    const text = String(value ?? "").trim();
+    if (!text) return null;
+    const fields = page.locator('input[type="text"], input[type="url"], input[type="tel"], textarea');
+    const total = await fields.count().catch(() => 0);
+    for (let i = 0; i < total && i < 40; i++) {
+      const field = fields.nth(i);
+      if (!(await field.isVisible().catch(() => false))) continue;
+      if (String(await field.inputValue().catch(() => "")).trim()) continue;
+      const signature = await field.evaluate((el, questionText) => {
+        const own = [
+          el.getAttribute("aria-label") || "",
+          el.getAttribute("id") || "",
+          el.getAttribute("name") || "",
+        ].join(" ");
+        return `${own} ${questionText(el)}`.trim().toLowerCase();
+      }, fieldQuestionText).catch((e) => {
+        console.log(`    [answer] ${tag}: matcher failed (${String(e.message || e).slice(0, 80)})`);
+        return "";
+      });
+      if (!hintRe.test(String(signature))) continue;
+      await field.fill(text).catch(() => {});
+      await page.waitForTimeout(150);
+      console.log(`    [fill] ${tag} → "${text.slice(0, 40)}"`);
+      return text;
+    }
+    // Same rule as combo(): a hint that matches nothing must be visible.
+    console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
   await combo(/country/, ["India"]);
@@ -2602,6 +2734,63 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // LinkedIn / website if present
   await tryFill(page, ['input[name*="linkedin"]', 'input[autocomplete="url"]'], candidate.linkedin || "");
   await tryFill(page, ['input[name*="portfolio"]', 'input[name*="website"]'], candidate.portfolio || "");
+
+  // These boards label their questions as prose ("LinkedIn Profile", "What is
+  // the address from which you plan to work") and give the input no name at
+  // all, so the name-attribute selectors above never match. Answer them by
+  // their prompt instead, from facts already held in the profile.
+  const site = String(candidate.portfolio || candidate.github || "").trim();
+  await answerQuestion(/linkedin/, candidate.linkedin, "linkedin profile");
+  await answerQuestion(/website|portfolio|github/, site, "website");
+  // A stated work location is a fact from the profile, so it is safe to give.
+  await answerQuestion(
+    /address from which|which city|relocat|work from|current location/,
+    String(candidate.current_location || "").trim(),
+    "work location",
+  );
+  if (ACCEPT_TERMS) {
+    // Availability and timeline are commitments about the candidate, so they
+    // are only stated under the operator flag and every answer is logged.
+    const notice = String(candidate.notice_period || "").trim();
+    if (notice) {
+      const start = await answerQuestion(
+        /earliest you would want to (?:start|begin)|when (?:can|could) you start|notice period|available to start/,
+        `${notice} from offer`,
+        "earliest start",
+      );
+      if (start) console.log(`    [commitment] earliest start → "${start}" recorded under operator authorisation`);
+    }
+    const earliest = String(candidate.notice_period || "").trim();
+    if (earliest) {
+      const limits = await answerQuestion(
+        /deadline|timeline (?:constraint|commit)|any (?:other )?commitments/,
+        `None beyond my ${earliest} notice period.`,
+        "timeline constraints",
+      );
+      if (limits) console.log(`    [commitment] timeline constraints → "${limits}" recorded under operator authorisation`);
+    }
+    // Remaining required dropdowns are commitments or facts about the candidate
+    // that no profile field can imply — willingness to relocate, prior interview
+    // history, future residence. They are answered only from
+    // candidate.application_answers, which the operator supplies explicitly. A
+    // missing key leaves the question untouched rather than guessing, and each
+    // answer is logged.
+    const stated = profile?.application_answers || {};
+    const commitments = [
+      { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously)|previous(?:ly)? interview|applied (?:here|before|previously)/, tag: "prior interview history" },
+      { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
+      { key: "future_us_residence", hint: /reside|work|live|located? in the (?:us|usa|united states)|future.*(?:united states|us\b)/, tag: "future US residence" },
+      { key: "requires_visa_sponsorship", hint: /sponsorship|require a visa|need a visa|visa support|work authorization|right to work/, tag: "visa sponsorship" },
+    ];
+    for (const item of commitments) {
+      const value = String(stated[item.key] ?? "").trim();
+      if (!value) continue;
+      const picked = await combo(item.hint, [value]);
+      if (picked) {
+        console.log(`    [commitment] ${item.tag} → "${picked}" recorded under operator authorisation`);
+      }
+    }
+  }
 
   // Cover letter: use HQ recommendation if available (generic placeholder)
   if (sels.cover) {
@@ -3983,11 +4172,17 @@ async function processJob(browser, job, profile, runtime = {}) {
     if (clicked && !confirmed) {
       const empty = await describeEmptyEntryFields(page).catch(() => []);
       const consents = await describeUncheckedConsents(page).catch(() => []);
-      if (empty.length) console.log(`  [blocked-by] empty fields still on the form: ${empty.join(", ")}`);
+      // Only a required blank actually stops the form. An unanswered optional
+      // question is a normal outcome and must not be reported as a blocker,
+      // or every run dead-ends on a fair question.
+      const requiredEmpty = empty.filter((f) => f.required).map((f) => f.label);
+      const optionalEmpty = empty.filter((f) => !f.required).map((f) => f.label);
+      if (requiredEmpty.length) console.log(`  [blocked-by] required fields still empty: ${requiredEmpty.join(", ")}`);
+      if (optionalEmpty.length) console.log(`  [skipped] optional questions left blank: ${optionalEmpty.join(", ")}`);
       if (consents.length) console.log(`  [consent] needs your tick: ${consents.join(" | ")}`);
       // A headed run can simply be finished by hand: hold the window open and
       // poll for the confirmation rather than dead-ending the row.
-      if (OTP_PAUSE && (empty.length || consents.length)) {
+      if (OTP_PAUSE && (requiredEmpty.length || consents.length)) {
         console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
@@ -4580,6 +4775,7 @@ export {
   isCurrentPageTrusted,
   isEligibleJob,
   isMockJob,
+  fieldQuestionText,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,
