@@ -864,6 +864,25 @@ test("the submit-time captcha and vendor data are reachable, writes are not", ()
     ),
     true,
   );
+  // The enterprise/reload call fetches challenge state, and the gstatic bundle
+  // arrives as resource type "other" — both are required to produce a token.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://www.recaptcha.net/recaptcha/enterprise/reload?k=KEY", "xhr", "GET", "greenhouse",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://www.gstatic.com/recaptcha/releases/kemdRjWF/recaptcha__en.js", "other", "GET", "greenhouse",
+    ),
+    true,
+  );
+  // The scope stops at /enterprise: another reCAPTCHA path is not opened.
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.gstatic.com/recaptcha/x.js", "xhr", "GET", "greenhouse"),
+    false,
+  );
   // A captcha script is not a general-purpose exemption: no writes, and the
   // same trust is not extended to another ATS.
   assert.equal(

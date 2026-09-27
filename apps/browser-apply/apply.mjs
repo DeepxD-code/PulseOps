@@ -234,13 +234,18 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
     { host: "email-address-validator.us.greenhouse.io", pathPrefix: "/address/", types: ["xhr", "fetch"] },
     // reCAPTCHA Enterprise runs on submit. Without it the submit cannot be
     // validated and the board fails it with a bare "There was an error
-    // processing your application". Invisible reCAPTCHA executes inside a
-    // cross-origin iframe, so "document" is required as well as "script" —
-    // that iframe is the vendor's own and receives only the site key, never
-    // the form contents.
-    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/", types: ["script", "document"] },
-    { host: "www.google.com", pathPrefix: "/recaptcha/", types: ["script", "document"] },
-    { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image"] },
+    // processing your application". All three layers are needed: the script,
+    // the invisible anchor document, and the enterprise/reload call that
+    // actually fetches challenge state. The gstatic bundle arrives as
+    // resource type "other", not "script". These are read-only GETs to the
+    // vendor's own endpoints and carry only the site key, never form contents;
+    // the scope stops at /enterprise so no other reCAPTCHA path is opened.
+    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/enterprise", types: ["script", "document", "xhr", "fetch"] },
+    { host: "www.google.com", pathPrefix: "/recaptcha/enterprise", types: ["script", "document", "xhr", "fetch"] },
+    // The challenge checkbox, when it appears, is a document in an iframe.
+    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/api2/", types: ["document"] },
+    { host: "www.google.com", pathPrefix: "/recaptcha/api2/", types: ["document"] },
+    { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image", "other"] },
   ],
 });
 const CLAIM_RECOVERY_MS = (() => {
