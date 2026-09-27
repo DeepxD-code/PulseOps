@@ -2578,6 +2578,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   };
   await combo(/country/, ["India"]);
   if (ACCEPT_TERMS) {
+    // A stated willingness to work in-person is a commitment about the
+    // candidate, so it is only ever given when explicitly instructed.
+    const onsite = await combo(/in[- ]person|25\s*%/, ["Yes", "yes"]);
+    if (onsite) console.log(`    [commitment] in-person availability → "${onsite}" recorded under operator authorisation`);
     // Operator-authorised: a policy acknowledgment is an attestation, so it is
     // only ever selected when explicitly instructed, and it is logged.
     const answered = await combo(/ai\s*policy/, ["Yes", "I agree", "Confirmed"]);
