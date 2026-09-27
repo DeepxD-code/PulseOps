@@ -4150,25 +4150,24 @@ async function main() {
       process.exitCode = 4;
       return;
     }
-    // Preflight each job rather than only the first: one row held by a pending
-    // G10 review (or an unclaimable row) must not abort the whole batch.
-    const preparedJobs = [];
+    // Find the first job that can actually be claimed and put it at the front.
+    // Only that one is claimed here: processJob claims each remaining job
+    // itself, so preflight-claiming the whole batch would orphan rows that are
+    // never reached if the run stops early.
+    let firstClaimable = null;
     for (const job of jobs) {
       const prepared = await prepareJobRuntime(job, {});
-      if (prepared.allowed) {
-        // Carry the preflight's exact claim token into processJob. Without this,
-        // the first pass would see its own fresh Applying row as another worker.
-        attachPreparedRuntime(job, prepared);
-        preparedJobs.push(job);
-      } else {
-        console.log(`[skip] #${job.id} ${job.company} — ${prepared.reason}`);
-      }
+      if (prepared.allowed) { firstClaimable = [job, prepared]; break; }
+      console.log(`[skip] #${job.id} ${job.company} — ${prepared.reason}`);
     }
-    if (!preparedJobs.length) {
+    if (!firstClaimable) {
       console.log("[DB] every queued job is held or unclaimable right now; no browser was launched.");
       return;
     }
-    jobs = preparedJobs;
+    // Carry the preflight's exact claim token into processJob. Without this,
+    // the first pass would see its own fresh Applying row as another worker.
+    attachPreparedRuntime(firstClaimable[0], firstClaimable[1]);
+    jobs = [firstClaimable[0], ...jobs.filter((j) => j !== firstClaimable[0])];
   }
   console.log(`[Jobs] ${jobs.length} to process (dry-run=${DRY_RUN}, headed=${HEADED})`);
 
