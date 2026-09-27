@@ -2658,6 +2658,22 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         return "";
       });
       if (!hintRe.test(String(signature))) continue;
+      // Never overwrite a question that is already answered. A broad hint can
+      // match a different question entirely, and re-selecting here would
+      // silently write the wrong answer into the wrong field.
+      const already = await control.evaluate((el) => {
+        const wrap = el.closest("[class*='select__control']")
+          || el.closest("[class*='select__container']")
+          || el.parentElement;
+        if (!wrap) return "";
+        const value = wrap.querySelector("[class*='single-value']");
+        if (value && String(value.textContent || "").trim()) return String(value.textContent).trim();
+        return /selected/i.test(String(wrap.textContent || "")) ? "(already set)" : "";
+      }).catch(() => "");
+      if (already) {
+        console.log(`    [combo] ${hintRe.source}: already answered "${already.slice(0, 30)}" — not overwriting`);
+        continue;
+      }
       const wanted = values[0] || "";
       // Type to filter, then pick the option that actually matches. Taking the
       // first option is wrong: "Indian Ocean Territory" sorts before "India".
@@ -2678,8 +2694,21 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           await page.locator(OPTION).filter({ hasText: hit }).first()
             .click({ timeout: 4000 }).catch(() => {});
           await page.waitForTimeout(500);
-          console.log(`    [fill] ${hintRe.source} → "${hit.slice(0, 40)}"`);
-          return hit;
+          // Read the value back off the control. Clicking an option can miss,
+          // and logging a fill that did not land is how a wrong answer gets
+          // reported as a right one.
+          const landed = await control.evaluate((el) => {
+            const wrap = el.closest("[class*='select__control']")
+              || el.closest("[class*='select__container']")
+              || el.parentElement;
+            const value = wrap && wrap.querySelector("[class*='single-value']");
+            return value ? String(value.textContent || "").trim() : "";
+          }).catch(() => "");
+          if (landed) {
+            console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
+            return landed;
+          }
+          console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
         }
         console.log(`    [combo] ${hintRe.source}: no option matched "${wanted}" (${texts.slice(0, 4).join(" | ")})`);
       }
@@ -2791,7 +2820,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously)|previous(?:ly)? interview|applied (?:here|before|previously)/, tag: "prior interview history" },
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
-      { key: "future_us_residence", hint: /reside|work|live|located? in the (?:us|usa|united states)|future.*(?:united states|us\b)/, tag: "future US residence" },
+      { key: "future_us_residence", hint: /(?:reside|work|live|located?|relocate) (?:now or )?(?:in|to) the (?:us|usa|united states)|future.*(?:united states)|\bthe us\b/i, tag: "future US residence" },
       { key: "requires_visa_sponsorship", hint: /sponsorship|require a visa|need a visa|visa support|work authorization|right to work/, tag: "visa sponsorship" },
     ];
     for (const item of commitments) {
