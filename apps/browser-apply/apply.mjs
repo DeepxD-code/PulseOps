@@ -2618,9 +2618,22 @@ async function hasCaptcha(page) {
     for (const selector of CAPTCHA_SELECTORS) {
       const loc = page.locator(selector);
       const count = await loc.count().catch(() => 0);
-      // A widget element only counts when it is actually on screen. Matching a
-      // hidden node made every page carrying a captcha script look blocked.
-      if (count > 0 && await loc.first().isVisible().catch(() => false)) return true;
+      for (let i = 0; i < count && i < 8; i++) {
+        const el = loc.nth(i);
+        // A widget element only counts when it is actually on screen. Matching
+        // a hidden node made every page carrying a captcha script look blocked.
+        if (!(await el.isVisible().catch(() => false))) continue;
+        const identity = await el.evaluate((node) => {
+          if (node.tagName === "IFRAME") return String(node.getAttribute("src") || "");
+          const host = node.closest("[data-sitekey]") ? "sitekey" : "";
+          return `${node.className || ""} ${node.getAttribute("data-sitekey") || ""} ${host}`;
+        }).catch(() => "");
+        // reCAPTCHA draws a visible badge even when the challenge itself is
+        // invisible, so element presence says nothing. The frame check below is
+        // the authority on whether a human has to act.
+        if (/recaptcha|grecaptcha/i.test(String(identity))) continue;
+        return true;
+      }
     }
     const bodyHit = await page.evaluate(() =>
       /verify you are human|additional verification required|checking your browser|complete the captcha/i.test(document.body?.innerText || "")
