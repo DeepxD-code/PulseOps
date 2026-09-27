@@ -761,6 +761,42 @@ test("the page-side matcher is self-contained so it can be serialised", () => {
   }
 });
 
+test("the submit-time captcha and vendor data are reachable, writes are not", () => {
+  // Greenhouse runs reCAPTCHA Enterprise on submit. With its script blocked the
+  // submit cannot be validated and fails silently, with no error to read.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://www.recaptcha.net/recaptcha/enterprise.js?render=KEY", "script", "GET", "greenhouse",
+    ),
+    true,
+  );
+  // The posting record and the email validator are needed to render and submit.
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://boards.greenhouse.io/anthropic/jobs/5115935008", "fetch", "GET", "greenhouse"),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://email-address-validator.us.greenhouse.io/address/validate?address=a%40b.com", "fetch", "GET", "greenhouse",
+    ),
+    true,
+  );
+  // A captcha script is not a general-purpose exemption: no writes, and the
+  // same trust is not extended to another ATS.
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api2/anchor", "xhr", "GET", "greenhouse"),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/enterprise.js", "script", "GET", "lever"),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://evil.recaptcha.net/recaptcha/enterprise.js", "script", "GET", "greenhouse"),
+    false,
+  );
+});
+
 test("an ATS's own CDN may serve its scripts, but no other host may", () => {
   // Greenhouse ships the entire application runtime from its CDN; blocking it
   // leaves the form inert with empty dropdowns.

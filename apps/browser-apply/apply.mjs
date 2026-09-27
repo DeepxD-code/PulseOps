@@ -228,6 +228,15 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
     { host: "job-boards.cdn.greenhouse.io", pathPrefix: "/locales/", types: ["xhr", "fetch"] },
     // Presigned upload attributes: this is what makes attaching a CV possible.
     { host: "boards.greenhouse.io", pathPrefix: "/uncacheable_attributes/", types: ["xhr", "fetch"] },
+    // The posting's own record, fetched by the board at render time.
+    { host: "boards.greenhouse.io", pathPrefix: "/", types: ["xhr", "fetch"] },
+    // Client-side email validation.
+    { host: "email-address-validator.us.greenhouse.io", pathPrefix: "/address/", types: ["xhr", "fetch"] },
+    // reCAPTCHA Enterprise runs on submit. Without it the submit cannot be
+    // validated and the board fails it silently, with no error to read.
+    { host: "www.recaptcha.net", pathPrefix: "/recaptcha/", types: ["script"] },
+    { host: "www.google.com", pathPrefix: "/recaptcha/", types: ["script"] },
+    { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image"] },
   ],
 });
 const CLAIM_RECOVERY_MS = (() => {
