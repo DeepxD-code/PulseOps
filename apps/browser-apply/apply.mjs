@@ -1456,7 +1456,48 @@ function isAllowedReadOnlyApiRequest(requestUrl, requestType, method, ats) {
   ));
 }
 
-async function installNavigationGuard(page, ats, originUrl) {
+/**
+ * Allow a CV upload to the exact host the ATS itself just handed out.
+ *
+ * Attaching a resume is a PUT to object storage on another origin, which the
+ * guard otherwise refuses — and with the upload blocked the form submits with
+ * no attachment and the board answers "There was an error processing your
+ * application". The target is not guessed or wildcarded: it is harvested from
+ * the vendor's own presigned-attributes response, which is itself an
+ * unguessable capability, so only that host is writable and only for the
+ * upload methods. Nothing else about the request is relaxed.
+ */
+function isAllowedPresignedUploadRequest(requestUrl, requestType, requestMethod, uploadHosts) {
+  if (!uploadHosts || typeof uploadHosts.has !== "function" || uploadHosts.size === 0) return false;
+  const url = parseHttpUrl(requestUrl);
+  if (!url || url.protocol !== "https:") return false;
+  if (!["PUT", "POST"].includes(String(requestMethod || "").toUpperCase())) return false;
+  if (!["xhr", "fetch", "other", ""].includes(String(requestType || "").toLowerCase())) return false;
+  return uploadHosts.has(canonicalHost(url.hostname));
+}
+
+/** Collect upload hosts named by a vendor presigned-attributes response. */
+function collectPresignedUploadHosts(payload, uploadHosts) {
+  if (!uploadHosts || typeof uploadHosts.add !== "function") return 0;
+  const found = new Set();
+  const visit = (value) => {
+    if (typeof value === "string") {
+      const parsed = parseHttpUrl(value);
+      if (parsed && parsed.protocol === "https:") found.add(canonicalHost(parsed.hostname));
+      return;
+    }
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (value && typeof value === "object") Object.values(value).forEach(visit);
+  };
+  visit(payload);
+  let added = 0;
+  for (const host of found) {
+    if (!uploadHosts.has(host)) { uploadHosts.add(host); added += 1; }
+  }
+  return added;
+}
+
+async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) {
   if (!page) throw new Error("navigation guard unavailable");
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
@@ -1529,7 +1570,10 @@ async function installNavigationGuard(page, ats, originUrl) {
         const trustedReadOnlyApi = isAllowedReadOnlyApiRequest(
           requestUrl, requestType, requestMethod, ats
         );
-        if (!blankFrame && !trustedAsset && !trustedReadOnlyApi
+        const trustedPresignedUpload = isAllowedPresignedUploadRequest(
+          requestUrl, requestType, requestMethod, uploadHosts
+        );
+        if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
           console.log(`    [subresource-block] ${kind} ${requestUrl}`);
@@ -3223,8 +3267,23 @@ async function processJob(browser, job, profile, runtime = {}) {
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   page[Symbol.for("pulseops.browserApplyGuard")] = finalGuard;
+  // The ATS names its own upload target in a presigned-attributes response.
+  // Record that host so the CV upload is not blocked, and nothing else is.
+  const uploadHosts = new Set();
+  if (typeof page.on === "function") {
+    page.on("response", (response) => {
+      const href = (() => { try { return response.url(); } catch { return ""; } })();
+      if (!/presigned_fields|presigned_attributes/i.test(href)) return;
+      response.text().then((body) => {
+        try {
+          const added = collectPresignedUploadHosts(JSON.parse(body), uploadHosts);
+          if (added) console.log(`  [upload] presigned upload host trusted: ${[...uploadHosts].join(", ")}`);
+        } catch { /* not JSON, nothing to trust */ }
+      }).catch(() => {});
+    });
+  }
   try {
-    await installNavigationGuard(page, ats, navBoundary);
+    await installNavigationGuard(page, ats, navBoundary, uploadHosts);
   } catch (e) {
     console.log(`  [redirect-block] could not install navigation guard: ${String(e).slice(0, 100)}`);
     if (!sharedCtx) await context.close();
@@ -4868,6 +4927,8 @@ export {
   isMockJob,
   controlSignatureMatcher,
   describeSubmitOutcome,
+  isAllowedPresignedUploadRequest,
+  collectPresignedUploadHosts,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,

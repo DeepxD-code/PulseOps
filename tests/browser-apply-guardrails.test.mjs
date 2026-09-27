@@ -18,6 +18,8 @@ import {
   isAllowedInitialJobUrl,
   isAllowedAssetRequest,
   isAllowedReadOnlyApiRequest,
+  isAllowedPresignedUploadRequest,
+  collectPresignedUploadHosts,
   isAllowedNavigationUrl,
   isBlacklistedJob,
   isEligibleJob,
@@ -759,6 +761,37 @@ test("the page-side matcher is self-contained so it can be serialised", () => {
   for (const forbidden of ["fieldQuestionText", "controlSignatureMatcher(", "require(", "process."]) {
     assert.equal(src.includes(forbidden), false, `matcher must not reference ${forbidden}`);
   }
+});
+
+test("a CV may upload only to the host the ATS itself named", () => {
+  // With the upload blocked the board answers "There was an error processing
+  // your application", because the form submits with no attachment.
+  const hosts = new Set();
+  const added = collectPresignedUploadHosts({
+    resume: { url: "https://grnhse-prod-jben.s3.us-west-2.amazonaws.com/key?sig=abc" },
+  }, hosts);
+  assert.equal(added, 1);
+  assert.equal(hosts.has("grnhse-prod-jben.s3.us-west-2.amazonaws.com"), true);
+
+  const target = "https://grnhse-prod-jben.s3.us-west-2.amazonaws.com/key?sig=abc";
+  assert.equal(isAllowedPresignedUploadRequest(target, "xhr", "PUT", hosts), true);
+  // Only that host, only for an upload, and only over HTTPS.
+  assert.equal(
+    isAllowedPresignedUploadRequest("https://evil.example/key", "xhr", "PUT", hosts), false,
+  );
+  assert.equal(
+    isAllowedPresignedUploadRequest("https://grnhse-prod-jben.s3.us-west-2.amazonaws.com/k", "xhr", "GET", hosts), false,
+  );
+  assert.equal(
+    isAllowedPresignedUploadRequest("http://grnhse-prod-jben.s3.us-west-2.amazonaws.com/k", "xhr", "PUT", hosts), false,
+  );
+  // Scripts never ride this allowance.
+  assert.equal(
+    isAllowedPresignedUploadRequest(target, "script", "PUT", hosts), false,
+  );
+  // With nothing harvested, nothing is writable.
+  assert.equal(isAllowedPresignedUploadRequest(target, "xhr", "PUT", new Set()), false);
+  assert.equal(isAllowedPresignedUploadRequest(target, "xhr", "PUT", null), false);
 });
 
 test("the submit-time captcha and vendor data are reachable, writes are not", () => {
