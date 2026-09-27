@@ -20,6 +20,7 @@ import {
   isAllowedReadOnlyApiRequest,
   isAllowedPresignedUploadRequest,
   collectPresignedUploadHosts,
+  isInteractiveChallengeUrl,
   isAllowedNavigationUrl,
   isBlacklistedJob,
   isEligibleJob,
@@ -779,6 +780,28 @@ test("a dropdown is never treated as answered by matching loose text", () => {
   );
   // The precise signal must still be present.
   assert.match(source, /single-value/);
+});
+
+test("an invisible captcha is not a human obstacle, a checkbox is", () => {
+  // The invisible anchor frame exists from page load. Treating its mere
+  // presence as a challenge made the engine refuse every Greenhouse posting
+  // the moment the captcha was allowed to load at all.
+  assert.equal(
+    isInteractiveChallengeUrl("https://www.recaptcha.net/recaptcha/enterprise/anchor?ar=1&k=KEY&size=invisible"),
+    false,
+  );
+  // A visible checkbox still stops the run.
+  assert.equal(
+    isInteractiveChallengeUrl("https://www.google.com/recaptcha/api2/anchor?k=KEY"),
+    true,
+  );
+  assert.equal(
+    isInteractiveChallengeUrl("https://challenges.cloudflare.com/turnstile/v0/api.js"),
+    true,
+  );
+  // Ordinary frames are never challenges.
+  assert.equal(isInteractiveChallengeUrl("https://job-boards.greenhouse.io/embed/job_board"), false);
+  assert.equal(isInteractiveChallengeUrl(""), false);
 });
 
 test("a CV may upload only to the host the ATS itself named", () => {

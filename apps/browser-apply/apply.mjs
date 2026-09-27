@@ -2597,20 +2597,43 @@ async function clickFinalControl(page, locator, label, options = {}) {
   }
 }
 
+/**
+ * Is this challenge frame one a human actually has to solve?
+ *
+ * An invisible reCAPTCHA executes silently and yields a token; its anchor frame
+ * exists from page load and is not an obstacle. Treating it as a challenge made
+ * the engine refuse every Greenhouse posting outright, since the frame is
+ * always present once the captcha is allowed to load. A visible checkbox or
+ * Turnstile widget is a real stop.
+ */
+function isInteractiveChallengeUrl(frameUrl) {
+  const src = String(frameUrl || "").toLowerCase();
+  if (!/recaptcha|hcaptcha|turnstile|challenges\.|arkoselabs/.test(src)) return false;
+  if (/size=invisible/.test(src)) return false;
+  return true;
+}
+
 async function hasCaptcha(page) {
   try {
     for (const selector of CAPTCHA_SELECTORS) {
       const loc = page.locator(selector);
       const count = await loc.count().catch(() => 0);
-      // Treat even a hidden challenge frame as present. A later visibility
-      // check is safer than allowing a challenge to fall through unnoticed.
-      if (count > 0) return true;
+      // A widget element only counts when it is actually on screen. Matching a
+      // hidden node made every page carrying a captcha script look blocked.
+      if (count > 0 && await loc.first().isVisible().catch(() => false)) return true;
     }
     const bodyHit = await page.evaluate(() =>
       /verify you are human|additional verification required|checking your browser|complete the captcha/i.test(document.body?.innerText || "")
     ).catch(() => true);
     if (bodyHit) return true;
     for (const frame of page.frames?.() || []) {
+      // An invisible captcha frame is not a human obstacle; skip it before the
+      // unreadable-frame check so its cross-origin body cannot trip a fail-closed.
+      const frameUrl = (() => { try { return frame.url(); } catch { return ""; } })();
+      if (/recaptcha|hcaptcha|turnstile|arkoselabs/i.test(String(frameUrl))) {
+        if (isInteractiveChallengeUrl(frameUrl)) return true;
+        continue;
+      }
       const frameHit = await frame.locator("body").innerText().catch(() => null);
       if (frameHit === null) return true;
       if (/verify you are human|additional verification required|checking your browser|complete the captcha/i.test(frameHit)) return true;
@@ -4932,6 +4955,7 @@ export {
   describeSubmitOutcome,
   isAllowedPresignedUploadRequest,
   collectPresignedUploadHosts,
+  isInteractiveChallengeUrl,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,
