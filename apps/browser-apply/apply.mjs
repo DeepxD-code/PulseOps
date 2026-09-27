@@ -2492,7 +2492,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // answer is specific rather than generic filler.
   const whyUs = String(
     process.env.PULSEOPS_WHY_US
-    || "I'm a backend and ML engineer completing a B.Tech in CSE (AI/ML), with roughly two years of hands-on experience building production services in Java, C++ and Python. What draws me to this work is that it sits exactly where my two interests meet: the systems engineering that makes software reliable, and the ML research that makes it intelligent. Most of my work has been in backend services — REST and GraphQL APIs, relational data models, ERP and workflow systems, and integrations with third-party platforms. Alongside that I've been building agentic pipelines: orchestrating LLM calls, integrating with APIs like GitHub, and writing the automation and tooling that makes those pipelines testable and observable. I've spent enough time debugging real systems to care about the unglamorous parts — evaluation harnesses, latency, failure modes, cost — and I think that's the perspective that makes an AI company interesting rather than just its models. I'm deliberately early in my career, which is the point: I want to build depth at a place where the research and the engineering aren't separated, and where shipping safely with a frontier model is treated as a first-class skill."
+    || "I'm a backend and ML engineer completing a B.Tech in CSE (AI/ML), with roughly two years of hands-on experience building production services in Java, C++ and Python. What draws me to this work is that it sits exactly where my two interests meet: the systems engineering that makes software reliable, and the ML research that makes it intelligent. Most of my recent work has been in backend services — REST and GraphQL APIs, relational data models, ERP and workflow systems, and integrations with third-party platforms. Alongside that I've been building agentic pipelines: orchestrating LLM calls, integrating with APIs like GitHub, processing webhook events, and writing the automation and tooling that makes those pipelines testable and observable. I've spent enough time debugging real systems to care about the unglamorous parts — evaluation harnesses, latency budgets, failure modes, inference cost — and I think that is the perspective which makes an AI company interesting to me rather than just its models. I'm deliberately early in my career, which is exactly the point: I want to build real depth at a place where research and engineering are not separated, where shipping safely with a frontier model is treated as a first-class engineering skill, and where the people writing the evaluations are the same people shipping the product. I would rather learn that discipline from people defining what responsible AI deployment looks like than work somewhere still deciding whether it matters."
   ).trim();
   if (whyUs) {
     const essay = page.locator(
@@ -2548,21 +2548,29 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       ].join(" ").toLowerCase();
       if (!hintRe.test(signature)) continue;
       await control.click({ timeout: 4000 }).catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(900);
+      // react-select and friends render options as role="option" or as elements
+      // whose class simply contains "option"; match on visible short text only.
+      const optionLocator = page.locator(
+        '[role="option"], li[role="option"], [class*="option"], [class*="Option"]',
+      );
+      if (typeof optionLocator.allInnerTexts !== "function") break;
+      const options = (await optionLocator.allInnerTexts().catch(() => []))
+        .map((o) => String(o).replace(/\s+/g, " ").trim())
+        .filter((o) => o && o.length <= 60);
+      if (!options.length) break;
       for (const value of values) {
-        const optionLocator = page.locator('[role="option"], li[role="option"], [class*="option-label"]');
-        if (typeof optionLocator.allInnerTexts !== "function") break;
-        const options = await optionLocator.allInnerTexts().catch(() => []);
-        if (!options.length) break;
-        const hit = options.find((o) => new RegExp(`^\\s*${value}\\s*$`, "i").test(o))
-          || options.find((o) => o.toLowerCase().includes(value.toLowerCase()));
-        if (!hit) break;
-        const target = page.locator('[role="option"], li[role="option"], [class*="option-label"]')
-          .filter({ hasText: hit }).first();
-        if (typeof target.click !== "function") break;
+        const hit = options.find((o) => new RegExp(`^${value}$`, "i").test(o))
+          || options.find((o) => new RegExp(`^${value}\\b`, "i").test(o))
+          || options.find((o) => o.toLowerCase() === value.toLowerCase());
+        if (!hit) continue;
+        const target = page.locator(
+          '[role="option"], li[role="option"], [class*="option"], [class*="Option"]',
+        ).filter({ hasText: hit }).first();
+        if (typeof target.click !== "function") continue;
         await target.click({ timeout: 4000 }).catch(() => {});
-        console.log(`    [fill] ${hintRe.source} → "${hit.trim().slice(0, 40)}"`);
-        return hit.trim();
+        console.log(`    [fill] ${hintRe.source} → "${hit.slice(0, 40)}"`);
+        return hit;
       }
       await pressEscape();
     }
