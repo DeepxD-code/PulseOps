@@ -252,6 +252,14 @@ def main() -> None:
     print(f"  Sourced:       {len(raw_jobs)} job(s)")
     print(f"  Auth-skipped:  {len(skipped_portals)} portal(s)")
     print(f"  Failed:        {len(failed_portals)} portal(s)")
+    # Name them. A count of skipped sources is undiagnosable: it hides which
+    # half of the configured coverage was never even looked at, which is the
+    # whole reason a scan can look healthy while sourcing almost nothing.
+    for label, group in (("auth-skipped", skipped_portals), ("failed", failed_portals)):
+        for entry in group:
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            reason = entry.get("reason", "") if isinstance(entry, dict) else ""
+            print(f"    - {label}: {name}{(' — ' + str(reason)[:80]) if reason else ''}")
 
     if not args.simulate:
         from pulseops_store.db_manager import record_source_health
