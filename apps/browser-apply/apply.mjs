@@ -4532,7 +4532,7 @@ else:
         where.append("LOWER(COALESCE(j.\"status\",''))='evaluated'")
         where.append("LOWER(COALESCE(j.\"status\",'')) NOT IN ('applied','sent','followupsent','expired','skipped','verified','needsreview','needsverification','applying','sendpaused','simulated')")
     if "score" in job_columns:
-        where.append("COALESCE(j.\"score\",0)>=" + str(MIN_SCORE))
+        where.append("COALESCE(j.\"score\",0)>=${MIN_SCORE}")
     if "link" in job_columns:
         where.append("LOWER(COALESCE(j.\"link\",'')) LIKE 'https://%'")
         if include_indeed != "1":

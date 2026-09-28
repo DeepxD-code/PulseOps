@@ -820,6 +820,34 @@ test("the captcha token call is allowed, and nothing else on that host is", () =
   assert.equal(isAllowedCaptchaTokenRequest("http://www.recaptcha.net/recaptcha/enterprise/reload", "xhr"), false);
 });
 
+test("the score floor is an operator knob, and defaults to the safe 75", async () => {
+  const { isEligibleJob: withDefault } = await import("../apps/browser-apply/apply.mjs");
+  const base = {
+    link: "https://boards.greenhouse.io/acme/jobs/1",
+    title: "Backend Engineer Intern",
+    status: "evaluated",
+    source: "Anthropic",
+    score: 72,
+  };
+  // Default floor: 72 is below it, so the row is held back.
+  assert.equal(withDefault(base), false);
+  assert.equal(withDefault({ ...base, score: 80 }), true);
+
+  // The knob must widen the floor without touching the substantive gates.
+  const previous = process.env.PULSEOPS_MIN_SCORE;
+  process.env.PULSEOPS_MIN_SCORE = "60";
+  const widened = await import(`../apps/browser-apply/apply.mjs?v=${Date.now()}`);
+  try {
+    assert.equal(widened.isEligibleJob(base), true);
+    // Hard exclusions still bite at a lower floor.
+    assert.equal(widened.isEligibleJob({ ...base, title: "Frontend Engineer" }), false);
+    assert.equal(widened.isEligibleJob({ ...base, source: "mock" }), false);
+  } finally {
+    if (previous === undefined) delete process.env.PULSEOPS_MIN_SCORE;
+    else process.env.PULSEOPS_MIN_SCORE = previous;
+  }
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.
