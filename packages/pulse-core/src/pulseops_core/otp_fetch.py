@@ -60,6 +60,64 @@ def _ok(status: object) -> bool:
     return str(status).upper() == "OK"
 
 
+# Not every vendor sends digits. Greenhouse, for example, sends an 8-character
+# alphanumeric token ("JxdWR4ZE"), so a digit-only pattern can never match it and
+# the step silently waits for a human. Codes are therefore alphanumeric, short,
+# and required to contain at least one digit — which is what separates a real
+# token from the English words that surround it.
+CODE_WINDOW = 160
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9]{4,12})(?![A-Za-z0-9])")
+# Words that sit between "code" and the value in vendor templates.
+STOPWORDS = {
+    "code", "your", "into", "field", "the", "this", "copy", "paste", "application",
+    "after", "enter", "then", "click", "submit", "resubmit", "please", "will",
+    "have", "been", "sent", "with", "for", "and", "you", "not", "are", "our",
+    "verification", "security", "one", "time", "confirmation", "access", "login",
+    "below", "above", "again", "new", "same", "that", "this", "which", "what",
+    "when", "where", "why", "how", "who", "from", "they", "them", "been", "here",
+}
+_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.I | re.S)
+
+
+def _strip_html(value: str) -> str:
+    """Flatten markup so the token scan sees prose, not CSS and markup."""
+    import html as _html
+
+    value = _SCRIPT_RE.sub(" ", value)
+    value = _TAG_RE.sub(" ", value)
+    return re.sub(r"\s+", " ", _html.unescape(value)).strip()
+
+
+def _looks_like_code(token: str) -> bool:
+    if not (4 <= len(token) <= 12):
+        return False
+    if not any(ch.isdigit() for ch in token):
+        return False
+    if token.lower() in STOPWORDS:
+        return False
+    # Reject bare years and other 4-digit noise.
+    if token.isdigit() and len(token) < 5:
+        return False
+    return True
+
+
+def _extract_code(body: str) -> str | None:
+    """Find the verification token near the word 'code' in a flattened mail."""
+    lowered = body.lower()
+    start = 0
+    while True:
+        idx = lowered.find("code", start)
+        if idx == -1:
+            return None
+        window = body[idx:idx + CODE_WINDOW]
+        for match in TOKEN_RE.finditer(window):
+            token = match.group(1)
+            if _looks_like_code(token):
+                return token
+        start = idx + 4
+
+
 def _text_of(msg: email.message.Message) -> str:
     parts: list[str] = []
     if msg.is_multipart():
@@ -119,9 +177,9 @@ def fetch_code(within_minutes: int = 10) -> str | None:
             if not (VERIFICATION_HINTS.search(subject) or VERIFICATION_HINTS.search(sender)
                     or VERIFICATION_HINTS.search(body[:2000])):
                 continue
-            match = CODE_RE.search(body)
+            match = _extract_code(_strip_html(body))
             if match:
-                return match.group(1)
+                return match
         return None
     finally:
         try:

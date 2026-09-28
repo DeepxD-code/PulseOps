@@ -2179,7 +2179,7 @@ async function tryEmailOtp(page) {
     } catch {
       code = null;
     }
-    if (code && /^\d{4,8}$/.test(code)) {
+    if (code && /^[A-Za-z0-9]{4,12}$/.test(code.trim())) {
       await box.fill(code).catch(() => {});
       await page.waitForTimeout(400);
       const confirmed = String(await box.inputValue().catch(() => "")).trim() === code;
