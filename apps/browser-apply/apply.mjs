@@ -4456,6 +4456,24 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
     if (!clicked) {
+      // Say which controls are actually on the page. Every other ATS renders its
+      // submit differently, and "no submit found" on its own looks identical to
+      // an empty form — the same ambiguity that hid the Greenhouse blockers.
+      const controls = await page.evaluate(() => {
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+        };
+        return [...document.querySelectorAll("button, input[type=submit], a[role=button], [role=button]")]
+          .filter(visible)
+          .map((el) => String(
+            el.innerText || el.value || el.getAttribute("aria-label") || el.textContent || "",
+          ).replace(/\s+/g, " ").trim())
+          .filter((t) => t && t.length <= 40)
+          .slice(0, 12);
+      }).catch(() => []);
+      if (controls.length) console.log(`  [page] buttons present: ${controls.join(" | ")}`);
       console.log(blockedFields.length
         ? `  [needs-candidate] final action is blocked on candidate-only answers: ${blockedFields.join(", ")} — recording NeedsReview`
         : "  [warn] no clickable final Submit found — recording NeedsReview");
