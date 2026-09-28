@@ -2161,6 +2161,7 @@ async function tryEmailOtp(page) {
   // re-resolved on every poll rather than checked once: a single early check
   // bails before the dialog has rendered and the step then waits for a human.
   const deadline = Date.now() + 120000;
+  let sawField = false;
   while (Date.now() < deadline) {
     const box = page.locator(
       'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
@@ -2170,7 +2171,12 @@ async function tryEmailOtp(page) {
       await page.waitForTimeout(2500);
       continue;
     }
+    if (!sawField) {
+      sawField = true;
+      console.log("  [otp] code field is present — looking for the emailed code");
+    }
     let code = null;
+    let fetchError = null;
     try {
       // Poll: the mail may not have arrived when the prompt appeared.
       code = execFileSync("python", ["-m", "pulseops_core.otp_fetch", "--within-minutes", "10"], {
@@ -2180,9 +2186,18 @@ async function tryEmailOtp(page) {
         timeout: 45000,
         windowsHide: true,
       }).trim();
-    } catch {
+    } catch (e) {
       code = null;
+      // A non-zero exit just means "no code yet". Anything else is a real fault
+      // and must be visible, or this step fails silently forever.
+      const status = e?.status ?? "err";
+      const stderr = String(e?.stderr || "").trim().split("\n").slice(-1)[0] || "";
+      if (status !== 1) {
+        fetchError = `status=${status} ${stderr}`.slice(0, 120);
+        console.log(`  [otp] inbox read failed: ${fetchError}`);
+      }
     }
+    if (fetchError) break;
     if (code && /^[A-Za-z0-9]{4,12}$/.test(code.trim())) {
       await box.fill(code).catch(() => {});
       await page.waitForTimeout(400);
