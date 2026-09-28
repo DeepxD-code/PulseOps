@@ -2162,12 +2162,34 @@ async function tryEmailOtp(page) {
   // bails before the dialog has rendered and the step then waits for a human.
   const deadline = Date.now() + 120000;
   let sawField = false;
+  let start = Date.now();
   while (Date.now() < deadline) {
     const box = page.locator(
       'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
       + 'input[placeholder*="code" i], input[aria-label*="code" i]',
     ).first();
     if (!(await box.isVisible().catch(() => false))) {
+      // If the selectors never match, say what the page actually offers. A
+      // field that is present but unmatched looks identical to no field at all,
+      // which is why this step failed silently before.
+      if (!sawField && Date.now() - start > 15000) {
+        const inputs = await page.evaluate(() => {
+          const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+          };
+          return [...document.querySelectorAll("input, textarea")]
+            .filter(visible)
+            .map((el) => `${el.tagName.toLowerCase()}[${el.type || "?"}]`
+              + ` id=${el.id || "-"} name=${el.name || "-"}`
+              + ` ph=${(el.placeholder || "-").slice(0, 18)}`
+              + ` al=${(el.getAttribute("aria-label") || "-").slice(0, 18)}`)
+            .slice(0, 10);
+        }).catch(() => []);
+        console.log(`  [otp] no code field matched. Visible inputs: ${inputs.join(" | ") || "(none)"}`);
+        start = Date.now() + 60000; // report once a minute at most
+      }
       await page.waitForTimeout(2500);
       continue;
     }
