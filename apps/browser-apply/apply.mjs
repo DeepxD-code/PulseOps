@@ -2882,43 +2882,60 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         continue;
       }
       const wanted = values[0] || "";
-      // Type to filter, then pick the option that actually matches. Taking the
-      // first option is wrong: "Indian Ocean Territory" sorts before "India".
+      // Open the menu and try filtering by typing, but fall back to reading the
+      // unfiltered list. Typing a prefix of the answer is wrong for Yes/No-style
+      // widgets whose real option reads "Yes" or "I have read and agree" — the
+      // filter then matches nothing and the field is silently left empty.
+      const pickOption = async (texts) => {
+        const hit = texts.find((t) => new RegExp(`^${wanted}\\b`, "i").test(t))
+          || texts.find((t) => new RegExp(`^${wanted}`, "i").test(t))
+          || texts.find((t) => new RegExp(`\\b${wanted}\\b`, "i").test(t));
+        if (!hit) return null;
+        await page.locator(OPTION).filter({ hasText: hit }).first()
+          .click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        // Read the value back off the control. Clicking an option can miss, and
+        // logging a fill that did not land is how a wrong answer gets reported
+        // as a right one.
+        const landed = await control.evaluate((el) => {
+          const wrap = el.closest("[class*='select__control']")
+            || el.closest("[class*='select__container']")
+            || el.parentElement;
+          const value = wrap && wrap.querySelector("[class*='single-value']");
+          return value ? String(value.textContent || "").trim() : "";
+        }).catch(() => "");
+        if (landed) {
+          console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
+          return landed;
+        }
+        console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
+        return null;
+      };
+
       await control.click({ timeout: 4000 }).catch(() => {});
       await page.waitForTimeout(300);
       if (page.keyboard && typeof page.keyboard.type === "function") {
         await page.keyboard.type(wanted.slice(0, 5), { delay: 45 }).catch(() => {});
       }
       await page.waitForTimeout(900);
-      const texts = (await page.locator(OPTION).allInnerTexts().catch(() => []))
+      let texts = (await page.locator(OPTION).allInnerTexts().catch(() => []))
         .map((t) => String(t).replace(/\s+/g, " ").trim())
         .filter(Boolean);
       console.log(`    [combo] ${hintRe.source}: ${texts.length} option(s) after typing "${wanted.slice(0, 5)}"`);
-      if (texts.length) {
-        const hit = texts.find((t) => new RegExp(`^${wanted}\\b`, "i").test(t))
-          || texts.find((t) => new RegExp(`^${wanted}`, "i").test(t));
-        if (hit) {
-          await page.locator(OPTION).filter({ hasText: hit }).first()
-            .click({ timeout: 4000 }).catch(() => {});
-          await page.waitForTimeout(500);
-          // Read the value back off the control. Clicking an option can miss,
-          // and logging a fill that did not land is how a wrong answer gets
-          // reported as a right one.
-          const landed = await control.evaluate((el) => {
-            const wrap = el.closest("[class*='select__control']")
-              || el.closest("[class*='select__container']")
-              || el.parentElement;
-            const value = wrap && wrap.querySelector("[class*='single-value']");
-            return value ? String(value.textContent || "").trim() : "";
-          }).catch(() => "");
-          if (landed) {
-            console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
-            return landed;
-          }
-          console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
-        }
-        console.log(`    [combo] ${hintRe.source}: no option matched "${wanted}" (${texts.slice(0, 4).join(" | ")})`);
+      let chosen = texts.length ? await pickOption(texts) : null;
+
+      if (!chosen) {
+        // Re-open unfiltered and match against everything on offer.
+        await pressEscape();
+        await control.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(700);
+        texts = (await page.locator(OPTION).allInnerTexts().catch(() => []))
+          .map((t) => String(t).replace(/\s+/g, " ").trim())
+          .filter(Boolean);
+        console.log(`    [combo] ${hintRe.source}: ${texts.length} option(s) unfiltered → ${texts.slice(0, 4).join(" | ")}`);
+        chosen = texts.length ? await pickOption(texts) : null;
       }
+      if (chosen) return chosen;
       await pressEscape();
     }
     // Never fail silently: a hint that matches no control is a bug worth seeing.
