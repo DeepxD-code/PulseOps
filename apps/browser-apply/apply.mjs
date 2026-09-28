@@ -2335,6 +2335,10 @@ async function describeSubmitOutcome(page) {
         "iframe[src*='recaptcha'], iframe[title*='recaptcha' i], [class*='recaptcha'], [data-sitekey]",
       )),
       stillOnForm: Boolean(document.querySelector("input[type='file'], textarea")),
+      // A submit that removes the form but matches no confirmation wording is
+      // the ambiguous case that decides Verified vs NeedsVerification. Quote
+      // the page so the outcome is read, not inferred.
+      body: String(document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 400),
     };
   }).catch(() => null);
 }
@@ -4520,6 +4524,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (outcome.messages.length) console.log(`  [page] message → ${outcome.messages.join(" | ").slice(0, 400)}`);
         if (outcome.captcha) console.log("  [page] a captcha widget is present on the page");
         if (outcome.stillOnForm) console.log("  [page] still showing the application form (not accepted)");
+        console.log(`  [page] text → ${String(outcome.body || "").slice(0, 320)}`);
         await page.screenshot({ path: screenshotPath.replace("preview", "unconfirmed"), fullPage: true }).catch(() => {});
       }
       const empty = await describeEmptyEntryFields(page).catch(() => []);
