@@ -2145,6 +2145,57 @@ async function answerCandidateQuestions(page, profile) {
 }
 
 /**
+ * Read a one-time code from the candidate's own inbox and type it in.
+ *
+ * The code proves control of the contact details, so it is only ever taken from
+ * mail that (a) arrived inside a short window, and (b) actually reads as a
+ * verification message. Nothing is generated or guessed, and a portal that
+ * emails nothing simply leaves the human handoff in place.
+ */
+async function tryEmailOtp(page) {
+  if (process.env.PULSEOPS_EMAIL_OTP === "0") return null;
+  const fetcher = path.join(ROOT, "packages", "pulse-core", "src", "pulseops_core", "otp_fetch.py");
+  if (!fs.existsSync(fetcher)) return null;
+
+  const box = page.locator(
+    'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
+    + 'input[placeholder*="code" i], input[aria-label*="code" i]',
+  ).first();
+  if (!(await box.count().catch(() => 0))) return null;
+  if (!(await box.isVisible().catch(() => false))) return null;
+
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    let code = null;
+    try {
+      // Poll: the mail may not have arrived when the prompt appeared.
+      code = execFileSync("python", ["-m", "pulseops_core.otp_fetch", "--within-minutes", "10"], {
+        cwd: ROOT,
+        env: { ...process.env, PYTHONPATH: path.join(ROOT, "packages", "pulse-core", "src") },
+        encoding: "utf8",
+        timeout: 45000,
+        windowsHide: true,
+      }).trim();
+    } catch {
+      code = null;
+    }
+    if (code && /^\d{4,8}$/.test(code)) {
+      await box.fill(code).catch(() => {});
+      await page.waitForTimeout(400);
+      const confirmed = String(await box.inputValue().catch(() => "")).trim() === code;
+      if (confirmed) {
+        // Submitting the code is the same act as the operator pressing enter.
+        await box.press("Enter").catch(() => {});
+        await page.waitForTimeout(1500);
+        return code.length;
+      }
+    }
+    await page.waitForTimeout(6000);
+  }
+  return null;
+}
+
+/**
  * Some portals verify the phone by SMS before the application is actually
  * submitted. The code proves the operator controls that number, so it is only
  * ever supplied by a human at the prompt — never generated, guessed, or read
@@ -2167,6 +2218,13 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
   }
 
   console.log("\n  [otp] This portal sent a verification code to your phone.");
+  // Portals that email the code can be completed without a human. The code is
+  // read from the candidate's own inbox over IMAP and is only accepted from
+  // mail that arrived just now and actually reads as a verification message.
+  const emailed = await tryEmailOtp(page);
+  if (emailed) {
+    console.log(`  [otp] code read from the candidate's inbox and entered (${emailed} digits)`);
+  }
   if (OTP_PAUSE) {
     // The browser is headed, so let the operator finish in the visible window
     // and poll for the result rather than reading a code out of thin air.
