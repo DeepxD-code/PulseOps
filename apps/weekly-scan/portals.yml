@@ -162,6 +162,75 @@ ats_portals:
     company: "anthropic"
     url: "https://boards.greenhouse.io/anthropic"
 
+  # Junior-hiring boards added 2026-09-28. The incumbent list skewed to companies
+  # that post senior/manager roles in India, which is why most sourced roles were
+  # correctly rejected on seniority. These are public boards for companies that
+  # hire backend/ML juniors or new grads. A slug that does not resolve is
+  # reported as a dead portal by the next scan, so a wrong guess is visible and
+  # harmless rather than silent.
+  - name: "BrowserStack"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "browserstack"
+    url: "https://boards.greenhouse.io/browserstack"
+
+  - name: "Swiggy"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "swiggy"
+    url: "https://boards.greenhouse.io/swiggy"
+
+  - name: "Meesho"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "meesho"
+    url: "https://boards.greenhouse.io/meesho"
+
+  - name: "Slice"
+    engine: lever
+    enabled: true
+    requires_auth: false
+    company: "slice"
+    url: "https://jobs.lever.co/slice"
+
+  - name: "Tinkoff"
+    engine: lever
+    enabled: true
+    requires_auth: false
+    company: "tinkoff"
+    url: "https://jobs.lever.co/tinkoff"
+
+  - name: "Cred"
+    engine: lever
+    enabled: true
+    requires_auth: false
+    company: "cred"
+    url: "https://jobs.lever.co/cred"
+
+  - name: "PostHog"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "posthog"
+    url: "https://jobs.ashbyhq.com/posthog"
+
+  - name: "Replit"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "replit"
+    url: "https://jobs.ashbyhq.com/replit"
+
+  - name: "Vapi"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "vapi"
+    url: "https://jobs.ashbyhq.com/vapi"
+
 # Tuning
 settings:
   delay_between_portals_seconds: 2
