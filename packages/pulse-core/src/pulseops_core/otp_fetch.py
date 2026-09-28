@@ -95,27 +95,36 @@ _ORDINAL_RE = re.compile(r"^\d+(?:st|nd|rd|th)$", re.I)
 
 
 def _looks_like_code(token: str) -> bool:
-    if not (4 <= len(token) <= 12):
-        return False
-    if not any(ch.isdigit() for ch in token):
+    """Plausible shape for a one-time code.
+
+    Deliberately does NOT require a digit. Greenhouse issues random 8-character
+    alphanumeric tokens ("ktfLdNEf") that contain no digit at all, and a digit
+    requirement rejected every one of them while accepting street numbers.
+    Shape and position do the filtering instead.
+    """
+    if not (6 <= len(token) <= 12):
         return False
     if token.lower() in STOPWORDS or _ORDINAL_RE.match(token):
         return False
-    # Reject bare years and other short 4-digit noise.
-    if token.isdigit() and len(token) < 5:
+    if not token.isalnum():
         return False
     return True
+
+
+# The token is almost always introduced directly by a colon, or by "is".
+_LABEL_BEFORE_RE = re.compile(r"(?:[:：]|\bis\b|\bwas\b)\s*$", re.I)
 
 
 def _extract_code(body: str) -> str | None:
     """Find the verification token in a flattened mail.
 
-    Every occurrence of "code" is examined, not just the first. Taking the first
-    plausible token returned "18th" — the street number in the footer — because
-    the real code appears later in the message. Candidates are ranked longest
-    first, because a real token is 6+ characters and an incidental match is not.
+    Every occurrence of "code" is examined. Candidates are ranked by whether a
+    label introduces them — "…on your application: ktfLdNEf" — because that is
+    the one signal that separates the real token from the street number and zip
+    in a vendor footer. Length breaks ties.
     """
-    candidates: list[str] = []
+    labelled: list[str] = []
+    other: list[str] = []
     lowered = body.lower()
     start = 0
     while True:
@@ -124,21 +133,17 @@ def _extract_code(body: str) -> str | None:
             break
         for match in TOKEN_RE.finditer(body[idx:idx + CODE_WINDOW]):
             token = match.group(1)
-            if _looks_like_code(token) and token not in candidates:
-                candidates.append(token)
+            if not _looks_like_code(token):
+                continue
+            prefix = body[idx:idx + match.start()].rstrip()
+            bucket = labelled if _LABEL_BEFORE_RE.search(prefix[-24:]) else other
+            if token not in bucket:
+                bucket.append(token)
         start = idx + 4
-    if not candidates:
-        return None
-    # A real token is 6+ characters (Greenhouse uses 8, most OTP codes 6). A
-    # shorter match in a vendor footer is a street number or a zip code, and
-    # typing one into the form wastes the attempt and can lock the field. When
-    # nothing is long enough to be credible, return nothing and let the human
-    # handoff take over rather than guessing.
-    credible = [t for t in candidates if len(t) >= 6]
-    if not credible:
-        return None
-    credible.sort(key=len, reverse=True)
-    return credible[0]
+    for bucket in (labelled, other):
+        if bucket:
+            return max(bucket, key=len)
+    return None
 
 
 def _text_of(msg: email.message.Message) -> str:
