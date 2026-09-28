@@ -537,6 +537,13 @@ async function scrapeAshby(page, portal, request) {
   }
 }
 
+// Engines whose listings are only visible to a logged-in session, mapped to the
+// saved state. Absent file means the portal cannot be scanned, and that is
+// reported rather than silently producing zero jobs.
+const PORTAL_SESSION_FILES = {
+  naukri: path.join(ROOT, "portal", "naukri-storageState.json"),
+};
+
 async function scrapeNaukri(page, portal) {
   await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page
@@ -780,19 +787,44 @@ async function main() {
     }
 
     console.log(`[*] Scanning ${portal.name} (${portal.engine})…`);
+    // Some portals only list their openings to a logged-in session. Naukri sends
+    // an OTP to the candidate's phone and has no password login, so the session
+    // is captured once by portal/save_naukri_session.mjs and replayed here.
+    // Scraping it logged out yields nothing, which is why it read as
+    // auth-skipped rather than as a configuration problem.
+    const sessionFile = PORTAL_SESSION_FILES[portal.engine];
+    const useSession = sessionFile && fs.existsSync(sessionFile);
+    let portalContext = context;
+    let portalPage = page;
+    if (useSession) {
+      portalContext = await browser.newContext({
+        userAgent: pickUserAgent(),
+        viewport: { width: 1366, height: 900 },
+        storageState: sessionFile,
+      });
+      portalPage = await portalContext.newPage();
+      portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
+    } else if (sessionFile) {
+      console.log(`  [!] ${portal.name}: no saved session at ${path.basename(sessionFile)} — run portal/save_naukri_session.mjs`);
+      results.skipped.push({ name: portal.name, url: portal.url, reason: "no_saved_session" });
+      await sleep(delayMs);
+      continue;
+    }
     try {
       let jobs;
       if (portal.engine === "ashby") {
-        jobs = await engineFn(page, portal, context.request);
+        jobs = await engineFn(portalPage, portal, portalContext.request);
       } else {
-        jobs = await engineFn(page, portal);
+        jobs = await engineFn(portalPage, portal);
       }
       jobs = Array.isArray(jobs) ? jobs.slice(0, maxJobs) : [];
       const accepted = appendUniqueJobs(results.jobs, jobs, portal, results.skipped);
-      console.log(`  [+] ${portal.name}: ${accepted} job(s)`);
+      console.log(`  [+] ${portal.name}: ${accepted} job(s)${useSession ? " (authenticated)" : ""}`);
     } catch (e) {
       console.error(`  [X] ${portal.name} failed: ${e.message}`);
       results.failed.push({ name: portal.name, url: portal.url, error: e.message });
+    } finally {
+      if (useSession) await portalContext.close().catch(() => {});
     }
 
     await sleep(delayMs);
