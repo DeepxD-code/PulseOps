@@ -22,6 +22,7 @@ import {
   collectPresignedUploadHosts,
   isInteractiveChallengeUrl,
   isAllowedCaptchaTokenRequest,
+  isAllowedAtsApplicationPost,
   isAllowedNavigationUrl,
   isBlacklistedJob,
   isEligibleJob,
@@ -846,6 +847,24 @@ test("the score floor is an operator knob, and defaults to the safe 75", async (
     if (previous === undefined) delete process.env.PULSEOPS_MIN_SCORE;
     else process.env.PULSEOPS_MIN_SCORE = previous;
   }
+});
+
+test("the ATS may receive the application, and nothing else may", () => {
+  // The board form posts the finished application to the ATS API, not to the
+  // page's own origin. Blocking it meant a perfectly filled form could never be
+  // sent.
+  const submit = "https://boards.greenhouse.io/anthropic/jobs/4613568008";
+  assert.equal(isAllowedAtsApplicationPost(submit, "fetch", "POST", "greenhouse"), true);
+  // Not a general cross-origin POST allowance.
+  assert.equal(isAllowedAtsApplicationPost("https://evil.example/anthropic/jobs/1", "fetch", "POST", "greenhouse"), false);
+  assert.equal(isAllowedAtsApplicationPost(submit, "fetch", "POST", "lever"), false);
+  // Only the application endpoint shape, only POST, only xhr/fetch.
+  assert.equal(isAllowedAtsApplicationPost("https://boards.greenhouse.io/admin/users", "fetch", "POST", "greenhouse"), false);
+  assert.equal(isAllowedAtsApplicationPost(submit, "fetch", "GET", "greenhouse"), false);
+  assert.equal(isAllowedAtsApplicationPost(submit, "script", "POST", "greenhouse"), false);
+  assert.equal(isAllowedAtsApplicationPost("http://boards.greenhouse.io/anthropic/jobs/1", "fetch", "POST", "greenhouse"), false);
+  // A lookalike host is not the ATS.
+  assert.equal(isAllowedAtsApplicationPost("https://boards.greenhouse.io.evil.net/anthropic/jobs/1", "fetch", "POST", "greenhouse"), false);
 });
 
 test("a CV may upload only to the host the ATS itself named", () => {

@@ -1535,6 +1535,34 @@ function isAllowedCaptchaTokenRequest(requestUrl, requestType) {
   return ["xhr", "fetch"].includes(String(requestType || "").toLowerCase());
 }
 
+/**
+ * Allow the ATS's own application submission.
+ *
+ * The Greenhouse board form does not post to the page's own origin: it hands
+ * the finished application to the ATS API at boards.greenhouse.io. With only
+ * read access allowed there, the form filled completely and the send was
+ * refused — so the application could never actually go out.
+ *
+ * This is deliberately narrow: the ATS that owns the posting, the exact
+ * application endpoint shape, POST only, and only for the board's own API. It
+ * is not a general cross-origin POST allowance — no other host, path or method
+ * is opened, and an unrelated third party still cannot receive anything.
+ */
+const ATS_APPLICATION_POST_HOSTS = Object.freeze({
+  greenhouse: "boards.greenhouse.io",
+});
+
+function isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, ats) {
+  const method = String(requestMethod || "").toUpperCase();
+  if (method !== "POST") return false;
+  if (!["xhr", "fetch"].includes(String(requestType || "").toLowerCase())) return false;
+  const url = parseHttpUrl(requestUrl);
+  if (!url || url.protocol !== "https:") return false;
+  const expectedHost = ATS_APPLICATION_POST_HOSTS[String(ats || "").toLowerCase()];
+  if (!expectedHost || canonicalHost(url.hostname) !== canonicalHost(expectedHost)) return false;
+  return /^\/[A-Za-z0-9._-]+\/jobs\/\d+(?:\/|$)/.test(url.pathname);
+}
+
 async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) {
   if (!page) throw new Error("navigation guard unavailable");
   const boundary = isNavigationBoundary(originUrl)
@@ -1612,8 +1640,9 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           requestUrl, requestType, requestMethod, uploadHosts
         );
         const trustedCaptchaToken = isAllowedCaptchaTokenRequest(requestUrl, requestType);
+        const trustedAtsPost = isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, ats);
         if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
-            && !trustedCaptchaToken
+            && !trustedCaptchaToken && !trustedAtsPost
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
           console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
@@ -5021,6 +5050,7 @@ export {
   collectPresignedUploadHosts,
   isInteractiveChallengeUrl,
   isAllowedCaptchaTokenRequest,
+  isAllowedAtsApplicationPost,
   isSimulationJob,
   isTerminalStatus,
   loadJobsFromDB,
