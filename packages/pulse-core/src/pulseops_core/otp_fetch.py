@@ -89,33 +89,56 @@ def _strip_html(value: str) -> str:
     return re.sub(r"\s+", " ", _html.unescape(value)).strip()
 
 
+# Ordinals and street/floor numbers ("18th", "11th") sit near the word "code"
+# in a footer and look code-shaped. They are never the token.
+_ORDINAL_RE = re.compile(r"^\d+(?:st|nd|rd|th)$", re.I)
+
+
 def _looks_like_code(token: str) -> bool:
     if not (4 <= len(token) <= 12):
         return False
     if not any(ch.isdigit() for ch in token):
         return False
-    if token.lower() in STOPWORDS:
+    if token.lower() in STOPWORDS or _ORDINAL_RE.match(token):
         return False
-    # Reject bare years and other 4-digit noise.
+    # Reject bare years and other short 4-digit noise.
     if token.isdigit() and len(token) < 5:
         return False
     return True
 
 
 def _extract_code(body: str) -> str | None:
-    """Find the verification token near the word 'code' in a flattened mail."""
+    """Find the verification token in a flattened mail.
+
+    Every occurrence of "code" is examined, not just the first. Taking the first
+    plausible token returned "18th" — the street number in the footer — because
+    the real code appears later in the message. Candidates are ranked longest
+    first, because a real token is 6+ characters and an incidental match is not.
+    """
+    candidates: list[str] = []
     lowered = body.lower()
     start = 0
     while True:
         idx = lowered.find("code", start)
         if idx == -1:
-            return None
-        window = body[idx:idx + CODE_WINDOW]
-        for match in TOKEN_RE.finditer(window):
+            break
+        for match in TOKEN_RE.finditer(body[idx:idx + CODE_WINDOW]):
             token = match.group(1)
-            if _looks_like_code(token):
-                return token
+            if _looks_like_code(token) and token not in candidates:
+                candidates.append(token)
         start = idx + 4
+    if not candidates:
+        return None
+    # A real token is 6+ characters (Greenhouse uses 8, most OTP codes 6). A
+    # shorter match in a vendor footer is a street number or a zip code, and
+    # typing one into the form wastes the attempt and can lock the field. When
+    # nothing is long enough to be credible, return nothing and let the human
+    # handoff take over rather than guessing.
+    credible = [t for t in candidates if len(t) >= 6]
+    if not credible:
+        return None
+    credible.sort(key=len, reverse=True)
+    return credible[0]
 
 
 def _text_of(msg: email.message.Message) -> str:
