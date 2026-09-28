@@ -112,6 +112,12 @@ const OTP_PAUSE = process.argv.includes("--otp-pause");
 // Operator-authorised acceptance of a portal's terms/privacy checkbox. Never on
 // by default: it is a legal agreement, so it is an explicit, logged act.
 const ACCEPT_TERMS = process.argv.includes("--accept-terms");
+// A legal waiver (arbitration, settlement, jurisdiction) is a different class of
+// act from a privacy checkbox or a policy acknowledgment: it changes what the
+// candidate can legally do later. It therefore needs its own opt-in flag, is
+// read from the profile rather than assumed, and is logged as [legal] so it is
+// distinguishable in the audit trail from ordinary commitments.
+const ACCEPT_LEGAL = process.argv.includes("--accept-legal");
 const OTP_PAUSE_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_OTP_PAUSE_MS || "240000", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 240000;
@@ -3030,6 +3036,26 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const picked = await combo(item.hint, [value]);
       if (picked) {
         console.log(`    [commitment] ${item.tag} → "${picked}" recorded under operator authorisation`);
+      }
+    }
+
+    // Legal agreements are gated separately and logged as [legal]. The answer
+    // must exist in the profile: a flag alone never invents consent to a waiver.
+    if (ACCEPT_LEGAL) {
+      const legal = [
+        { key: "arbitration_agreement", hint: /arbitration|arbitrate|agreement to arbitrate|read the .{0,40}agreement/i, tag: "agreement to arbitrate" },
+        { key: "legal_agreement", hint: /terms of (?:use|service)|privacy policy|consent|liability/i, tag: "legal terms" },
+      ];
+      for (const item of legal) {
+        const value = String(stated[item.key] ?? "").trim();
+        if (!value) {
+          console.log(`    [legal] ${item.tag}: no answer configured in the profile — left untouched`);
+          continue;
+        }
+        const picked = await combo(item.hint, [value]);
+        if (picked) {
+          console.log(`    [legal] ${item.tag} → "${picked}" accepted under explicit operator authorisation`);
+        }
       }
     }
   }
