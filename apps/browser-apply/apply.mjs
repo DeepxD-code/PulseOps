@@ -2152,6 +2152,36 @@ async function answerCandidateQuestions(page, profile) {
  * verification message. Nothing is generated or guessed, and a portal that
  * emails nothing simply leaves the human handoff in place.
  */
+/**
+ * Locate the one-time-code entry, which comes in two shapes:
+ *  - a single input named something like "code"
+ *  - a row of single-character boxes ("[ ][ ][ ]…") with no useful name at all,
+ *    which is what Greenhouse uses. A single-input selector finds nothing there,
+ *    and the step then looks like a portal with no code field.
+ * Returns { inputs: Locator[] } or null.
+ */
+async function findOtpInputs(page) {
+  const single = page.locator(
+    'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
+    + 'input[placeholder*="code" i], input[aria-label*="code" i]',
+  ).first();
+  if (await single.isVisible().catch(() => false)) {
+    return { inputs: [single], split: false };
+  }
+  // Split boxes: one character each.
+  const split = page.locator('input[maxlength="1"]');
+  const count = await split.count().catch(() => 0);
+  if (count >= 4) {
+    const inputs = [];
+    for (let i = 0; i < count; i++) {
+      const box = split.nth(i);
+      if (await box.isVisible().catch(() => false)) inputs.push(box);
+    }
+    if (inputs.length >= 4) return { inputs, split: true };
+  }
+  return null;
+}
+
 async function tryEmailOtp(page) {
   if (process.env.PULSEOPS_EMAIL_OTP === "0") return null;
   const fetcher = path.join(ROOT, "packages", "pulse-core", "src", "pulseops_core", "otp_fetch.py");
@@ -2168,7 +2198,8 @@ async function tryEmailOtp(page) {
       'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
       + 'input[placeholder*="code" i], input[aria-label*="code" i]',
     ).first();
-    if (!(await box.isVisible().catch(() => false))) {
+    const target = await findOtpInputs(page);
+    if (!target) {
       // If the selectors never match, say what the page actually offers. A
       // field that is present but unmatched looks identical to no field at all,
       // which is why this step failed silently before.
@@ -2183,9 +2214,9 @@ async function tryEmailOtp(page) {
             .filter(visible)
             .map((el) => `${el.tagName.toLowerCase()}[${el.type || "?"}]`
               + ` id=${el.id || "-"} name=${el.name || "-"}`
-              + ` ph=${(el.placeholder || "-").slice(0, 18)}`
+              + ` ml=${el.getAttribute("maxlength") || "-"}`
               + ` al=${(el.getAttribute("aria-label") || "-").slice(0, 18)}`)
-            .slice(0, 10);
+            .slice(0, 24);
         }).catch(() => []);
         console.log(`  [otp] no code field matched. Visible inputs: ${inputs.join(" | ") || "(none)"}`);
         start = Date.now() + 60000; // report once a minute at most
@@ -2221,14 +2252,32 @@ async function tryEmailOtp(page) {
     }
     if (fetchError) break;
     if (code && /^[A-Za-z0-9]{4,12}$/.test(code.trim())) {
-      await box.fill(code).catch(() => {});
-      await page.waitForTimeout(400);
-      const confirmed = String(await box.inputValue().catch(() => "")).trim() === code;
-      if (confirmed) {
-        // Submitting the code is the same act as the operator pressing enter.
-        await box.press("Enter").catch(() => {});
-        await page.waitForTimeout(1500);
-        return code.length;
+      const value = code.trim();
+      if (target.split) {
+        // One character per box, in order.
+        for (let i = 0; i < target.inputs.length; i++) {
+          await target.inputs[i].fill(value[i] ?? "").catch(() => {});
+          await page.waitForTimeout(120);
+        }
+        await page.waitForTimeout(400);
+        const landed = await Promise.all(target.inputs.map((b) => b.inputValue().catch(() => "")))
+          .then((parts) => parts.join(""));
+        if (landed.toLowerCase() === value.toLowerCase()) {
+          await target.inputs[target.inputs.length - 1].press("Enter").catch(() => {});
+          await page.waitForTimeout(1500);
+          return value.length;
+        }
+        console.log(`  [otp] split boxes did not take the code (got "${landed}")`);
+      } else {
+        await box.fill(value).catch(() => {});
+        await page.waitForTimeout(400);
+        const confirmed = String(await box.inputValue().catch(() => "")).trim() === value;
+        if (confirmed) {
+          // Submitting the code is the same act as the operator pressing enter.
+          await box.press("Enter").catch(() => {});
+          await page.waitForTimeout(1500);
+          return value.length;
+        }
       }
     }
     await page.waitForTimeout(6000);
@@ -4640,7 +4689,16 @@ async function processJob(browser, job, profile, runtime = {}) {
       // Hold the window open so it can be completed by hand; the row is only
       // marked verified if the portal then confirms.
       const captchaRefused = Boolean(outcome?.captcha);
-      if (captchaRefused) console.log("  [captcha] the board refused the submit and a captcha is present — this needs you");
+      if (captchaRefused) {
+        // Greenhouse shows an invisible reCAPTCHA badge, but the thing actually
+        // gating the submit is the emailed code. Say which, so the log does not
+        // send the operator looking for a checkbox that is not there.
+        const wantsCode = /verification code|security code|enter the .*-character code/i
+          .test(String(outcome.body || ""));
+        console.log(wantsCode
+          ? "  [otp] the board wants the emailed code before it will accept the submit"
+          : "  [captcha] the board refused the submit and a captcha is present — this needs you");
+      }
       // A headed run can simply be finished by hand: hold the window open and
       // poll for the confirmation rather than dead-ending the row.
       if (OTP_PAUSE && (requiredEmpty.length || consents.length || captchaRefused)) {
