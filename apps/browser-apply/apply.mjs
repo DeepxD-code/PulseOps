@@ -2294,13 +2294,16 @@ async function tryEmailOtp(page) {
 async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
   if (!ENTER_OTP && !OTP_PAUSE) return { state: "not-requested" };
   // Gate on page text rather than fragile class names: the dialog copy is the
-  // reliable signal that a code is actually being requested.
-  for (let attempt = 0; attempt < 10; attempt++) {
+  // reliable signal that a code is actually being requested. The wait has to be
+  // generous — the code step appears only after the resume upload settles, and
+  // a short window reports "no code prompt" for a portal that is about to ask.
+  const PROMPT_ATTEMPTS = 40;
+  for (let attempt = 0; attempt < PROMPT_ATTEMPTS; attempt++) {
     const asking = await page.evaluate(() =>
-      /verification code|enter otp|one[-\s]?time password|\botp\b|code (?:we|we've) sent/i.test(document.body?.innerText || "")
+      /verification code|enter otp|one[-\s]?time password|\botp\b|code (?:we|we've) sent|character code/i.test(document.body?.innerText || "")
     ).catch(() => false);
     if (asking) break;
-    if (attempt === 9) {
+    if (attempt === PROMPT_ATTEMPTS - 1) {
       console.log("  [otp] no code prompt detected — leaving for manual completion");
       return { state: "not-present" };
     }
