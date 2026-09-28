@@ -1005,6 +1005,20 @@ test("an ATS's own CDN may serve its scripts, but no other host may", () => {
     true,
   );
   assert.equal(isAllowedAssetRequest("https://cdn.ashbyprd.com/evil.js", "script", "lever"), false);
+  // A vendor CDN hosts the app while the page sits on the employer's brand:
+  // careers.cisco.com serves its runtime from cdn.phenompeople.com. Trusting
+  // only per-ATS hosts left that page blank.
+  assert.equal(
+    isAllowedAssetRequest("https://cdn.phenompeople.com/CareerConnectResources/common/js/canvas/vue3.min.js", "script", "generic"),
+    true,
+  );
+  assert.equal(
+    isAllowedAssetRequest("https://cdn-bot.phenompeople.com/txm-bot/prod-ir.js", "script", "generic"),
+    true,
+  );
+  // Exact vendor hosts only, and only their static assets.
+  assert.equal(isAllowedAssetRequest("https://evil.phenompeople.com/app.js", "script", "generic"), false);
+  assert.equal(isAllowedAssetRequest("https://cdn.phenompeople.com/x", "xhr", "generic"), false);
   // The same script is not trusted for a different ATS, nor for a lookalike host.
   assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root.js", "script", "lever"), false);
   assert.equal(isAllowedAssetRequest("https://evil.job-boards.cdn.greenhouse.io.attacker.net/root.js", "script", "greenhouse"), false);

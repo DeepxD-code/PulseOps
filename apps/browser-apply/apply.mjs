@@ -223,6 +223,16 @@ const ATS_ASSET_HOSTS = Object.freeze({
   ashby: ["cdn.ashbyhq.com", "cdn.ashbyprd.com"],
   workday: ["assets.ctfassets.net"],
 });
+// Vendor CDNs that host an ATS's application runtime under their own domain
+// while the page itself sits on the employer's brand (careers.cisco.com serves
+// its app from cdn.phenompeople.com). Keying trust off the page's ATS cannot
+// express that, and blocking them leaves a blank page: Phenom's bundle
+// includes the framework the form is built on. Exact hosts only, and only for
+// the vendor's own static assets.
+const VENDOR_ASSET_HOSTS = Object.freeze([
+  "cdn.phenompeople.com",
+  "cdn-bot.phenompeople.com",
+]);
 const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
 // Static resources that cannot execute or read data, so a CDN origin is safe.
 const NON_EXECUTABLE_ASSET_TYPES = new Set(["stylesheet", "image", "font", "media"]);
@@ -1482,7 +1492,9 @@ function isAllowedAssetRequest(requestUrl, requestType, ats) {
   // Scripts stay host-restricted below because they can exfiltrate.
   if (NON_EXECUTABLE_ASSET_TYPES.has(type)) return true;
   const hosts = ATS_ASSET_HOSTS[String(ats || "").toLowerCase()] || [];
-  return hosts.some((host) => canonicalHost(url.hostname) === canonicalHost(host));
+  const host = canonicalHost(url.hostname);
+  if (VENDOR_ASSET_HOSTS.some((vendor) => canonicalHost(vendor) === host)) return true;
+  return hosts.some((candidate) => canonicalHost(candidate) === host);
 }
 
 function isAllowedReadOnlyApiRequest(requestUrl, requestType, method, ats) {
