@@ -267,6 +267,16 @@ const CAPTCHA_WAIT_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_CAPTCHA_WAIT_MS || "180000", 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 180000;
 })();
+/**
+ * Minimum evaluator score for unattended submission. The role, seniority,
+ * salary, source-trust and simulation gates are the real filters; this is a
+ * quality floor on top. Lowering it is an explicit operator decision, so it is
+ * an env knob with a safe default and every use is visible in the log.
+ */
+const MIN_SCORE = (() => {
+  const parsed = Number.parseInt(process.env.PULSEOPS_MIN_SCORE || "75", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 75;
+})();
 const HUMAN_FINAL_STATUSES = new Set(["yc", "wellfound", "naukri", "indeed", "linkedin"]);
 
 function parseHttpUrl(value) {
@@ -869,6 +879,7 @@ try:
                     except Exception:
                         score = -1
                     source = str(row["source"] or "") if "source" in job_cols else ""
+                    min_score = float(os.environ.get("PULSEOPS_MIN_SCORE", "75") or 75)
                     run_id = str(row["run_id"] or "") if "run_id" in job_cols else ""
                     run_marker = str(row["run_marker"] or "") if "run_marker" in job_cols else ""
                     sim_re = re.compile(r"^(?:mock|sim(?:ulated|ulation)?|fixture|sample|test|demo)(?:[:/_-]|$)", re.I)
@@ -901,7 +912,7 @@ try:
                         result["reason"] = "source-untrusted"
                     elif status not in {"evaluated", "applying"}:
                         result["reason"] = "status-not-evaluable"
-                    elif score < 75:
+                    elif score < min_score:
                         result["reason"] = "score-too-low"
                     elif sim_re.search(source) or sim_re.search(run_id) or sim_re.search(run_marker):
                         result["reason"] = "simulation-row"
@@ -1049,7 +1060,7 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   if (!link || !isAllowedInitialJobUrl(link)) return false;
   if (!isStrictTargetRole(job?.title)) return false;
   if (status !== "evaluated") return false;
-  if (!Number.isFinite(Number(job?.score)) || Number(job.score) < 75) return false;
+  if (!Number.isFinite(Number(job?.score)) || Number(job.score) < MIN_SCORE) return false;
 
   const pauseValue = job?._send_paused;
   if (job?._send_pause_available === false || job?._db_pause_available === false) return false;
@@ -4521,7 +4532,7 @@ else:
         where.append("LOWER(COALESCE(j.\"status\",''))='evaluated'")
         where.append("LOWER(COALESCE(j.\"status\",'')) NOT IN ('applied','sent','followupsent','expired','skipped','verified','needsreview','needsverification','applying','sendpaused','simulated')")
     if "score" in job_columns:
-        where.append("COALESCE(j.\"score\",0)>=75")
+        where.append("COALESCE(j.\"score\",0)>=" + str(MIN_SCORE))
     if "link" in job_columns:
         where.append("LOWER(COALESCE(j.\"link\",'')) LIKE 'https://%'")
         if include_indeed != "1":
