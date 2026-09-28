@@ -106,8 +106,15 @@
   .entry-meta {
     font-size: {{ meta_size_pt }}pt;
     color: #718096;
-    white-space: nowrap;
     flex-shrink: 0;
+  }
+  /* The entry-meta row holds the tech stack and, when present, a repository
+     URL. It must be allowed to wrap: the parent forced nowrap and a full
+     github.com URL then overflowed the page width. */
+  .entry-meta .proj-repo {
+    color: #2b6cb0;
+    text-decoration: none;
+    margin-right: 6px;
   }
 
   .entry-sub {
@@ -278,7 +285,10 @@
         <span class="entry-title">
           {% if proj.link %}<a href="{{ proj.link }}">{{ proj.name }}</a>{% else %}{{ proj.name }}{% endif %}
         </span>
-        <span class="entry-meta">{{ proj.tech_stack | join(" · ") if proj.tech_stack else "" }}</span>
+        <span class="entry-meta">
+          {%- if proj.link %}<a href="{{ proj.link }}" class="proj-repo">{{ proj.link }}</a>{% endif -%}
+          {%- if proj.tech_stack %} {{ proj.tech_stack | join(" · ") }}{% endif -%}
+        </span>
       </div>
       {% if proj.bullets %}
       <ul class="bullets">

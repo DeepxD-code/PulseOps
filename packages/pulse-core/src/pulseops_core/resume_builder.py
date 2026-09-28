@@ -225,8 +225,11 @@ def _build_context(cv_data, eval_result: dict, company: str, role: str,
     tailored_skills = eval_result.get("tailored_skills") or []
     skills = _reorder_skills(dict(cv_data.skills), tailored_skills)
 
-    # Projects: top 2 by JD overlap
-    projects = _top_projects(projects_adj, jd_text, top_n=2)
+    # Projects: every project is listed, most relevant to the JD first. Capping
+    # at two hid real work — the CV was dropping projects that had a repository
+    # to point at. Relevance still decides the order, and the caller's 1-page
+    # fitting profiles drop bullets before they drop whole entries.
+    projects = _top_projects(projects_adj, jd_text, top_n=len(projects_adj) or 1)
 
     # Certifications: only if relevant to JD
     certifications = _cert_relevant(cv_data.certifications, jd_text)
