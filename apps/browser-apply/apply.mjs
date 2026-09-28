@@ -4663,7 +4663,17 @@ print(json.dumps(result))
   // rows. JS repeats the policy after the query so blacklist/contact files and
   // unusual schemas still fail closed.
   try {
-    const rows = queryRows("default").filter((row) => isEligibleJob(row));
+    const queried = queryRows("default");
+    const rows = queried.filter((row) => isEligibleJob(row));
+    // Report both counts. "No eligible jobs" is indistinguishable from "the
+    // query matched nothing" without this, which hides the real blocker.
+    if (queried.length !== rows.length) {
+      const byBlockedUrl = queried.filter((r) => r?.link && !isAllowedInitialJobUrl(r.link)).length;
+      const byRole = queried.filter((r) => !isStrictTargetRole(r?.title)).length;
+      const byIndeed = queried.filter((r) => inferATS(r?.link || "") === "indeed").length;
+      console.log(`[DB] ${queried.length} row(s) passed SQL → ${rows.length} eligible `
+        + `(blocked URL: ${byBlockedUrl}, out-of-scope role: ${byRole}, Indeed: ${byIndeed})`);
+    }
     if (rows.length) {
       // Batch size is a throughput knob, not a safety limit: every job still
       // passes its own claim/pause/guard checks before anything is submitted.

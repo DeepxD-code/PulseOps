@@ -2,7 +2,12 @@ param(
     [switch]$SkipLiveness,
     [switch]$SkipBrowserApply,
     [switch]$NoPush,
-    [switch]$StrictNavigation
+    [switch]$StrictNavigation,
+    # Required for terms checkboxes, policy attestations and the candidate
+    # commitments in profile.application_answers. Those are statements made on
+    # the candidate's behalf, so they are opt-in per run and every answer is
+    # logged as [commitment]/[attestation].
+    [switch]$AcceptTerms
 )
 
 # Native CLIs (Python/Node) may write warnings to stderr without failing.
@@ -31,7 +36,9 @@ if (-not $SkipBrowserApply) {
     } else {
         Remove-Item Env:\PULSEOPS_ALLOW_EXTERNAL_APPLY -ErrorAction SilentlyContinue
     }
-    & node apps/browser-apply/apply.mjs --live --headed --auto --otp-pause
+    $applyArgs = @("apps/browser-apply/apply.mjs", "--live", "--headed", "--auto", "--otp-pause")
+    if ($AcceptTerms) { $applyArgs += "--accept-terms" }
+    & node @applyArgs
     $browserExit = $LASTEXITCODE
     Write-Host "browser_apply_exit=$browserExit"
 } else {

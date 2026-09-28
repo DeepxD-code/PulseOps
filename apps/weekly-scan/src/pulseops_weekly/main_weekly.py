@@ -557,11 +557,19 @@ def _run_liveness_check() -> list[dict] | None:
     failure is represented by ``None``; valid dead records are passed to the
     scanner so it can skip exactly those portals.
     """
+    # The check probes every enabled portal in a real browser, which takes
+    # several minutes. A 120s cap killed it mid-run, and because a tool failure
+    # is fail-closed the whole scan was refused — so it sourced nothing at all.
+    # Overridable, and long enough for the slowest observed run (~7 minutes).
+    try:
+        liveness_timeout = int(os.environ.get("PULSEOPS_LIVENESS_TIMEOUT_S", "900"))
+    except ValueError:
+        liveness_timeout = 900
     try:
         result = subprocess.run(
             ["node", str(_portal_script("check_liveness.mjs")), "--json"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(ROOT), timeout=120,
+            cwd=str(ROOT), timeout=liveness_timeout,
         )
         returncode = getattr(result, "returncode", 0)
         if returncode != 0:
