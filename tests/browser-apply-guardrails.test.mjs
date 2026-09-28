@@ -999,6 +999,12 @@ test("an ATS's own CDN may serve its scripts, but no other host may", () => {
   // leaves the form inert with empty dropdowns.
   assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root.js", "script", "greenhouse"), true);
   assert.equal(isAllowedAssetRequest("https://cdn.ashbyhq.com/app.js", "script", "ashby"), true);
+  // Ashby's real asset host, and the Vite manifest it fetches as "other".
+  assert.equal(
+    isAllowedAssetRequest("https://cdn.ashbyprd.com/frontend_non_user/abc/.vite/manifest.json", "other", "ashby"),
+    true,
+  );
+  assert.equal(isAllowedAssetRequest("https://cdn.ashbyprd.com/evil.js", "script", "lever"), false);
   // The same script is not trusted for a different ATS, nor for a lookalike host.
   assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root.js", "script", "lever"), false);
   assert.equal(isAllowedAssetRequest("https://evil.job-boards.cdn.greenhouse.io.attacker.net/root.js", "script", "greenhouse"), false);

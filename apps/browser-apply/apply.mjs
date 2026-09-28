@@ -216,7 +216,11 @@ const ATS_ASSET_HOSTS = Object.freeze({
   // form inert, so the vendor's declared asset host is trusted exactly.
   greenhouse: ["job-boards.cdn.greenhouse.io"],
   lever: ["cdn.lever.co"],
-  ashby: ["cdn.ashbyhq.com"],
+  // Ashby serves its app from cdn.ashbyprd.com — not cdn.ashbyhq.com. The
+  // bundle manifest is fetched as resource type "other"; without it the Vite
+  // app never bootstraps and the page sits on a spinner forever, with no form
+  // and no buttons to find.
+  ashby: ["cdn.ashbyhq.com", "cdn.ashbyprd.com"],
   workday: ["assets.ctfassets.net"],
 });
 const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
