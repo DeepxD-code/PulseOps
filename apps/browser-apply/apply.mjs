@@ -2157,15 +2157,19 @@ async function tryEmailOtp(page) {
   const fetcher = path.join(ROOT, "packages", "pulse-core", "src", "pulseops_core", "otp_fetch.py");
   if (!fs.existsSync(fetcher)) return null;
 
-  const box = page.locator(
-    'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
-    + 'input[placeholder*="code" i], input[aria-label*="code" i]',
-  ).first();
-  if (!(await box.count().catch(() => 0))) return null;
-  if (!(await box.isVisible().catch(() => false))) return null;
-
-  const deadline = Date.now() + 90000;
+  // The code field appears a moment after the submit click, so the box is
+  // re-resolved on every poll rather than checked once: a single early check
+  // bails before the dialog has rendered and the step then waits for a human.
+  const deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
+    const box = page.locator(
+      'input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], '
+      + 'input[placeholder*="code" i], input[aria-label*="code" i]',
+    ).first();
+    if (!(await box.isVisible().catch(() => false))) {
+      await page.waitForTimeout(2500);
+      continue;
+    }
     let code = null;
     try {
       // Poll: the mail may not have arrived when the prompt appeared.
@@ -2217,7 +2221,7 @@ async function completeSmsVerification(page, { timeoutMs = 180000 } = {}) {
     await page.waitForTimeout(1000);
   }
 
-  console.log("\n  [otp] This portal sent a verification code to your phone.");
+  console.log("\n  [otp] This portal is asking for a verification code.");
   // Portals that email the code can be completed without a human. The code is
   // read from the candidate's own inbox over IMAP and is only accepted from
   // mail that arrived just now and actually reads as a verification message.
