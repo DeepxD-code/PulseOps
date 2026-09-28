@@ -2889,8 +2889,16 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const pickOption = async (texts) => {
         const hit = texts.find((t) => new RegExp(`^${wanted}\\b`, "i").test(t))
           || texts.find((t) => new RegExp(`^${wanted}`, "i").test(t))
-          || texts.find((t) => new RegExp(`\\b${wanted}\\b`, "i").test(t));
+          || texts.find((t) => new RegExp(`\\b${wanted}\\b`, "i").test(t))
+          // A dropdown offering exactly one option has no choice to make, so the
+          // configured wording cannot be a mismatch worth failing on. This is
+          // how the legal acknowledgements are written: one long option, not
+          // Yes/No. Selecting it is the only way to complete the field.
+          || (texts.length === 1 ? texts[0] : null);
         if (!hit) return null;
+        if (texts.length === 1 && !new RegExp(`\\b${wanted}\\b`, "i").test(hit)) {
+          console.log(`    [combo] ${hintRe.source}: only one option offered, selecting it`);
+        }
         await page.locator(OPTION).filter({ hasText: hit }).first()
           .click({ timeout: 4000 }).catch(() => {});
         await page.waitForTimeout(500);
