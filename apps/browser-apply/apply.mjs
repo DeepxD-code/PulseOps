@@ -1120,10 +1120,23 @@ function findResumePdf(company, title, dbPdfPath = "") {
     path.join(pdfDir, `${safeFilePart(company)}.pdf`),
   );
   const needle = norm(company).slice(0, 18);
-  // Prefer the tailored per-job PDF (CV_<Company>_...), matched by company substring
   if (needle && fs.existsSync(pdfDir)) {
     const hit = fs.readdirSync(pdfDir).find(f => f.endsWith(".pdf") && norm(f).includes(needle));
     if (hit) candidates.push(path.join(pdfDir, hit));
+    // Tailored CVs all share the name CV.pdf and are separated by a short
+    // per-application folder named "<company>-<hash>". Match the company prefix
+    // only and take the most recently written, so this fallback still resolves
+    // to a CV for this company rather than a stranger's. A bare top-level
+    // CV.pdf is never treated as a tailored CV for a specific role.
+    const folderNeedle = safeFilePart(company).slice(0, 24).toLowerCase();
+    const folders = fs.readdirSync(pdfDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name.toLowerCase().startsWith(folderNeedle))
+      .map((d) => path.join(pdfDir, d.name, "CV.pdf"))
+      .filter((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } })
+      .sort((a, b) => {
+        try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
+      });
+    candidates.push(...folders);
   }
   candidates.push(path.join(ROOT, "output", "resume.pdf")); // base CV fallback
   for (const p of candidates) {

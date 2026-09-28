@@ -867,6 +867,38 @@ test("the ATS may receive the application, and nothing else may", () => {
   assert.equal(isAllowedAtsApplicationPost("https://boards.greenhouse.io.evil.net/anthropic/jobs/1", "fetch", "POST", "greenhouse"), false);
 });
 
+test("a tailored CV resolves from its folder, and never a stranger's", async () => {
+  // Every tailored CV is now named CV.pdf inside a per-application folder, so
+  // the filename alone cannot identify one. The DB path stays authoritative and
+  // the fallback must match the company, never pick up an unrelated CV.pdf.
+  const { findResumePdf } = await import("../apps/browser-apply/apply.mjs");
+  const dir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)), "..", "output", "pdf",
+  );
+  const mineDir = path.join(dir, "zztestco-aaaaaaaa");
+  const strangerDir = path.join(dir, "zzotherco-bbbbbbbb");
+  fs.mkdirSync(mineDir, { recursive: true });
+  fs.mkdirSync(strangerDir, { recursive: true });
+  const mine = path.join(mineDir, "CV.pdf");
+  const stranger = path.join(strangerDir, "CV.pdf");
+  fs.writeFileSync(mine, "mine");
+  fs.writeFileSync(stranger, "stranger");
+  try {
+    // The authoritative DB path is used when it exists.
+    assert.equal(findResumePdf("zztestco", "Backend Engineer Intern", mine), mine);
+    // With no DB path, the company folder still resolves.
+    const resolved = findResumePdf("zztestco", "Backend Engineer Intern");
+    assert.equal(resolved, mine, "should resolve this company's tailored CV");
+    // A different company must never be handed this CV.
+    const other = findResumePdf("zzotherco", "Backend Engineer Intern", stranger);
+    assert.equal(other, stranger);
+    assert.notEqual(findResumePdf("zzunknownco9x", "Backend Engineer Intern"), mine);
+  } finally {
+    fs.rmSync(mineDir, { recursive: true, force: true });
+    fs.rmSync(strangerDir, { recursive: true, force: true });
+  }
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.

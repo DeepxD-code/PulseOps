@@ -26,6 +26,7 @@ Raises ResumeBuildError on failure.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -383,11 +384,18 @@ def build_resume(
     OUTPUT_PDF.mkdir(parents=True, exist_ok=True)
     OUTPUT_HTML.mkdir(parents=True, exist_ok=True)
 
-    safe_co   = _clean_filename(company)
-    safe_role = _clean_filename(role)
-    stem      = f"CV_{safe_co}_{safe_role}"
-    html_path = OUTPUT_HTML / f"{stem}.html"
-    pdf_path  = OUTPUT_PDF  / f"{stem}.pdf"
+    # Every tailored CV keeps the same short name so it is recognisable in a
+    # file picker and in what an employer sees. The tailoring still happens per
+    # application; uniqueness now comes from a short per-application folder
+    # instead of a long filename, so two roles at one company never collide and
+    # no path grows without bound.
+    safe_co = _clean_filename(company)[:24]
+    role_key = hashlib.sha1(_clean_filename(role).encode("utf-8")).hexdigest()[:8]
+    subdir = f"{safe_co}-{role_key}"
+    (OUTPUT_HTML / subdir).mkdir(parents=True, exist_ok=True)
+    (OUTPUT_PDF / subdir).mkdir(parents=True, exist_ok=True)
+    html_path = OUTPUT_HTML / subdir / "CV.html"
+    pdf_path  = OUTPUT_PDF  / subdir / "CV.pdf"
 
     if not TEMPLATE.exists():
         raise ResumeBuildError(
