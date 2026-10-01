@@ -84,8 +84,21 @@ if ($OpenG10Reviews) {
 if (-not $NoPush) {
     Write-Host "=== Pushing current branch ==="
     $branch = (& git branch --show-current).Trim()
-    & git push origin $branch
-    $pushExit = $LASTEXITCODE
+    # Retry a transient network failure rather than reporting a failed run.
+    # Observed 2026-10-01: a machine-wide DNS outage took out SMTP, the GitHub
+    # push and the evaluator in the same run, and
+    #   "Could not resolve host: github.com" -> push_exit=128
+    # marked the whole run failed when nothing about the code was wrong.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        & git push origin $branch
+        $pushExit = $LASTEXITCODE
+        if ($pushExit -eq 0) { break }
+        if ($attempt -lt 3) {
+            $wait = $attempt * 10
+            Write-Host "[push-retry] attempt $attempt failed (exit $pushExit); retrying in ${wait}s"
+            Start-Sleep -Seconds $wait
+        }
+    }
     Write-Host "push_exit=$pushExit"
 }
 

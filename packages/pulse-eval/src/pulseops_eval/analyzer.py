@@ -187,9 +187,19 @@ def _is_malformed_json(msg: str) -> bool:
 
 
 def _is_transient_network(msg: str) -> bool:
-    """DNS resets and aborted sockets, which are momentary rather than fatal."""
-    low = msg.lower()
-    return (
+    """DNS resets and aborted sockets, which are momentary rather than fatal.
+
+    The SDKs do not surface the underlying cause: a Groq or OpenAI SDK call that
+    failed DNS reports only "Connection error." with the real reason buried in
+    __cause__. Matching the stringified exception alone therefore missed every
+    DNS failure on those two engines - which is exactly the outage observed on
+    2026-10-01 - so the exception chain is walked as well. A bare
+    "connection error" is treated as transient because that is all the SDK
+    offers, and retrying a transport fault three times is cheap next to losing
+    the rest of the cascade.
+    """
+    low = str(msg or "").lower()
+    if (
         "[errno 11001]" in low
         or "getaddrinfo failed" in low
         or "[winerror 10053]" in low
@@ -197,7 +207,41 @@ def _is_transient_network(msg: str) -> bool:
         or "connection aborted" in low
         or "connection reset" in low
         or "connection refused" in low
-    )
+        or "temporary failure in name resolution" in low
+        or "name or service not known" in low
+        or "nodename nor servname" in low
+        or "ssl syscall" in low
+    ):
+        return True
+    # Walk the cause chain: openai/groq wrap the socket error one level down, so
+    # a DNS failure arrives as a bare "Connection error." string. The cause is
+    # what actually decides it - a bare message is never trusted on its own,
+    # because that would also retry the SDK's own request-construction errors.
+    seen = 0
+    cause = getattr(msg, "__cause__", None) or getattr(msg, "__context__", None)
+    while cause is not None and seen < 5:
+        text = str(cause).lower()
+        if any(
+            token in text
+            for token in (
+                "getaddrinfo",
+                "11001",
+                "10053",
+                "10054",
+                "connection reset",
+                "connection refused",
+                "connection aborted",
+                "name or service not known",
+                "temporary failure",
+                "timed out",
+                "ssl syscall",
+                "broken pipe",
+            )
+        ):
+            return True
+        cause = getattr(cause, "__cause__", None) or getattr(cause, "__context__", None)
+        seen += 1
+    return False
 
 
 def _is_daily_quota(msg: str) -> bool:
@@ -318,8 +362,18 @@ def _query_groq(prompt: str) -> dict:
                         time.sleep(6)
                     else:
                         break
-                else:
-                    raise
+                    continue
+                # Retry a transient transport failure before giving up. Groq had
+                # no retry at all, so a machine-wide DNS outage (observed
+                # 2026-10-01 as "getaddrinfo failed", which also killed SMTP and
+                # the git push in the same run) killed every job the moment the
+                # cascade fell through to it, defeating the point of having a
+                # fallback engine at all.
+                if _is_transient_network(str(e)) and attempt < 2:
+                    print(f"  [Groq] network error on {model}, retry {attempt + 1}/3…")
+                    time.sleep(3 * (attempt + 1))
+                    continue
+                raise
     raise RuntimeError("All Groq models failed")
 
 
@@ -327,7 +381,7 @@ def _query_openai(prompt: str) -> dict:
     from openai import OpenAI
 
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -347,11 +401,16 @@ def _query_openai(prompt: str) -> dict:
                 if _is_daily_quota(msg):
                     disable_engine("openai", "quota exhausted")
                     raise
-                if attempt < 1:
+                if attempt < 2:
                     time.sleep(8)
-                else:
-                    raise
-            else:
+                    continue
+                raise
+            # Same reasoning as the Groq path: a transient network fault must not
+                # consume the last engine in the cascade on its first error.
+                if _is_transient_network(str(e)) and attempt < 2:
+                    print(f"  [OpenAI] network error, retry {attempt + 1}/3…")
+                    time.sleep(3 * (attempt + 1))
+                    continue
                 raise
     raise RuntimeError("OpenAI exhausted retries")
 

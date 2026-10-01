@@ -26,6 +26,7 @@ import os
 import smtplib
 import ssl
 import sys
+import time
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -122,23 +123,43 @@ def send(subject: str, body: str) -> bool:
     msg["To"] = user
     msg["Subject"] = subject
     msg.set_content(body)
-    try:
-        # Port 587 with STARTTLS, not 465 implicit SSL. Verified against this
-        # account on 2026-10-01: smtp.gmail.com:465 accepts the TCP connection
-        # and the EHLO, then drops the socket during AUTH with
-        # "SMTPServerDisconnected: Connection unexpectedly closed", while 587 +
-        # STARTTLS authenticates cleanly with the same app password. The other
-        # two mailers in the repo already use 587 for exactly this reason.
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=45) as smtp:
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.login(user, password)
-            smtp.send_message(msg)
-    except Exception as exc:  # noqa: BLE001
-        # Never let a mail problem change the run's verdict, but always say it.
-        print(f"[notify] could not send the run summary: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return False
-    print("[notify] run summary sent to the candidate inbox")
-    return True
+    # Retry. A run summary is the only signal the operator gets about what the
+    # browser did, so one DNS hiccup must not silently swallow it - observed
+    # 2026-10-01 as
+    #   [notify] could not send the run summary: gaierror: [Errno 11001]
+    #   getaddrinfo failed
+    # which left a completed run looking unreported. Retry the transient
+    # transport failures with a short backoff; give up on an auth failure,
+    # which retrying cannot fix.
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            # Port 587 with STARTTLS, not 465 implicit SSL. Verified against this
+            # account on 2026-10-01: smtp.gmail.com:465 accepts the TCP connection
+            # and the EHLO, then drops the socket during AUTH with
+            # "SMTPServerDisconnected: Connection unexpectedly closed", while 587 +
+            # STARTTLS authenticates cleanly with the same app password.
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=45) as smtp:
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.login(user, password)
+                smtp.send_message(msg)
+            print("[notify] run summary sent to the candidate inbox")
+            return True
+        except smtplib.SMTPAuthenticationError as exc:
+            last_error = exc
+            print(f"[notify] authentication rejected; not retrying: {exc}", file=sys.stderr)
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            transient = isinstance(exc, (OSError, smtplib.SMTPException))
+            if not transient or attempt == 3:
+                break
+            wait = attempt * 5
+            print(f"[notify] attempt {attempt} failed ({type(exc).__name__}: {exc}); retrying in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    # Never let a mail problem change the run's verdict, but always say it.
+    print(f"[notify] could not send the run summary: {type(last_error).__name__}: {last_error}", file=sys.stderr)
+    return False
 
 
 def main() -> int:
