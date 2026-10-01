@@ -33,6 +33,17 @@ ROOT = Path(__file__).resolve().parents[3]
 RESULTS = ROOT / "output" / "apply-results.json"
 PENDING = ROOT / "output" / "pending-questions.json"
 
+# Load the repository .env so the script works when invoked directly from
+# run-automation.ps1, which sets its own env vars but does not export
+# SMTP_EMAIL/SMTP_PASSWORD. Without this it always reported "not set" and sent
+# nothing - the one thing this script exists to do.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env", override=False)
+except Exception:  # noqa: BLE001 - fall back to the ambient environment
+    pass
+
 # The recorded outcome -> how it is described to the candidate. Anything not
 # listed here is reported by its raw action rather than being guessed at.
 LABELS = {
@@ -112,7 +123,14 @@ def send(subject: str, body: str) -> bool:
     msg["Subject"] = subject
     msg.set_content(body)
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, ssl.create_default_context(), timeout=45) as smtp:
+        # Port 587 with STARTTLS, not 465 implicit SSL. Verified against this
+        # account on 2026-10-01: smtp.gmail.com:465 accepts the TCP connection
+        # and the EHLO, then drops the socket during AUTH with
+        # "SMTPServerDisconnected: Connection unexpectedly closed", while 587 +
+        # STARTTLS authenticates cleanly with the same app password. The other
+        # two mailers in the repo already use 587 for exactly this reason.
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=45) as smtp:
+            smtp.starttls(context=ssl.create_default_context())
             smtp.login(user, password)
             smtp.send_message(msg)
     except Exception as exc:  # noqa: BLE001
