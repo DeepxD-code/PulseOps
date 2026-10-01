@@ -62,9 +62,24 @@ search_portals:
     requires_auth: false
     url: "https://in.indeed.com/jobs?q=backend+developer+intern&l=India&fromage=7&sort=date"
 
+  # DISABLED 2026-10-01: Glassdoor throttles automated clients. Verified in a
+  # real Edge session with a saved profile, the same board answered three
+  # different ways within a few minutes:
+  #   plain HTTPS GET           -> HTTP 403
+  #   headed browser, 1st load  -> HTTP 200, 234 anchors, ZERO job cards
+  #   headed browser, same URL  -> HTTP 404
+  # Their listing BFF answers 403 as well
+  # (POST /job-search-next/bff/userProfileQuery), so the cards never render
+  # even when the page itself loads. The anchors that do appear are
+  # related-search sidebar links, not listings - a selector change would have
+  # produced the same empty result.
+  # It contributed 25 rows and has never produced a single outcome. Leaving it
+  # enabled made the pipeline look busier than it was, which is worse than an
+  # honest absence. Re-enable only if a Glassdoor partner/API feed is available;
+  # do not attempt to defeat the throttling.
   - name: "Glassdoor India"
     engine: glassdoor
-    enabled: true
+    enabled: false
     requires_auth: false
     url: "https://www.glassdoor.co.in/Job/india-backend-developer-intern-jobs-SRCH_KO0,27.htm"
 
