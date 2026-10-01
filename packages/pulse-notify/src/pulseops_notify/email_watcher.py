@@ -1,7 +1,7 @@
 """
 notifications/email_watcher.py — IMAP bounce auto-fix + platform job ingest (runs hourly)
 
-Watches trex2004avradeep@gmail.com INBOX for:
+Watches the SMTP_EMAIL / IMAP_EMAIL inbox for:
   1. Bounces / Address not found (550 5.1.1, 550 5.4.1, Delivery Status Notification)
      → auto-fix: mark outreach as bounced, pause domain (G9), blacklist if needed, clear G8 queue
   2. Job platform matched listings (Naukri, Indeed, Glassdoor, LinkedIn, Wellfound, JobHai, YC, Instahyre)

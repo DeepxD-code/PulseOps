@@ -156,6 +156,50 @@ def _parse_json(text: str) -> dict:
         raise
 
 
+def _is_malformed_json(msg: str) -> bool:
+    """True when the model replied with truncated or malformed JSON.
+
+    Distinct from a rate limit: the request succeeded, the payload is unusable.
+    Retrying the same prompt usually gets a complete object back, because the
+    truncation comes from hitting ``max_output_tokens`` mid-serialisation.
+    Sixteen jobs in one run died on this with no retry at all, and each was
+    discarded rather than re-evaluated.
+    """
+    low = msg.lower()
+    # Matched on the decoder's own wording rather than on the word "JSON",
+    # which the real messages do not contain. Every marker below is something
+    # json.loads raises and nothing else does, so this cannot fire on a quota,
+    # auth or validation error.
+    return any(
+        marker in low
+        for marker in (
+            "expecting ',' delimiter",
+            "expecting property name enclosed in double quotes",
+            "expecting value",
+            "expecting ':' delimiter",
+            "unterminated string",
+            "extra data",
+            "invalid \\escape",
+            "invalid control character",
+            "invalid \\\\u",
+        )
+    )
+
+
+def _is_transient_network(msg: str) -> bool:
+    """DNS resets and aborted sockets, which are momentary rather than fatal."""
+    low = msg.lower()
+    return (
+        "[errno 11001]" in low
+        or "getaddrinfo failed" in low
+        or "[winerror 10053]" in low
+        or "[winerror 10054]" in low
+        or "connection aborted" in low
+        or "connection reset" in low
+        or "connection refused" in low
+    )
+
+
 def _is_daily_quota(msg: str) -> bool:
     """True only for DAILY exhaustion. Per-minute 429s carry RetryInfo /
     PerMinute quotaIds and must NOT disable the engine — the caller retries
@@ -229,6 +273,16 @@ def _query_gemini(prompt: str) -> dict:
                     time.sleep(wait)
                 else:
                     raise
+            elif _is_malformed_json(msg) or _is_transient_network(msg):
+                # Neither is a quota problem, so the engine stays enabled. These
+                # were killing whole jobs with no second attempt, which is how a
+                # 141-role run lost 16 to truncated JSON and 8 to a DNS blip.
+                if attempt < 3:
+                    time.sleep(2 * (attempt + 1))
+                    kind = "truncated JSON" if _is_malformed_json(msg) else "network"
+                    print(f"  [Gemini] {kind}, retry {attempt + 1}/3…")
+                    continue
+                raise
             else:
                 raise
     raise RuntimeError("Gemini exhausted retries")
