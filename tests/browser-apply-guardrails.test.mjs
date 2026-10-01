@@ -506,11 +506,49 @@ test("plain identity facts are answered from the profile, absent facts are not i
     .find((f) => f.tag === "current company").value, "Acme");
 
   // A missing profile fact yields no entry at all, so the field is left for the human.
-  assert.deepEqual(identityFacts({ phone: "6289050278" }, {}).map((f) => f.tag), ["phone number"]);
+  assert.deepEqual(identityFacts({ phone: "6289050278" }, {}).map((f) => f.tag), ["phone number", "how you heard"]);
 
-  // The hints must match the labels boards actually use. Match against the
-  // stated form so the employer hint is present to be exercised at all.
-  const withEmployer = identityFacts(candidate, { current_company: "Acme" });
+  // Facts derived from the profile rather than restated by hand.
+  const rich = identityFacts(
+    {
+      name: "AVRADEEP MAJUMDER",
+      phone: "6289050278",
+      current_location: "Greater Noida, Uttar Pradesh",
+      experience_years: 2,
+      expected_salary: "4-5 LPA",
+    },
+    { current_company: "Acme", requires_visa_sponsorship: "Yes" },
+  );
+  const richByTag = Object.fromEntries(rich.map((f) => [f.tag, f.value]));
+  assert.equal(richByTag["city"], "Greater Noida, Uttar Pradesh");
+  assert.equal(richByTag["years of experience"], "2 years");
+  assert.equal(richByTag["desired salary"], "4-5 LPA");
+  // Sponsorship required => not authorised. Never asserted when undeclared.
+  assert.equal(richByTag["work authorisation"], "No");
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "work authorisation"), false);
+  assert.equal(
+    identityFacts({}, { requires_visa_sponsorship: "No" }).find((f) => f.tag === "work authorisation").value,
+    "Yes",
+  );
+  assert.equal(
+    identityFacts({ experience_years: 1 }, {}).find((f) => f.tag === "years of experience").value,
+    "1 year",
+  );
+  // "How did you hear about X" is answered truthfully as the board, never as a referral.
+  assert.equal(richByTag["how you heard"], "This job board");
+  assert.equal(identityFacts({}, { how_you_heard: "A colleague" }).find((f) => f.tag === "how you heard").value, "A colleague");
+
+  // Work authorisation is written at most once per form: a form can ask about
+  // the US and about the candidate's own country, and one derived answer is
+  // only correct for the jurisdiction it was derived for.
+  assert.equal(identityFacts({}, { requires_visa_sponsorship: "Yes" })
+    .find((f) => f.tag === "work authorisation").once, true);
+  assert.equal(identityFacts({ current_location: "Greater Noida" }, {})
+    .find((f) => f.tag === "city").once, false);
+
+  // The hints must match the labels boards actually use. Match against the fully
+  // populated profile so every hint is present to be exercised at all.
+  const withEmployer = rich;
   const match = (tag, signature) => Boolean(withEmployer.find((f) => f.tag === tag)?.hint.test(signature));
   assert.equal(match("legal name", "Legal Name"), true);
   assert.equal(match("legal name", "Full legal name as per your passport"), true);
@@ -525,11 +563,20 @@ test("plain identity facts are answered from the profile, absent facts are not i
   assert.equal(match("phone number", "Mobile no."), true);
   assert.equal(match("current company", "Current Company"), true);
   assert.equal(match("current company", "Where do you currently work?"), true);
+  assert.equal(match("current company", "Who is your current or most recent employer?"), true);
+  assert.equal(match("city", "Location (City)*"), true);
+  assert.equal(match("years of experience", "How many years of industry experience do you have?"), true);
+  assert.equal(match("work authorisation", "Are you currently authorized to work in the US?"), true);
+  assert.equal(match("desired salary", "What is your desired salary range?"), true);
+  assert.equal(match("how you heard", "How did you hear about Mixpanel as an Employer?"), true);
 
   // Genuinely personal prompts stay out of this list by design.
   const personal = "Why do you want to work at Cartesia AI?";
   assert.equal(withEmployer.some((f) => f.hint.test(personal)), false, personal);
   assert.equal(withEmployer.some((f) => f.hint.test("Describe your experience working with observability")), false);
+  // A binding legal question is not a profile fact and must not be auto-answered.
+  assert.equal(withEmployer.some((f) => f.hint.test("Are you currently bound by any non-compete agreement?")), false);
+  assert.equal(withEmployer.some((f) => f.hint.test("Please acknowledge that you've read and understood the applicant agreement")), false);
 });
 
 test("a contended listing is per-row, and only a global pause stops the batch", () => {

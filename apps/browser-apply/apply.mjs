@@ -1250,6 +1250,21 @@ function isBlacklistedJob(job, blacklist = loadBlacklistEntries()) {
  * A genuinely personal prompt ("Why do you want to work at X?") has no entry
  * here by design and stays unanswered for the human.
  */
+function yearsOfExperience(candidate) {
+  const raw = candidate?.experience_years;
+  const n = typeof raw === "number" ? raw : Number.parseFloat(String(raw ?? ""));
+  if (!Number.isFinite(n) || n < 0) return "";
+  return `${n} year${n === 1 ? "" : "s"}`;
+}
+
+function workAuthorisation(stated) {
+  const needsSponsorship = String(stated?.requires_visa_sponsorship ?? "").trim().toLowerCase();
+  if (needsSponsorship === "yes" || needsSponsorship === "true") return "No";
+  if (needsSponsorship === "no" || needsSponsorship === "false") return "Yes";
+  // Not declared either way: say nothing rather than assert a legal status.
+  return "";
+}
+
 function identityFacts(candidate, stated) {
   const spec = [
     {
@@ -1270,12 +1285,58 @@ function identityFacts(candidate, stated) {
     },
     {
       tag: "current company",
-      hint: /current(?:ly)?\s+(?:employer|company|organisation|organization)|present\s+employer|where\s+do\s+you\s+currently\s+work|your\s+current\s+(?:employer|company)/i,
+      hint: /current(?:ly)?\s+(?:employer|company|organisation|organization)|present\s+employer|where\s+do\s+you\s+currently\s+work|your\s+current\s+(?:employer|company)|who\s+is\s+your\s+current\s+or\s+most\s+recent\s+employ/i,
       value: stated?.current_company,
+    },
+    {
+      tag: "city",
+      // "Location (City)" on ScaleAI/Mixpanel is the candidate's city, which the
+      // profile already holds. Not a work-authorisation question and not a
+      // relocation commitment, so it needs no operator flag.
+      hint: /^location\s*\(?city\)?|^city\b|^your\s+city\b|which\s+city/i,
+      value: candidate?.current_location,
+    },
+    {
+      tag: "years of experience",
+      hint: /how\s+many\s+years\s+of\s+(?:industry\s+|relevant\s+|professional\s+)?experience|years\s+of\s+experience|total\s+experience/i,
+      value: yearsOfExperience(candidate),
+    },
+    {
+      tag: "work authorisation",
+      // Derived, not guessed: the operator already declared that visa
+      // sponsorship is required, so "are you authorised to work here?" is
+      // necessarily "No". If that answer changes, this changes with it.
+      hint: /are\s+you\s+(?:legally\s+)?(?:currently\s+)?authori[sz]ed\s+to\s+work|authori[sz]ed\s+to\s+work\s+in|do\s+you\s+have\s+the\s+right\s+to\s+work/i,
+      value: workAuthorisation(stated),
+      once: true,
+    },
+    {
+      tag: "desired salary",
+      hint: /desired\s+salary|salary\s+(?:range|expectation)|expected\s+(?:salary|compensation)|compensation\s+expectation/i,
+      value: candidate?.expected_salary,
+    },
+    {
+      tag: "how you heard",
+      // A factual account of where the application came from. The truthful
+      // answer is the board itself; claiming a referral or a recruiter would be
+      // a false statement to the employer.
+      hint: /how\s+did\s+you\s+hear\s+about|how\s+you\s+(?:heard|found)\s+(?:about|this)|where\s+did\s+you\s+(?:hear|find)\s+(?:about|this)/i,
+      value: stated?.how_you_heard || "This job board",
     },
   ];
   return spec
-    .map((fact) => ({ tag: fact.tag, hint: fact.hint, value: String(fact.value ?? "").trim() }))
+    .map((fact) => ({
+      tag: fact.tag,
+      hint: fact.hint,
+      value: String(fact.value ?? "").trim(),
+      // "once" facts are only ever written to the first matching control.
+      // Work authorisation is the case that matters: a form can ask about the
+      // US and about the candidate's own country in the same breath, and one
+      // derived answer ("No", because sponsorship is required) is only correct
+      // for the jurisdiction it was derived for. Filling every match would
+      // assert a false legal status on the second one.
+      once: fact.once === true,
+    }))
     .filter((fact) => fact.value);
 }
 
@@ -3461,7 +3522,14 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // answer is logged.
     const stated = profile?.candidate?.application_answers || {};
 
+    const answeredOnce = new Set();
     for (const fact of identityFacts(candidate, stated)) {
+      if (fact.once) {
+        if (answeredOnce.has(fact.tag)) continue;
+        const filled = await answerQuestion(fact.hint, fact.value, fact.tag);
+        if (filled) answeredOnce.add(fact.tag);
+        continue;
+      }
       await answerQuestion(fact.hint, fact.value, fact.tag);
     }
     const commitments = [
@@ -4970,8 +5038,30 @@ async function processJob(browser, job, profile, runtime = {}) {
       // each turned a batch into ~2h of dead waiting that ended in the same
       // NeedsVerification either way. Those are recorded for a single review
       // pass at the end of the run and the batch moves straight on.
-      const needsHumanNow = captchaRefused || wantsCodeNow || consents.length > 0;
-      const missingFieldsOnly = !needsHumanNow && !spamRefused && requiredEmpty.length > 0;
+      // A captcha or an OTP genuinely needs a person at THIS window, right now,
+      // so those keep the long wait - it is the only chance to catch them. An
+      // unaccepted consent is different: the operator authorises those in
+      // advance via --accept-terms, and if a consent is not configured the
+      // window waits for nobody and the row records the same outcome either
+      // way. So record the questions, and only actually wait for the two
+      // cases where waiting can still change the outcome.
+      const needsHumanNow = captchaRefused || wantsCodeNow;
+      const collectOnly = !spamRefused && requiredEmpty.length > 0;
+
+      if (collectOnly) {
+        recordPendingQuestion({
+          company: job.company,
+          title: job.title,
+          link: url,
+          ats,
+          fields: [...requiredEmpty, ...consents.map((c) => `[consent] ${c}`)],
+        });
+        console.log(`  [pending-question] recorded ${requiredEmpty.length + consents.length} unanswered item(s): `
+          + `${[...requiredEmpty, ...consents.map((c) => `[consent] ${c}`)].join(", ")}`);
+        if (!needsHumanNow) {
+          console.log("  [pending-question] not blocking the batch — this needs one pass at the end of the run");
+        }
+      }
 
       if (spamRefused) {
         console.log("  [spam-refused] the board accepted the form and then rejected the submission as spam.");
@@ -4990,7 +5080,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         console.log("  [pending-question] not blocking the batch — this needs one pass at the end of the run");
       }
 
-      if (OTP_PAUSE && !missingFieldsOnly && !spamRefused && (requiredEmpty.length || consents.length || captchaRefused)) {
+      if (OTP_PAUSE && needsHumanNow && !spamRefused) {
         console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
