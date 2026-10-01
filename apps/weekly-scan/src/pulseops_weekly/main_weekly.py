@@ -592,18 +592,40 @@ def _run_liveness_check() -> list[dict] | None:
             print("  [!] Liveness check returned an invalid payload")
             return None
         dead: list[dict] = []
+        flaky: list[dict] = []
         for record in data["results"]:
             if not isinstance(record, dict):
                 continue
             # The Node tool emits booleans.  Requiring them prevents malformed
             # records (for example, a missing ``ok`` field) from being treated
             # as a real dead portal and accidentally skipped.
-            if (
+            if not (
                 record.get("ok") is False
                 and record.get("enabled") is True
                 and record.get("requires_auth", False) in (False, None)
             ):
-                dead.append(record)
+                continue
+            # A portal is only skipped when the probe was definitive — the board
+            # answered 404/410. Timeouts and 5xx are the network's mood, and
+            # skipping on those silently deleted live boards from the funnel:
+            # Anthropic answers 200 in well under a second, yet was skipped as
+            # unreachable, which cost every job on it. Retryable failures are
+            # reported and left enabled so the scanner still tries them.
+            if record.get("dead_confidently") is False:
+                flaky.append(record)
+                print(
+                    f"  [~] {record.get('name', 'unknown')}: probe did not settle "
+                    f"after {record.get('attempts', '?')} attempts "
+                    f"(status={record.get('status')} error={record.get('error')}) — "
+                    f"leaving ENABLED so the scanner still tries it"
+                )
+                continue
+            dead.append(record)
+        if flaky:
+            print(
+                f"  [~] {len(flaky)} portal(s) failed inconclusively and were NOT skipped. "
+                f"These are network conditions, not dead boards."
+            )
         return dead
     except Exception as e:
         print(f"  [!] Liveness check failed to run: {e}")

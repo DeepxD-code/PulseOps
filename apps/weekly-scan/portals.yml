@@ -92,16 +92,33 @@ search_portals:
 # so these are the most reliable sources in this file. Trimmed to
 # companies known to run backend/infra-heavy India hiring.
 ats_portals:
+
+  # Added 2026-09-30. Each URL below was confirmed live against the vendor's
+  # own posting API (boards-api.greenhouse.io/v1/boards/<slug>/jobs and
+  # api.ashbyhq.com/posting-api/job-board/<slug>), NOT guessed. The job count is
+  # what the API reported when the entry was added and is a comment only.
+
+
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Razorpay"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "razorpay"
     url: "https://boards.greenhouse.io/razorpay"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Zerodha"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "zerodha"
     url: "https://boards.greenhouse.io/zerodha"
@@ -113,30 +130,50 @@ ats_portals:
     company: "cred"
     url: "https://jobs.lever.co/cred"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Postman"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "postman"
     url: "https://boards.greenhouse.io/postman"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Groww"
     engine: lever
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "groww"
     url: "https://jobs.lever.co/groww"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Chargebee"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "chargebee"
     url: "https://boards.greenhouse.io/chargebee"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Freshworks"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "freshworks"
     url: "https://boards.greenhouse.io/freshworks"
@@ -168,37 +205,62 @@ ats_portals:
   # hire backend/ML juniors or new grads. A slug that does not resolve is
   # reported as a dead portal by the next scan, so a wrong guess is visible and
   # harmless rather than silent.
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "BrowserStack"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "browserstack"
     url: "https://boards.greenhouse.io/browserstack"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Swiggy"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "swiggy"
     url: "https://boards.greenhouse.io/swiggy"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Meesho"
     engine: greenhouse
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "meesho"
     url: "https://boards.greenhouse.io/meesho"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Slice"
     engine: lever
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "slice"
     url: "https://jobs.lever.co/slice"
 
+    # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
+    # job-boards.greenhouse.io (Lever's postings API likewise for its three).
+    # The company moved ATS or onto a custom domain. Re-enable only after
+    # locating and verifying the live board URL - do NOT guess the slug,
+    # every guessed variant tested returns the same 404.
   - name: "Tinkoff"
     engine: lever
-    enabled: true
+    enabled: false
     requires_auth: false
     company: "tinkoff"
     url: "https://jobs.lever.co/tinkoff"
@@ -232,6 +294,142 @@ ats_portals:
     url: "https://jobs.ashbyhq.com/vapi"
 
 # Tuning
+  - name: "Databricks"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "databricks"
+    url: "https://boards.greenhouse.io/databricks"
+    # 882 jobs at time of adding
+
+  - name: "Elastic"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "elastic"
+    url: "https://boards.greenhouse.io/elastic"
+    # 390 jobs at time of adding
+
+  - name: "Scale AI"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "scaleai"
+    url: "https://boards.greenhouse.io/scaleai"
+    # 191 jobs at time of adding
+
+  - name: "Mixpanel"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "mixpanel"
+    url: "https://boards.greenhouse.io/mixpanel"
+    # 70 jobs at time of adding
+
+  - name: "Cockroach Labs"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "cockroachlabs"
+    url: "https://boards.greenhouse.io/cockroachlabs"
+    # 19 jobs at time of adding
+
+  - name: "PlanetScale"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "planetscale"
+    url: "https://boards.greenhouse.io/planetscale"
+    # 12 jobs at time of adding
+
+  - name: "OpenAI"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "openai"
+    url: "https://jobs.ashbyhq.com/openai"
+    # 839 jobs at time of adding
+
+  - name: "Sierra"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "sierra"
+    url: "https://jobs.ashbyhq.com/sierra"
+    # 202 jobs at time of adding
+
+  - name: "Ramp"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "ramp"
+    url: "https://jobs.ashbyhq.com/ramp"
+    # 155 jobs at time of adding
+
+  - name: "Baseten"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "baseten"
+    url: "https://jobs.ashbyhq.com/baseten"
+    # 104 jobs at time of adding
+
+  - name: "Deepgram"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "deepgram"
+    url: "https://jobs.ashbyhq.com/deepgram"
+    # 91 jobs at time of adding
+
+  - name: "Fireworks AI"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "fireworks"
+    url: "https://jobs.ashbyhq.com/fireworks"
+    # 86 jobs at time of adding
+
+  - name: "Sarvam AI"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "sarvam"
+    url: "https://jobs.ashbyhq.com/sarvam"
+    # 59 jobs at time of adding
+
+  - name: "Modal"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "modal"
+    url: "https://jobs.ashbyhq.com/modal"
+    # 39 jobs at time of adding
+
+  - name: "Cartesia"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "cartesia"
+    url: "https://jobs.ashbyhq.com/cartesia"
+    # 30 jobs at time of adding
+
+  - name: "E2B"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "e2b"
+    url: "https://jobs.ashbyhq.com/e2b"
+    # 12 jobs at time of adding
+
+  - name: "Moonshot AI"
+    engine: ashby
+    enabled: true
+    requires_auth: false
+    company: "moonshot"
+    url: "https://jobs.ashbyhq.com/moonshot"
+    # 4 jobs at time of adding
+
 settings:
   delay_between_portals_seconds: 2
   page_timeout_ms: 30000
