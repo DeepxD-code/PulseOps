@@ -4943,6 +4943,15 @@ async function processJob(browser, job, profile, runtime = {}) {
       // Hold the window open so it can be completed by hand; the row is only
       // marked verified if the portal then confirms.
       const captchaRefused = Boolean(outcome?.captcha);
+      // Some boards accept every field, return HTTP 200, and then refuse the
+      // submission itself: Ashby answers ApiSubmitMultipleFormsAction with 200
+      // and "Your application submission was flagged as possible spam." That is
+      // an anti-automation verdict, not a missing answer, and retrying or
+      // working around it would be evasion. Recognise it explicitly so the row
+      // is not recorded as "a human just needs to confirm" - which is what
+      // makes an operator sit and wait for something that will never arrive.
+      const body = String(outcome?.body || "");
+      const spamRefused = /flagged as possible spam|couldn't submit your application|we could not submit your application/i.test(body);
       let wantsCodeNow = false;
       if (captchaRefused) {
         // Greenhouse shows an invisible reCAPTCHA badge, but the thing actually
@@ -4962,7 +4971,12 @@ async function processJob(browser, job, profile, runtime = {}) {
       // NeedsVerification either way. Those are recorded for a single review
       // pass at the end of the run and the batch moves straight on.
       const needsHumanNow = captchaRefused || wantsCodeNow || consents.length > 0;
-      const missingFieldsOnly = !needsHumanNow && requiredEmpty.length > 0;
+      const missingFieldsOnly = !needsHumanNow && !spamRefused && requiredEmpty.length > 0;
+
+      if (spamRefused) {
+        console.log("  [spam-refused] the board accepted the form and then rejected the submission as spam.");
+        console.log("  [spam-refused] this is an anti-automation verdict, not a missing answer; not retried and not worked around.");
+      }
 
       if (missingFieldsOnly) {
         recordPendingQuestion({
@@ -4976,7 +4990,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         console.log("  [pending-question] not blocking the batch — this needs one pass at the end of the run");
       }
 
-      if (OTP_PAUSE && !missingFieldsOnly && (requiredEmpty.length || consents.length || captchaRefused)) {
+      if (OTP_PAUSE && !missingFieldsOnly && !spamRefused && (requiredEmpty.length || consents.length || captchaRefused)) {
         console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
@@ -4990,7 +5004,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
     if (!sharedCtx) await context.close();
-    return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (clicked || clickError ? "needs-verification" : "needs-review"), pdf: resumePdf };
+    return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (spamRefused ? "spam-refused" : (clicked || clickError ? "needs-verification" : "needs-review")), pdf: resumePdf };
   } catch (e) {
     console.log(`  [error] ${e.message.slice(0,300)}`);
     try { await page.screenshot({ path: path.join(ROOT, `output/apply-error-${job.company.replace(/\W/g,"_")}.png`), fullPage: true }); } catch {}
@@ -5312,6 +5326,11 @@ function statusForBrowserResult(result) {
   if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled", "profile-incomplete"].includes(action)) return "NeedsReview";
   if (action === "dead-link" || action === "invalid-listing") return "Expired";
   if (action === "salary-below-threshold") return "Skipped";
+  // The board refused the submission itself as spam. Recording this as
+  // NeedsVerification sends an operator to wait for a confirmation that will
+  // never come, and re-running just repeats the refusal. Skipped is the honest
+  // terminal state: we did apply, and the board declined to take it.
+  if (action === "spam-refused") return "Skipped";
   // A pause/claim miss is deliberately not written.  The existing Applying
   // marker remains recoverable instead of being downgraded to Evaluated.
   return null;
