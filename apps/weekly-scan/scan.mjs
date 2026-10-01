@@ -693,25 +693,50 @@ async function scrapeGlassdoor(page, portal) {
 }
 
 async function scrapeJobHai(page, portal) {
-  try {
-    await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-  } catch (e) {
-    if (e.message.includes("ERR_HTTP2")) {
-      console.log(`  [JobHai] HTTP2 error, retrying http://`);
-      await page.goto(portal.url.replace("https://", "http://"), { waitUntil: "domcontentloaded", timeout: 30000 }).catch(()=>{});
-    } else throw e;
-  }
-  await page.waitForSelector('.job-card, [class*="job"] , body', { timeout: 10000 }).catch(() => {});
+  // No http:// downgrade. The old ERR_HTTP2 fallback silently retried over an
+  // insecure scheme on a 30s timeout and could not have worked anyway: the
+  // transport failure is the server refusing a connection that carries another
+  // portal's history, which is handled once per portal by a fresh context plus
+  // one retry in the caller.
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await page.waitForSelector('a[href*="-job-in-"]', { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+
+  // Job Hai listing URLs are a single slug, not a path segment:
+  //   /it-software-data-analyst-software-developer-application-developer-job-in-nexus-engiconsults-private-limited-sector-6-noida-0-to-2-years-1790838504-8...
+  // so `a[href*="/job/"]` - the selector this used - cannot match any listing
+  // on the site, and the portal reported success while extracting nothing.
   return page.$$eval(
-    'a[href*="/job/"], a[href*="/jobs/"]',
-    (nodes, sourceName) =>
-      nodes.slice(0, 40).map((a) => ({
-        title: (a.textContent || "").trim(),
-        company: "Unknown",
-        link: a.href,
-        description: `Source: ${sourceName}.`,
-      })).filter((j) => j.title && j.title.length > 4 && j.title.length < 120),
-    portal.name
+    "a[href*='-job-in-']",
+    (nodes, sourceName) => {
+      const out = [];
+      const seen = new Set();
+      for (const a of nodes) {
+        const raw = a.getAttribute("href") || "";
+        const slug = raw.replace(/^\/+/, "").replace(/\.html?$/i, "");
+        // Require the real listing shape so nav and category links stay out.
+        if (!raw || slug.indexOf("-job-in-") <= 0) continue;
+        const url = new URL(raw, location.origin);
+        if (seen.has(url.href)) continue;
+        // The anchor's own text is the clean role name ("IT Professional").
+        // Deriving it from the slug instead produced "data analyst it
+        // professional" - the slug leads with a department - and taking the
+        // company from the slug's first token after the marker produced "A"
+        // and "The" from "a-s-pharma-private-limited". The page already knows
+        // both; the company is left to the evaluator rather than guessed.
+        const title = (a.textContent || "").replace(/\s+/g, " ").trim();
+        if (title.length < 4 || title.length > 140) continue;
+        seen.add(url.href);
+        out.push({
+          title,
+          company: "Unknown",
+          link: url.href,
+          description: `Source: ${sourceName}.`,
+        });
+      }
+      return out.slice(0, 40);
+    },
+    portal.name,
   );
 }
 
@@ -852,28 +877,51 @@ async function main() {
     // auth-skipped rather than as a configuration problem.
     const sessionFile = PORTAL_SESSION_FILES[portal.engine];
     const useSession = sessionFile && fs.existsSync(sessionFile);
-    let portalContext = context;
-    let portalPage = page;
-    if (useSession) {
-      portalContext = await browser.newContext({
-        userAgent: pickUserAgent(),
-        viewport: { width: 1366, height: 900 },
-        storageState: sessionFile,
-      });
-      portalPage = await portalContext.newPage();
-      portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
-    } else if (sessionFile) {
+    // EVERY portal now gets its own context, not just the authenticated ones.
+    // Sharing one long-lived page was the reason Job Hai "gave trouble":
+    // measured 2026-10-01, a fresh browser loaded it 4 times out of 4, while
+    // the same URL on a page reused across the portal loop succeeded 1 time in
+    // 8 - almost every failure was
+    //   page.goto: net::ERR_HTTP2_PROTOCOL_ERROR
+    // which is how the server refuses a connection carrying another portal's
+    // history, not a protocol flag problem. --disable-http2 and --disable-quic
+    // were both tested and changed nothing.
+    let portalContext = await browser.newContext({
+      userAgent: pickUserAgent(),
+      viewport: { width: 1366, height: 900 },
+      ...(useSession ? { storageState: sessionFile } : {}),
+    });
+    let portalPage = await portalContext.newPage();
+    portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
+    if (sessionFile && !useSession) {
       console.log(`  [!] ${portal.name}: no saved session at ${path.basename(sessionFile)} — run portal/save_naukri_session.mjs`);
       results.skipped.push({ name: portal.name, url: portal.url, reason: "no_saved_session" });
+      await portalContext.close().catch(() => {});
       await sleep(delayMs);
       continue;
     }
     try {
       let jobs;
-      if (portal.engine === "ashby") {
-        jobs = await engineFn(portalPage, portal, portalContext.request);
-      } else {
-        jobs = await engineFn(portalPage, portal);
+      // One retry on a transport failure. These boards drop connections often
+      // enough that a single attempt turns a working portal into a "failed"
+      // line in the summary.
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          if (portal.engine === "ashby") {
+            jobs = await engineFn(portalPage, portal, portalContext.request);
+          } else {
+            jobs = await engineFn(portalPage, portal);
+          }
+          break;
+        } catch (e) {
+          const transient = /ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_EMPTY_RESPONSE|ERR_TIMED_OUT|Protocol error/i.test(String(e?.message || ""));
+          if (!transient || attempt === 2) throw e;
+          console.log(`  [retry] ${portal.name}: ${/ERR_[A-Z_]+/.exec(String(e.message))?.[1] || "transport error"} — new page, one more try`);
+          await portalPage.close().catch(() => {});
+          portalPage = await portalContext.newPage();
+          portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
+          await sleep(1200);
+        }
       }
       jobs = Array.isArray(jobs) ? jobs.slice(0, maxJobs) : [];
       const accepted = appendUniqueJobs(results.jobs, jobs, portal, results.skipped);
@@ -882,7 +930,7 @@ async function main() {
       console.error(`  [X] ${portal.name} failed: ${e.message}`);
       results.failed.push({ name: portal.name, url: portal.url, error: e.message });
     } finally {
-      if (useSession) await portalContext.close().catch(() => {});
+      await portalContext.close().catch(() => {});
     }
 
     await sleep(delayMs);
