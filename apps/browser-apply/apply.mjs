@@ -153,10 +153,21 @@ const EXCLUDED_STATUSES = new Set([
 const PENDING_REVIEW_STATUSES = new Set([
   "needs_review", "review_pending", "pending_review", "review_posted",
 ]);
+// Outreach states that mean "a message already went out, or must not" — these
+// gate a browser application as well as an e-mail.
+//
+// G10 review states are deliberately NOT here. A pending G10 review means the
+// recruiter-email path could not find a verified contact and parked the row for
+// a human; it says nothing about whether the job page still accepts an
+// application. The SQL gate in loadEligibleJobs already documents this
+// ("A pending G10 review gates the email channel, not a browser application to
+// an open role") and omits them, so including them here only contradicted that
+// SQL and silently blocked every in-scope role whose outreach row happened to
+// carry a Discord review card. The e-mail path keeps its own, wider blocklist
+// in linkedin_outreach.mjs.
 const OUTREACH_BLOCKED_STATUSES = new Set([
   "sent", "simulated", "cooldown", "referral", "blacklisted", "bounced",
-  "followup_sent", "followupsent", "needs_review", "needsreview",
-  "review_pending", "reviewpending", "pending_review", "pendingreview", "review_posted", "reviewposted",
+  "followup_sent", "followupsent",
 ]);
 
 // These are service hosts, not trust suffixes.  A tenant such as
@@ -199,11 +210,129 @@ const STRICT_ROLE_EXCLUDES = [
 ];
 const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
 
-function isStrictTargetRole(title) {
-  const value = String(title || "").trim().toLowerCase().replace(/\s+/g, " ");
+// Titles that name no backend/ML discipline. These are not evidence of being
+// out of scope — "Founding Engineer" at a robotics startup is usually a backend
+// role, and "Research Engineer" at Anthropic or "Forward Deployed Engineer" at
+// Baseten are squarely ML roles whose discipline only appears in the body.
+//
+// These are matched as the *leading noun phrase* of the title, not as the whole
+// string. Titles arrive with company, location and board name glued on and often
+// without a delimiter ("Research Engineer, Computer UseSan Francisco, CA"), so
+// an exact set comparison against the full title never fires.
+const STRICT_ROLE_GENERIC = [
+  "software engineer", "software development engineer", "founding engineer",
+  "forward deployed engineer", "product engineer", "platform engineer",
+  "systems engineer", "site reliability engineer", "infrastructure engineer",
+  "research engineer", "research scientist", "applied scientist",
+  "solutions engineer", "solution engineer", "solution architect",
+  "customer engineer", "developer advocate", "devrel", "devrel engineer",
+  "field engineer", "agent engineer", "agents engineer", "agent strategist",
+  "frontier agents engineer", "sales engineer", "technical engineer",
+  "software development engineer in test", "quality engineer",
+  "data engineer", "data platform engineer", "analytics engineer",
+  // ML/AI engineering titles that name no language. Their discipline is in the
+  // body: "Researcher, Training", "Post-Training Research Scientist",
+  // "Inference Engineer" and "Performance Engineer, On-Device Inference" were
+  // all rejected while the body plainly described backend and AI work.
+  "researcher", "research engineer", "research scientist",
+  "applied researcher", "applied scientist", "applied machine learning engineer",
+  "inference engineer", "performance engineer", "optimization engineer",
+  "model engineer", "ml engineer", "ai engineer", "mlops engineer",
+  "machine learning engineer", "machine learning scientist",
+  "post-training research engineer", "post-training research scientist",
+];
+
+// Splits a decorated title into its leading role phrase. Strips a seniority
+// prefix, then keeps everything up to the first comma, pipe, bullet, at-sign or
+// "Full-time"-style marker, and finally drops any trailing capitalised place or
+// company fragment that the scraper concatenated without a separator.
+function roleBasis(value) {
+  let v = String(value || "")
+    .replace(/\u2014/g, " - ")
+    .replace(/[|•·]/g, ",")
+    .replace(/[—–]/g, " - ")
+    .split(/,|\||@(?![\w.])|\s-\s|\bFull[\s-]?time\b|\bPart[\s-]?time\b|\bContract\b|\bInternship\b/i)[0];
+  v = v.replace(/\s+/g, " ").trim();
+  v = v.replace(/^(?:senior|sr|staff|lead|principal|junior|jr|associate|apprentice|head\s+of)\s+/i, "");
+  // "Computer UseSan Francisco" — a sub-specialty glued to a location. Keep the
+  // first two words of a multi-word remainder only when they are not a place.
+  v = v.replace(/\s*\(?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*[A-Z]{2}\)?\s*$/, "");
+  // "Frontier Agents EngineerLondon" — the location is glued into the role noun
+  // with no separator at all, so "engineer" and "London" are one token and a
+  // word-boundary match can never fire. Strip the trailing capitalised run.
+  v = v.replace(/([a-z])(?:[A-Z][a-z]+)+\s*$/, "$1");
+  return v.toLowerCase().trim();
+}
+
+// Titles that are out of scope by discipline even though a generic noun appears
+// somewhere in them. "Solutions Architect" and "Customer Success Engineer" are
+// not software roles, and "Sales Engineer" is not a backend role, so they must
+// not be rescued by the generic pass below.
+const STRICT_ROLE_GENERIC_DENY =
+  /\b(?:solutions?\s+(?:engineer|architect)|solution\s+specialist|security\s+engineer|customer\s+success|partner\s+success|product\s+support|technical\s+sourcer|technical\s+copywriter|gtm\s+strategist|sales\s+engineer|developer\s+relations|developer\s+advocate|devrel|electrical\s+engineer|operations\s+engineer)\b/;
+
+function isGenericRoleTitle(rawTitle) {
+  const basis = roleBasis(rawTitle);
+  if (!basis) return false;
+  // The deny check runs on the FULL normalised title, not the basis. The basis
+  // is truncated at the first comma/location, so "Frontier Agents
+  // EngineerLondon, UK" reduced to "frontier agents" and slipped past a deny
+  // list that only ever looked at the prefix.
+  const norm = String(rawTitle || "").toLowerCase().replace(/\s+/g, " ");
+  if (STRICT_ROLE_GENERIC_DENY.test(norm)) return false;
+  // A prefix or a compound can sit on either side of the generic noun:
+  // "Frontier Agents Engineer", "Infrastructure Software Engineer",
+  // "Billing & Analytics Software Engineer". Anchoring at the start only kept
+  // the plain forms and silently dropped the rest.
+  const escaped = STRICT_ROLE_GENERIC
+    .map((g) => g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .sort((a, b) => b.length - a.length)
+    .join("|");
+  const asPhrase = new RegExp(`\\b(?:${escaped})(?:\\s+[i1](?:v|\\b)?|\\s+[23]|\\s+iii)?\\b`);
+  return asPhrase.test(basis);
+}
+
+// Body signals that make a generic-titled role genuinely in scope.
+const DESCRIPTION_ALLOWED =
+  /\b(?:python|java|spring|golang|c\+\+|\bc#\b|\.net\b|rust|kotlin|scala|backend|back[\s-]end|api|microservices?|distributed systems?|message queue|kafka|redis|postgres|sql|etl|llm|genai|generative[\s-]+ai|agentic|agents?\b|ml\b|machine[\s-]+learning|deep[\s-]+learning|reinforcement[\s-]+learning|computer[\s-]+vision|nlp|rag|pytorch|tensorflow|training|inference|model[s]?\s+evaluation|alignment|safety|evals?|embeddings?|retrieval|vector|serving)\b/i;
+
+// A job description is not a list of requirements — it routinely mentions
+// adjacent tooling in "you may also work with" or "our stack" paragraphs. Ten
+// OpenAI backend roles (Platform, Data Infrastructure, Observability,
+// Scaled Abuse, Developer Experience) were rejected because their JDs mention
+// Node.js once, which said nothing about the role. Absence of evidence is not
+// evidence of exclusion, so this only rejects when the body is *dominated* by
+// frontend language: three or more distinct frontend-only stacks named and no
+// backend language at all.
+const FRONTEND_ONLY = /\b(?:react|angular|vue|svelte|next\.js|nuxt|mongodb?|mongoose|django|laravel|wordpress|shopify|woocommerce|tailwind|styled[\s-]components)\b/gi;
+const BACKEND_SIGNAL =
+  /\b(?:python|java|spring|golang|c\+\+|\bc#\b|\.net\b|rust|kotlin|scala|backend|back[\s-]end|microservices?|distributed systems?|postgres|sql|kafka|redis|llm|genai|ml\b|machine[\s-]+learning|deep[\s-]+learning|computer[\s-]+vision|nlp|agentic|agents?\b|api)\b/i;
+
+function descriptionIsFrontendOnly(body) {
+  if (BACKEND_SIGNAL.test(body)) return false;
+  const stacks = new Set((body.match(FRONTEND_ONLY) || []).map((w) => w.toLowerCase()));
+  return stacks.size >= 3;
+}
+
+function isStrictTargetRole(title, description = "") {
+  // roleBasis relies on capitalisation to strip a location glued onto the role
+  // noun ("EngineerLondon"). Lower-casing first made every one of those rules
+  // dead, so the raw title is normalised here and only then compared.
+  const raw = String(title || "").trim().replace(/\s+/g, " ");
+  const value = raw.toLowerCase();
   if (!value) return false;
   if (STRICT_ROLE_EXCLUDES.some((marker) => value.includes(marker))) return false;
-  return STRICT_ROLE_ALLOWED.test(value);
+  if (STRICT_ROLE_ALLOWED.test(value)) return true;
+
+  // A non-engineering discipline named in the title is disqualifying even when
+  // a generic noun is also present ("Solutions Architect", "Security Engineer").
+  if (STRICT_ROLE_GENERIC_DENY.test(roleBasis(raw) || value)) return false;
+
+  // Generic title: judge on the body rather than discarding the role.
+  if (!isGenericRoleTitle(raw)) return false;
+  const body = String(description || "");
+  if (!body || descriptionIsFrontendOnly(body)) return false;
+  return DESCRIPTION_ALLOWED.test(body);
 }
 
 // LinkedIn serves its first-party page bundle from an exact CDN hostname.
@@ -582,6 +711,15 @@ function classifyApplyControl(input = {}) {
   if (applyLike && opaqueHref && !oneStepForm
       && !/easy\s*apply|open\s*application|start\s*application|modal/i.test(text)) {
     return { classification: "unknown", final: false, intermediate: false, safeToClick: false };
+  }
+  // Ashby boards (jobs.ashbyhq.com/<co>/<uuid>/application) label the apply
+  // control simply "Application" and link to a path ending in /application. It
+  // reads as neither an apply-word nor a known intermediate, so every Ashby job
+  // was classified "unknown" and declined — 16 applications lost in one run.
+  // A path that ends in /application is the board's own apply route, which is
+  // exactly the intermediate step the caller is looking for.
+  if (/(?:^|\/)application\/?$/.test(hrefText)) {
+    return { classification: "intermediate", final: false, intermediate: true, safeToClick: true };
   }
   if (applyLike || /easy\s*apply|open\s*application|start\s*application/i.test(text)) {
     return { classification: "intermediate", final: false, intermediate: true, safeToClick: true };
@@ -1044,6 +1182,43 @@ function isBlacklistedJob(job, blacklist = loadBlacklistEntries()) {
   });
 }
 
+/**
+ * Facts about the candidate that boards ask for under a different label than
+ * the profile field is named. These are neither commitments nor judgements, so
+ * they need no operator flag: typing the candidate's own name into a "Legal
+ * Name" box is not a decision, it is transcription.
+ *
+ * Only facts the profile actually holds are returned. `current_company` is
+ * deliberately *not* taken from the CV or the employment history — it is only
+ * ever the operator's own `application_answers.current_company` value, because
+ * guessing an employer would put a falsehood on a legal form.
+ *
+ * A genuinely personal prompt ("Why do you want to work at X?") has no entry
+ * here by design and stays unanswered for the human.
+ */
+function identityFacts(candidate, stated) {
+  const spec = [
+    {
+      tag: "legal name",
+      hint: /legal\s*name|full\s*(?:legal\s*)?name|as\s*(?:per|stated\s*(?:in|on)\s*(?:your\s*)?(?:passport|aadhaar))|name\s*(?:as\s*)?(?:it\s*)?appears/i,
+      value: candidate?.name,
+    },
+    {
+      tag: "phone number",
+      hint: /phone(?:\s*(?:number|no\.?|#))?|mobile(?:\s*(?:number|no\.?))?|contact\s*number|telephone/i,
+      value: candidate?.phone,
+    },
+    {
+      tag: "current company",
+      hint: /current(?:ly)?\s+(?:employer|company|organisation|organization)|present\s+employer|where\s+do\s+you\s+currently\s+work|your\s+current\s+(?:employer|company)/i,
+      value: stated?.current_company,
+    },
+  ];
+  return spec
+    .map((fact) => ({ tag: fact.tag, hint: fact.hint, value: String(fact.value ?? "").trim() }))
+    .filter((fact) => fact.value);
+}
+
 function hasReferralContact(job) {
   const company = normaliseCompany(job?.company);
   const domain = jobDomain(job);
@@ -1056,11 +1231,6 @@ function hasReferralContact(job) {
 }
 
 function isBlockedOutreachJob(job) {
-  const pendingFlag = job?._pending_g10_review ?? job?.pending_g10_review;
-  const pending = pendingFlag === true || pendingFlag === 1
-    || ["1", "true", "yes"].includes(String(pendingFlag || "").toLowerCase())
-    || PENDING_REVIEW_STATUSES.has(String(job?._review_status || "").toLowerCase());
-  if (pending) return true;
   const rawStatuses = job?._outreach_statuses ?? job?.outreach_statuses ?? job?.outreach_status ?? [];
   const rawChannels = job?._outreach_channels ?? job?.outreach_channels ?? job?.outreach_channel ?? [];
   const statuses = Array.isArray(rawStatuses) ? rawStatuses : String(rawStatuses || "").split(/[;,]/).map((value) => value.trim()).filter(Boolean);
@@ -1078,7 +1248,7 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   const status = String(job?.status || "").trim().toLowerCase();
   const link = job?.link || job?.url || "";
   if (!link || !isAllowedInitialJobUrl(link)) return false;
-  if (!isStrictTargetRole(job?.title)) return false;
+  if (!isStrictTargetRole(job?.title, job?.text_summary || job?.description || "")) return false;
   if (status !== "evaluated") return false;
   if (!Number.isFinite(Number(job?.score)) || Number(job.score) < MIN_SCORE) return false;
 
@@ -1265,7 +1435,18 @@ const ATS_SELECTORS = {
       email: ['input[name="email"]', 'input[type="email"]'],
       resume: ['input[type="file"]'],
     },
-    submitBtn: ['button[type="submit"]']
+    // Ashby labels the final control "Submit Application" and does not always
+    // give it type="submit" — it is also rendered as a div[role=button] and as a
+    // plain <button>. Selecting only `button[type="submit"]` matched nothing,
+    // so the log showed the button present while the engine reported "no
+    // clickable final Submit found" and filed the row as NeedsReview.
+    submitBtn: [
+      'button[type="submit"]',
+      'button:has-text("Submit Application")',
+      '[role="button"]:has-text("Submit Application")',
+      'button:has-text("Submit")',
+      'input[type="submit"][value*="Submit" i]',
+    ]
   },
   linkedin: {
     // Most LinkedIn roles are off-site applies ("Responses managed off
@@ -1735,7 +1916,6 @@ const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
   String(process.env.PULSEOPS_ALLOW_EXTERNAL_APPLY || "").trim(),
 );
 
-// Hosts that must never become an application target regardless of policy.
 // Hosts that must never become an application target regardless of policy.
 // Shorteners are handled separately: they are legitimate when they merely
 // forward to a real application page, so the *resolved* host is what matters.
@@ -3220,6 +3400,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // missing key leaves the question untouched rather than guessing, and each
     // answer is logged.
     const stated = profile?.candidate?.application_answers || {};
+
+    for (const fact of identityFacts(candidate, stated)) {
+      await answerQuestion(fact.hint, fact.value, fact.tag);
+    }
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously)|previous(?:ly)? interview|applied (?:here|before|previously)/, tag: "prior interview history" },
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
@@ -3445,6 +3629,10 @@ async function prepareJobRuntime(job, runtime = {}) {
 function finalGuardAction(result) {
   const reason = result?.blocked || result?.reason || "";
   if (["send-paused", "db-missing", "settings-unavailable", "pause-query-failed"].includes(reason)) return "send-paused";
+  // Another owner holds this listing, or a previous run died leaving it claimed.
+  // That is a fact about ONE row: the remaining jobs in the batch are untouched
+  // by it, so it must skip this row rather than stop the run.
+  if (["already-applying", "already-owned", "stale-applying-review-required"].includes(reason)) return "contended";
   if (["claim-lost", "claim-required", "claim-blocked"].includes(reason)) return "claim-blocked";
   if (reason === "redirect-blocked") return "redirect-blocked";
   if (reason === "profile-incomplete") return "profile-incomplete";
@@ -3503,7 +3691,9 @@ async function processJob(browser, job, profile, runtime = {}) {
       title: job.title,
       link: url,
       ats,
-      action: prepared.reason === "claim-blocked" || prepared.reason === "claim-lost" || prepared.reason === "claim-required" ? "claim-blocked" : "send-paused",
+      action: ["already-applying", "already-owned", "stale-applying-review-required"].includes(prepared.reason)
+        ? "contended"
+        : (prepared.reason === "claim-blocked" || prepared.reason === "claim-lost" || prepared.reason === "claim-required" ? "claim-blocked" : "send-paused"),
       pdf: resumePdf,
       claimToken: prepared.claimToken || job?._claimToken || null,
     };
@@ -3521,7 +3711,8 @@ async function processJob(browser, job, profile, runtime = {}) {
         title: job.title,
         link: url,
         ats,
-        action: beforeOpen.paused || !beforeOpen.available ? "send-paused" : "claim-blocked",
+        action: beforeOpen.paused || !beforeOpen.available ? "send-paused"
+          : (["already-applying", "already-owned", "stale-applying-review-required"].includes(beforeOpen.reason) ? "contended" : "claim-blocked"),
         pdf: resumePdf,
         claimToken: finalGuard.claimToken || null,
       };
@@ -4971,11 +5162,47 @@ print(json.dumps(result))
     // Report both counts. "No eligible jobs" is indistinguishable from "the
     // query matched nothing" without this, which hides the real blocker.
     if (queried.length !== rows.length) {
-      const byBlockedUrl = queried.filter((r) => r?.link && !isAllowedInitialJobUrl(r.link)).length;
-      const byRole = queried.filter((r) => !isStrictTargetRole(r?.title)).length;
-      const byIndeed = queried.filter((r) => inferATS(r?.link || "") === "indeed").length;
-      console.log(`[DB] ${queried.length} row(s) passed SQL → ${rows.length} eligible `
-        + `(blocked URL: ${byBlockedUrl}, out-of-scope role: ${byRole}, Indeed: ${byIndeed})`);
+      // Attribute every rejection to the FIRST check that failed, so the counts
+      // sum back to the number of dropped rows. Reporting only role/URL/Indeed
+      // left rows dropped by score, pause state, blacklists or outreach
+      // terminal states invisible, which is exactly the case where the queue
+      // goes dry and the cause cannot be told from a plain "nothing to do".
+      const reasons = new Map();
+      for (const row of queried) {
+        if (rows.includes(row)) continue;
+        let why = "unknown";
+        const link = row?.link || row?.url || "";
+        const status = String(row?.status || "").trim().toLowerCase();
+        if (!link) why = "no link";
+        else if (!isAllowedInitialJobUrl(link)) why = "blocked URL";
+        else if (!isStrictTargetRole(row?.title, row?.text_summary || row?.description || "")) why = "out-of-scope role";
+        else if (status !== "evaluated") why = `status=${status || "unknown"}`;
+        else if (!Number.isFinite(Number(row?.score))) why = "score=non-numeric";
+        else if (Number(row.score) < MIN_SCORE) why = `score<${MIN_SCORE}`;
+        else if (row?._send_pause_available === false || row?._db_pause_available === false) why = "pause flag unavailable";
+        else if (Object.prototype.hasOwnProperty.call(row || {}, "job_id")
+            && !Object.prototype.hasOwnProperty.call(row || {}, "_send_paused")) why = "missing pause state";
+        else if (row?._send_paused === null || row?._send_paused === true || row?._send_paused === 1
+            || ["1", "true", "yes", "on"].includes(String(row?._send_paused || "").toLowerCase())) why = "sending paused";
+        else if (isTerminalStatus(status)) why = "terminal status";
+        else if (isSimulationJob(row)) why = "simulation";
+        else if (!isTrustworthySource(row?.source)) why = "untrusted source";
+        else if (isBlockedOutreachJob(row)) why = "outreach blocked";
+        else if (isBlacklistedJob(row)) why = "blacklisted";
+        else if (hasReferralContact(row)) why = "referral contact";
+        else if (inferATS(link) === "indeed" && !INCLUDE_INDEED) why = "Indeed (out of scope)";
+        reasons.set(why, (reasons.get(why) || 0) + 1);
+      }
+      const tally = [...reasons.entries()].sort((a, b) => b[1] - a[1])
+        .map(([why, n]) => `${why}: ${n}`).join(", ");
+      console.log(`[DB] ${queried.length} row(s) passed SQL → ${rows.length} eligible; dropped by — ${tally || "none"}`);
+      const byPlatform = new Map();
+      for (const row of queried) {
+        const ats = inferATS(row?.link || row?.url || "");
+        byPlatform.set(ats, (byPlatform.get(ats) || 0) + 1);
+      }
+      console.log(`[DB] in-scope pool by ATS: ${[...byPlatform.entries()].sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k} ${v}`).join(", ")}`);
     }
     if (rows.length) {
       // Batch size is a throughput knob, not a safety limit: every job still
@@ -5232,7 +5459,17 @@ async function main() {
           claimToken: result.claimToken,
         });
       }
-      if (["send-paused", "claim-blocked", "claim-lost"].includes(result.action)) break;
+      // Only a genuinely global state stops the batch. `contended` and
+      // `claim-blocked` describe ONE row — another owner holds it, or a dead run
+      // left it claimed — and used to end the whole run, silently truncating the
+      // remaining applications (observed: 26 skipped behind one stale claim).
+      // Neither implies sending is paused, so neither stops the others.
+      if (result.action === "contended" || result.action === "claim-blocked") {
+        console.log(`  [${result.action}] skipped — this listing is claimed elsewhere; the rest of the batch continues`);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        continue;
+    }
+      if (["send-paused", "claim-lost"].includes(result.action)) break;
       // Be nice to sites
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
@@ -5304,6 +5541,8 @@ export {
   isAllowedAssetRequest,
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
+  identityFacts,
+  finalGuardAction,
   isCurrentPageTrusted,
   isEligibleJob,
   isMockJob,

@@ -25,6 +25,8 @@ import {
   isAllowedAtsApplicationPost,
   isAllowedNavigationUrl,
   isBlacklistedJob,
+  identityFacts,
+  finalGuardAction,
   isEligibleJob,
   isSimulationJob,
   controlSignatureMatcher,
@@ -472,13 +474,75 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
     assert.equal(isEligibleJob(eligible({ status }), { explicit: true }), false, status);
   }
   assert.equal(isEligibleJob(eligible({ score: 74 }), { explicit: true }), false);
-  assert.equal(isEligibleJob(eligible({ _pending_g10_review: true }), { explicit: true }), false);
-  assert.equal(isEligibleJob(eligible({ _outreach_statuses: ["review_posted"] }), { explicit: true }), false);
+  // A G10 review card is an e-mail-channel problem (no verified recruiter
+  // contact), not a statement about the job page. It must not stop us applying.
+  // Regression: these were in OUTREACH_BLOCKED_STATUSES and blocked 38 in-scope
+  // roles in a single run, contradicting the SQL gate directly above it.
+  for (const reviewStatus of ["review_posted", "reviewposted", "review_pending", "pending_review", "needs_review"]) {
+    assert.equal(isEligibleJob(eligible({ _outreach_statuses: [reviewStatus] }), { explicit: true }), true, reviewStatus);
+  }
+  // A message that actually went out still blocks a duplicate application.
+  for (const terminal of ["sent", "followup_sent", "cooldown", "blacklisted", "bounced", "referral"]) {
+    assert.equal(isEligibleJob(eligible({ _outreach_statuses: [terminal] }), { explicit: true }), false, terminal);
+  }
+  assert.equal(isEligibleJob(eligible({ _outreach_notes: ["G10: no verified company domain"] }), { explicit: true }), true);
   assert.equal(isEligibleJob(eligible({ _send_paused: true }), { explicit: true }), false);
   assert.equal(isEligibleJob(eligible({ _send_paused: null }), { explicit: true }), false);
   assert.equal(isEligibleJob(eligible({ link: "https://www.indeed.com/viewjob?jk=x" }), { explicit: true }), false);
   assert.equal(isEligibleJob(eligible({ link: "https://www.indeed.com/viewjob?jk=x" }), { explicit: true, includeIndeed: true }), true);
   assert.equal(isEligibleJob(eligible({ source: "sim:Mock" }), { explicit: true }), false);
+});
+
+test("plain identity facts are answered from the profile, absent facts are not invented", () => {
+  const candidate = { name: "AVRADEEP MAJUMDER", phone: "6289050278" };
+  const facts = identityFacts(candidate, {});
+  const byTag = Object.fromEntries(facts.map((f) => [f.tag, f.value]));
+  // The candidate's own name and number are transcription, not judgement.
+  assert.equal(byTag["legal name"], "AVRADEEP MAJUMDER");
+  assert.equal(byTag["phone number"], "6289050278");
+  // An employer is never inferred; it appears only if the operator stated it.
+  assert.equal("current company" in byTag, false);
+  assert.equal(identityFacts(candidate, { current_company: "Acme" })
+    .find((f) => f.tag === "current company").value, "Acme");
+
+  // A missing profile fact yields no entry at all, so the field is left for the human.
+  assert.deepEqual(identityFacts({ phone: "6289050278" }, {}).map((f) => f.tag), ["phone number"]);
+
+  // The hints must match the labels boards actually use. Match against the
+  // stated form so the employer hint is present to be exercised at all.
+  const withEmployer = identityFacts(candidate, { current_company: "Acme" });
+  const match = (tag, signature) => Boolean(withEmployer.find((f) => f.tag === tag)?.hint.test(signature));
+  assert.equal(match("legal name", "Legal Name"), true);
+  assert.equal(match("legal name", "Full legal name as per your passport"), true);
+  assert.equal(match("phone number", "Phone Number"), true);
+  assert.equal(match("phone number", "Mobile no."), true);
+  assert.equal(match("current company", "Current Company"), true);
+  assert.equal(match("current company", "Where do you currently work?"), true);
+
+  // Genuinely personal prompts stay out of this list by design.
+  const personal = "Why do you want to work at Cartesia AI?";
+  assert.equal(withEmployer.some((f) => f.hint.test(personal)), false, personal);
+  assert.equal(withEmployer.some((f) => f.hint.test("Describe your experience working with observability")), false);
+});
+
+test("a contended listing is per-row, and only a global pause stops the batch", () => {
+  // Regression: "already-applying" was unmapped, so it fell through to
+  // "send-paused", which breaks the run loop. One orphaned claim silently
+  // truncated a 30-job batch after 4.
+  assert.equal(finalGuardAction({ reason: "already-applying" }), "contended");
+  assert.equal(finalGuardAction({ reason: "already-owned" }), "contended");
+  assert.equal(finalGuardAction({ reason: "stale-applying-review-required" }), "contended");
+
+  // Genuinely global states keep their old meaning and still stop everything.
+  for (const reason of ["send-paused", "db-missing", "settings-unavailable", "pause-query-failed"]) {
+    assert.equal(finalGuardAction({ reason }), "send-paused", reason);
+  }
+  assert.equal(finalGuardAction({ reason: "claim-lost" }), "claim-blocked");
+  assert.equal(finalGuardAction({ reason: "claim-required" }), "claim-blocked");
+  assert.equal(finalGuardAction({ reason: "redirect-blocked" }), "redirect-blocked");
+  assert.equal(finalGuardAction({ reason: "profile-incomplete" }), "profile-incomplete");
+  assert.equal(finalGuardAction({ error: "boom" }), "needs-verification");
+  assert.equal(finalGuardAction({}), null);
 });
 
 test("blacklist matching is enforced independently of the SQL query", () => {
@@ -646,6 +710,127 @@ test("one-step Apply is classified as final while modal Apply remains intermedia
   assert.equal(classifyApplyControl({ label: "Easy Apply", oneStep: false }).classification, "intermediate");
   assert.equal(classifyApplyControl({ label: "Apply now", oneStep: false }).classification, "final");
   assert.equal(classifyApplyControl({ label: "", oneStep: false }).classification, "unknown");
+});
+
+test("Ashby /application routes are treated as the apply step", () => {
+  // Ashby labels the control "Application" and links to a path ending in
+  // /application. It matched neither an apply-word nor a known intermediate
+  // label, so every Ashby posting classified as "unknown" and was left
+  // unclicked — 16 applications lost in a single run.
+  const rel = classifyApplyControl({
+    label: "Application",
+    href: "/deepgram/d98e6723-3485-4b58-9494-d6bf028fa905/application",
+  });
+  assert.equal(rel.classification, "intermediate");
+  assert.equal(rel.safeToClick, true);
+
+  const abs = classifyApplyControl({
+    label: "APPLICATION",
+    href: "https://jobs.ashbyhq.com/e2b/dea22a97-293e-41af-9fdb-c7e6e2c73b37/application",
+  });
+  assert.equal(abs.classification, "intermediate");
+
+  const trailing = classifyApplyControl({
+    label: "Application",
+    href: "/sierra/b7d1dbcd-ca72-472f-b15e-5b4b0f886be0/application/",
+  });
+  assert.equal(trailing.classification, "intermediate");
+});
+
+test("a generic title is not rejected for merely MENTIONING a frontend stack", () => {
+  // Ten real OpenAI backend roles (Platform, Data Infrastructure, Observability,
+  // Scaled Abuse, Developer Experience) were dropped because their JD names
+  // Node.js once in a "our stack" paragraph. Adjacent tooling in a description
+  // is not the same as the role being a frontend one.
+  const jd = "You will build distributed systems in Python on Kubernetes. "
+    + "Our wider stack includes some Node.js services and Kafka.";
+  assert.equal(
+    isStrictTargetRole("Software Engineer, Platform", jd),
+    true,
+    "a backend JD that mentions Node.js must stay in scope",
+  );
+  assert.equal(
+    isStrictTargetRole("Software Engineer, Data Infrastructure", jd),
+    true,
+  );
+});
+
+test("a genuinely frontend-only body is still rejected", () => {
+  const jd = "You will build interfaces with React, Vue and Tailwind. "
+    + "Experience with Next.js, Angular, Svelte and styled-components expected.";
+  assert.equal(isStrictTargetRole("Software Engineer", jd), false);
+  assert.equal(isStrictTargetRole("Software Engineer, Product", jd), false);
+});
+
+test("a generic title with no description is still rejected", () => {
+  // No evidence either way: the old behaviour (reject) is the safe one, because
+  // guessing in-scope would put the candidate into roles that are not theirs.
+  assert.equal(isStrictTargetRole("Software Engineer", ""), false);
+  assert.equal(isStrictTargetRole("Founding Engineer", ""), false);
+});
+
+test("an explicitly out-of-scope title stays rejected even with a backend body", () => {
+  const jd = "You will build APIs in Python with FastAPI and Postgres.";
+  assert.equal(isStrictTargetRole("Frontend Engineer", jd), false);
+  assert.equal(isStrictTargetRole("React Developer", jd), false);
+  assert.equal(isStrictTargetRole("Full Stack Engineer", jd), false);
+});
+
+test("ML/AI engineering titles with no language in them are kept", () => {
+  // These named no discipline, so the description decides. Each body below is
+  // the real opening line from the corresponding rejected row.
+  const cases = [
+    ["Researcher, Robustness & Safety Training", "strong backend engineering fundamentals with production-grade experience"],
+    ["Researcher, Training", "strong backend engineering and AI application experience, but the target job"],
+    ["Post-Training Research Scientist", "aligns well with backend engineering and AI inference infrastructure requirements"],
+    ["Inference Engineer", "solid background in backend development, AI, and systems engineering, but the"],
+    ["Performance Engineer, On-Device Inference", "demonstrates strong full-stack and backend capabilities"],
+    ["Research Engineer, Model EvaluationsRemote-Friendly", "backend engineering and applied AI project experience"],
+  ];
+  for (const [title, body] of cases) {
+    assert.equal(isStrictTargetRole(title, body), true, `expected in scope: ${title}`);
+  }
+});
+
+test("a compound title is matched even when a modifier leads", () => {
+  const body = "The candidate demonstrates strong backend engineering skills with production-grade experience.";
+  // A prefix or compound sits before the generic noun, and the scraper often
+  // concatenates the location without a separator.
+  assert.equal(isStrictTargetRole("Infrastructure Software Engineer, Apps PlatformLondon, UK", body), true);
+  assert.equal(isStrictTargetRole("Billing & Analytics Software Engineer", body), true);
+  assert.equal(isStrictTargetRole("Frontier Agents EngineerLondon, UK", body), true);
+});
+
+test("non-engineering roles stay rejected even with a generic noun inside", () => {
+  const body = "The candidate demonstrates strong backend engineering skills.";
+  // Each of these contains a generic noun but names a discipline that is not
+  // software engineering. "Solutions Architect" and "Customer Success Engineer"
+  // in particular must never be rescued by the generic pass.
+  for (const title of [
+    "Solutions Architect",
+    "Solutions Architect (San Francisco, CA)",
+    "Customer Success Engineer (Americas)",
+    "Security Engineer",
+    "Developer Relations Engineer - Developer Advocate",
+    "Partner Success Engineer",
+    "Product Support Engineer",
+    "Technical Sourcer",
+    "Solution Specialist",
+    "MTS, Security",
+    "GTM Strategist",
+    "Technical Copywriter",
+  ]) {
+    assert.equal(isStrictTargetRole(title, body), false, `expected out of scope: ${title}`);
+  }
+});
+
+test("a non-apply Ashby link is still not clickable", () => {
+  // The fix must not turn every jobs.ashbyhq.com link into a click target.
+  for (const href of ["/deepgram", "/deepgram/careers", "/", "/deepgram/apply-1234"]) {
+    const r = classifyApplyControl({ label: "All jobs", href });
+    assert.equal(r.classification, "unknown", `expected unknown for ${href}`);
+    assert.equal(r.safeToClick, false, `expected unsafe for ${href}`);
+  }
 });
 
 test("navigation trust uses exact hosts/origins and pins after a service crossing", () => {
