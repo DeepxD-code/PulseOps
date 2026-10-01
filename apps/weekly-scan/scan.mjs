@@ -693,6 +693,57 @@ async function scrapeGlassdoor(page, portal) {
   );
 }
 
+async function scrapeInstahyre(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  // Listing URLs are /job-<id>-<slug> at the site root, not under /job/.
+  await page.waitForSelector("a[href*='/job-']", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  for (let i = 0; i < 2; i += 1) {
+    await page.mouse.wheel(0, 2200);
+    await page.waitForTimeout(1400);
+  }
+
+  return page.$$eval(
+    "a[href*='/job-']",
+    (nodes, sourceName) => {
+      const out = [];
+      const seen = new Set();
+      for (const a of nodes) {
+        const raw = a.getAttribute("href") || "";
+        if (!raw) continue;
+        const url = new URL(raw, location.origin);
+        // Instahyre emits ABSOLUTE hrefs
+        // ("https://www.instahyre.com/job-444500-..."), so the shape has to be
+        // tested against the parsed path, not the raw attribute. Anchoring the
+        // pattern on the raw href matched nothing and the portal returned 0.
+        const m = /^\/job-(\d+)-/.exec(url.pathname);
+        if (!m) continue;
+        url.search = "";
+        if (seen.has(url.href)) continue;
+
+        // The card reads "Bolt - IT Engineer Job available in Work From Home".
+        // Split on the first separator for company and title; the rest is
+        // location/salary boilerplate, kept as context rather than discarded.
+        const text = (a.textContent || "").replace(/\s+/g, " ").trim();
+        const cut = text.split(/\s+[-–]\s+/);
+        const company = (cut[0] || "").trim();
+        const title = (cut[1] || "").replace(/\s*(?:Job available in|Apply now).*$/i, "").trim();
+        if (title.length < 4) continue;
+
+        seen.add(url.href);
+        out.push({
+          title: title.slice(0, 118),
+          company: company || "Unknown",
+          link: url.href,
+          description: `Listing ${m[1]}. ${text.slice(0, 240)}. Source: ${sourceName}.`,
+        });
+      }
+      return out.slice(0, 40);
+    },
+    portal.name,
+  );
+}
+
 async function scrapeHirist(page, portal) {
   await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
   // Listings are client-rendered; wait for a real one before scrolling.
@@ -826,6 +877,7 @@ const ENGINES = {
   glassdoor: scrapeGlassdoor,
   jobhai: scrapeJobHai,
   hirist: scrapeHirist,
+  instahyre: scrapeInstahyre,
   yc: scrapeYC,
 };
 
