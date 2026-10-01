@@ -503,7 +503,18 @@ def main() -> None:
                 })
 
         except Exception as e:
-            print(f"    [X] Unexpected: {e}")
+            # A dead LLM engine is the overwhelmingly common cause and it is not
+            # per-job: 123 identical "All engines failed" lines is one quota
+            # problem, not 123 problems. Count them so the summary can say so
+            # instead of the run looking healthy while producing nothing.
+            if "All engines failed" in str(e) or "circuit-broken" in str(e):
+                stats["engine_failed"] = stats.get("engine_failed", 0) + 1
+                if stats["engine_failed"] == 1:
+                    print("    [!] an LLM engine is exhausted; see the CircuitBreaker line above.")
+                    print("    [!] every remaining job will fail the same way. "
+                          "Set GROQ_API_KEY or OPENAI_API_KEY in .env for a fallback.")
+            else:
+                print(f"    [X] Unexpected: {e}")
 
     # ── Phase 7b: G10 human-review delivery ──────────────────────────────
     _header("Phase 7b: G10 Human Review")
@@ -545,6 +556,12 @@ def main() -> None:
             pass
     else:
         print("  [SIM] TSV export skipped")
+
+    # A dead LLM cascade is a failed run even though every phase completed. The
+    # browser-apply stage downstream consumes only Evaluated rows, so exiting 0
+    # here hands it an empty queue and reports an empty run as a success.
+    if _DEAD_ENGINE:
+        sys.exit(3)
 
 
 # ── Portal scan subprocess wiring ───────────────────────────────────────
@@ -743,6 +760,11 @@ def _run_scan(
 
 # ── Shared helpers (mirrors main.py) ─────────────────────────────────────
 
+# Set by _finish() when the LLM cascade could not score a single job. Read back
+# by the exit path so a dead quota is a failed run, not a quiet success.
+_DEAD_ENGINE = False
+
+
 def _finish(run_id: str, stats: dict, start: float) -> None:
     duration = int(time.time() - start)
     stats["duration_seconds"] = duration
@@ -760,6 +782,24 @@ def _finish(run_id: str, stats: dict, start: float) -> None:
         ("Tokens used", stats["tokens_used"]), ("Duration", f"{duration}s"),
     ]:
         print(f"  {k:<18} {v}")
+
+    # A run that sourced and filtered real jobs but evaluated NONE of them has
+    # not succeeded, whatever the exit code says. Exiting 0 here is what made a
+    # dead daily quota look like a normal run for 21 minutes before anyone
+    # noticed Evaluated=0. Make it loud and make it a non-zero exit so the
+    # automation reports the failure instead of quietly yielding an empty queue.
+    engine_failed = int(stats.get("engine_failed", 0) or 0)
+    if engine_failed and not stats["evaluated"]:
+        print()
+        print("  [FAILED] Every candidate job failed evaluation: the only configured LLM")
+        print("           engine is out of quota, and no fallback key is present.")
+        print(f"           {engine_failed} job(s) could not be scored in {duration}s.")
+        print("           Add GROQ_API_KEY or OPENAI_API_KEY to .env to restore the cascade.")
+        _DEAD_ENGINE = True
+    elif engine_failed:
+        print()
+        print(f"  [WARN] {engine_failed} job(s) failed evaluation (LLM engine exhausted); "
+              f"{stats['evaluated']} were scored successfully.")
 
 
 def _load_settings() -> dict:

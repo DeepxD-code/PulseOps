@@ -416,6 +416,60 @@ const CAPTCHA_WAIT_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_CAPTCHA_WAIT_MS || "180000", 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 180000;
 })();
+
+/**
+ * Required questions a run could not answer, keyed by the field label so the
+ * operator sees "Current Company blocked 9 applications" once instead of nine
+ * separate log lines and nine separate browser windows.
+ *
+ * This exists because the alternative was worse: the run used to hold each
+ * window open for OTP_PAUSE_MS waiting for a human who is not watching a
+ * background batch, then recorded the same NeedsVerification it would have
+ * recorded immediately. Collecting the labels turns a dead 2-hour wait into one
+ * review pass.
+ */
+const pendingQuestions = new Map();
+
+function recordPendingQuestion(entry) {
+  const key = (entry.fields || []).slice().sort().join(" | ");
+  if (!key) return;
+  const existing = pendingQuestions.get(key) || { fields: entry.fields, jobs: [] };
+  existing.jobs.push({
+    company: entry.company,
+    title: entry.title,
+    link: entry.link,
+    ats: entry.ats,
+  });
+  pendingQuestions.set(key, existing);
+}
+
+function flushPendingQuestions() {
+  if (!pendingQuestions.size) return;
+  const outPath = path.join(ROOT, "output", "pending-questions.json");
+  const payload = {
+    generated_at: new Date().toISOString(),
+    note: "Required fields this run could not answer. Answer them in "
+      + "config/profile.yml application_answers (or candidate.* for plain facts) "
+      + "and the next run fills them automatically.",
+    groups: [...pendingQuestions.entries()].map(([key, value]) => ({
+      fields: value.fields,
+      blocked_count: value.jobs.length,
+      jobs: value.jobs,
+    })).sort((a, b) => b.blocked_count - a.blocked_count),
+  };
+  try {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), "utf-8");
+    console.log(`\n[pending-questions] ${payload.groups.length} distinct question group(s), `
+      + `${payload.groups.reduce((n, g) => n + g.blocked_count, 0)} job(s) blocked → `
+      + `${path.relative(ROOT, outPath)}`);
+    for (const group of payload.groups.slice(0, 8)) {
+      console.log(`  ${String(group.blocked_count).padStart(3)}x  ${group.fields.join(", ")}`);
+    }
+  } catch (e) {
+    console.log(`[pending-questions] could not write ${outPath}: ${String(e?.message ?? e).slice(0, 120)}`);
+  }
+}
 /**
  * Minimum evaluator score for unattended submission. The role, seniority,
  * salary, source-trust and simulation gates are the real filters; this is a
@@ -1200,7 +1254,13 @@ function identityFacts(candidate, stated) {
   const spec = [
     {
       tag: "legal name",
-      hint: /legal\s*name|full\s*(?:legal\s*)?name|as\s*(?:per|stated\s*(?:in|on)\s*(?:your\s*)?(?:passport|aadhaar))|name\s*(?:as\s*)?(?:it\s*)?appears/i,
+      // controlSignatureMatcher() returns "<aria-label> <id> <name> <question>",
+      // lowercased. Ashby's name field therefore signs as
+      // "_systemfield_name _systemfield_name name", so a bare "Name" label is
+      // only reachable by anchoring on the LEADING token - not with ^name$,
+      // which never matched, and not with an unanchored /name/i, which would
+      // hand the candidate's name to a "Company Name" field.
+      hint: /^(?:name|_?systemfield_name)\b|legal\s*name|full\s*(?:legal\s*)?name|as\s*(?:per|stated\s*(?:in|on)\s*(?:your\s*)?(?:passport|aadhaar))|name\s*(?:as\s*)?(?:it\s*)?appears/i,
       value: candidate?.name,
     },
     {
@@ -4883,19 +4943,40 @@ async function processJob(browser, job, profile, runtime = {}) {
       // Hold the window open so it can be completed by hand; the row is only
       // marked verified if the portal then confirms.
       const captchaRefused = Boolean(outcome?.captcha);
+      let wantsCodeNow = false;
       if (captchaRefused) {
         // Greenhouse shows an invisible reCAPTCHA badge, but the thing actually
         // gating the submit is the emailed code. Say which, so the log does not
         // send the operator looking for a checkbox that is not there.
-        const wantsCode = /verification code|security code|enter the .*-character code/i
+        wantsCodeNow = /verification code|security code|enter the .*-character code/i
           .test(String(outcome.body || ""));
-        console.log(wantsCode
+        console.log(wantsCodeNow
           ? "  [otp] the board wants the emailed code before it will accept the submit"
           : "  [captcha] the board refused the submit and a captcha is present — this needs you");
       }
-      // A headed run can simply be finished by hand: hold the window open and
-      // poll for the confirmation rather than dead-ending the row.
-      if (OTP_PAUSE && (requiredEmpty.length || consents.length || captchaRefused)) {
+      // A captcha, an OTP, or an unaccepted consent needs a human at THIS window,
+      // right now, so those keep the long wait - it is the only chance to catch
+      // them. A merely-unfilled required field is different: nobody is going to
+      // type "Current Company" into 25 background windows, and blocking 300s on
+      // each turned a batch into ~2h of dead waiting that ended in the same
+      // NeedsVerification either way. Those are recorded for a single review
+      // pass at the end of the run and the batch moves straight on.
+      const needsHumanNow = captchaRefused || wantsCodeNow || consents.length > 0;
+      const missingFieldsOnly = !needsHumanNow && requiredEmpty.length > 0;
+
+      if (missingFieldsOnly) {
+        recordPendingQuestion({
+          company: job.company,
+          title: job.title,
+          link: url,
+          ats,
+          fields: requiredEmpty,
+        });
+        console.log(`  [pending-question] recorded ${requiredEmpty.length} unanswered field(s) for review: ${requiredEmpty.join(", ")}`);
+        console.log("  [pending-question] not blocking the batch — this needs one pass at the end of the run");
+      }
+
+      if (OTP_PAUSE && !missingFieldsOnly && (requiredEmpty.length || consents.length || captchaRefused)) {
         console.log(`  [handoff] finish this application in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
         const deadline = Date.now() + OTP_PAUSE_MS;
         while (Date.now() < deadline) {
@@ -5481,6 +5562,7 @@ async function main() {
   const outPath = path.join(ROOT, "output", "apply-results.json");
   fs.mkdirSync(path.join(ROOT, "output"), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify({ ran_at: new Date().toISOString(), dry_run: DRY_RUN, jobs, results }, null, 2), "utf-8");
+  flushPendingQuestions();
   console.log(`\n[+] Done ${results.length} jobs → ${path.relative(ROOT, outPath)}`);
   console.log(DRY_RUN ? "[*] DRY-RUN — no applications submitted. Re-run with --live --headed after verifying previews." : "[*] LIVE — final actions require --auto; verified/needs-review outcomes are recorded conservatively.");
 

@@ -514,6 +514,13 @@ test("plain identity facts are answered from the profile, absent facts are not i
   const match = (tag, signature) => Boolean(withEmployer.find((f) => f.tag === tag)?.hint.test(signature));
   assert.equal(match("legal name", "Legal Name"), true);
   assert.equal(match("legal name", "Full legal name as per your passport"), true);
+  // The real signature Ashby produces: aria-label + id + name + question. A
+  // ^name$ anchor missed this entirely, so the field blocked every submit.
+  assert.equal(match("legal name", "_systemfield_name _systemfield_name name"), true);
+  assert.equal(match("legal name", "name name name"), true);
+  // ...and must NOT swallow a field whose label merely contains "name".
+  assert.equal(match("legal name", "9643d331-f5ad-42da-8f0e-79d3428e634f current company"), false);
+  assert.equal(match("legal name", "company_name previous employer name"), false);
   assert.equal(match("phone number", "Phone Number"), true);
   assert.equal(match("phone number", "Mobile no."), true);
   assert.equal(match("current company", "Current Company"), true);
