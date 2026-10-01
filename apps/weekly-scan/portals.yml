@@ -99,6 +99,25 @@ search_portals:
     requires_auth: false
     url: "https://www.jobhai.com/jobs"
 
+  # ADDED 2026-10-01. Hirist is one of the larger Indian tech job portals and it
+  # was simply absent. Verified in a live session: the category index renders
+  # real listings server-side-first and reports its own totals -
+  #   "Backend Development Jobs, 4179 Job Vacancies"
+  # Listings are /j/<company>-<title>-<id>; the category and skill nav is
+  # /c/<category>-jobs and /k/<skill>-jobs, which the scraper excludes so nav
+  # links are not mistaken for jobs.
+  - name: "Hirist (Backend Development)"
+    engine: hirist
+    enabled: true
+    requires_auth: false
+    url: "https://www.hirist.com/c/backend-development-jobs"
+
+  - name: "Hirist (Java)"
+    engine: hirist
+    enabled: true
+    requires_auth: false
+    url: "https://www.hirist.com/k/java-jobs"
+
   - name: "YC Combinator (Work at a Startup)"
     engine: yc
     enabled: true

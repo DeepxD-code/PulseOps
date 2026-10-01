@@ -168,6 +168,7 @@ const ENGINE_ALLOWED_HOSTS = Object.freeze({
   indeed: ["indeed.com"],
   glassdoor: ["glassdoor.com", "glassdoor.co.in", "glassdoor.co.uk"],
   jobhai: ["jobhai.com"],
+  hirist: ["hirist.com", "www.hirist.com", "hirist.tech"],
   yc: ["workatastartup.com", "ycombinator.com"],
   linkedin: ["linkedin.com"],
 });
@@ -692,6 +693,54 @@ async function scrapeGlassdoor(page, portal) {
   );
 }
 
+async function scrapeHirist(page, portal) {
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  // Listings are client-rendered; wait for a real one before scrolling.
+  await page.waitForSelector("a[href*='/j/']", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  for (let i = 0; i < 3; i += 1) {
+    await page.mouse.wheel(0, 2400);
+    await page.waitForTimeout(1400);
+  }
+
+  return page.$$eval(
+    "a[href*='/j/']",
+    (nodes, sourceName) => {
+      const out = [];
+      const seen = new Set();
+      for (const a of nodes) {
+        const raw = a.getAttribute("href") || "";
+        // /j/<company>-<title>-<numeric id>?ref=...&jobPos=N
+        if (!/\/j\/.+-\d+/.test(raw)) continue;
+        const url = new URL(raw, location.origin);
+        url.search = "";
+        if (seen.has(url.href)) continue;
+
+        // The card reads "Vedantu Innovations - Product Engineer - Java2 - 5 yrs
+        // BangaloreJavaSpring..." - company first, then the role, then
+        // experience/location/skills glued on. Split on the first separators
+        // rather than trusting the slug, whose company segment has no reliable
+        // boundary ("vedantu-innovations-product-engineer-java").
+        const raw_text = (a.textContent || "").replace(/\s+/g, " ").trim();
+        const parts = raw_text.split(/\s+[-–]\s+/);
+        const company = (parts[0] || "").trim();
+        const title = (parts[1] || "").trim();
+        if (title.length < 4) continue;
+
+        seen.add(url.href);
+        out.push({
+          title: title.slice(0, 118),
+          company: company || "Unknown",
+          link: url.href,
+          description: `Location/experience/skills: ${raw_text.slice(company.length + title.length + 4, 260).trim()}. Source: ${sourceName}.`,
+        });
+      }
+      return out.slice(0, 40);
+    },
+    portal.name,
+  );
+}
+
 async function scrapeJobHai(page, portal) {
   // No http:// downgrade. The old ERR_HTTP2 fallback silently retried over an
   // insecure scheme on a 30s timeout and could not have worked anyway: the
@@ -776,6 +825,7 @@ const ENGINES = {
   indeed: scrapeIndeed,
   glassdoor: scrapeGlassdoor,
   jobhai: scrapeJobHai,
+  hirist: scrapeHirist,
   yc: scrapeYC,
 };
 
