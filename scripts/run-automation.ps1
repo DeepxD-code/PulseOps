@@ -2,6 +2,8 @@ param(
     [switch]$SkipLiveness,
     [switch]$SkipBrowserApply,
     [switch]$NoPush,
+    # Suppress the per-run summary email to the candidate inbox.
+    [switch]$NoNotify,
     [switch]$StrictNavigation,
     # Required for terms checkboxes, policy attestations and the candidate
     # commitments in profile.application_answers. Those are statements made on
@@ -55,6 +57,18 @@ if (-not $SkipBrowserApply) {
     Write-Host "browser_apply_exit=$browserExit"
 } else {
     Write-Host "=== Browser apply skipped by switch ==="
+}
+
+if (-not $NoNotify) {
+    # An unattended run that submitted three applications and stalled on two
+    # more was indistinguishable from a run that did nothing. Mail the candidate
+    # a summary after every browser-apply stage so the outcome is observable
+    # without watching a browser. Reports recorded outcomes only; it never
+    # claims an application went out unless the run recorded one, and a mail
+    # failure never changes the run's exit code.
+    Write-Host "=== Notifying candidate of this run ==="
+    & python apps/browser-apply/tools/notify_run.py
+    Write-Host "notify_exit=$LASTEXITCODE"
 }
 
 if ($OpenG10Reviews) {

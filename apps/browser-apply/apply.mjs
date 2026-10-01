@@ -5682,19 +5682,77 @@ async function main() {
   const { chromium } = await import("playwright");
   let browser = null;
   const results = [];
-  try {
+
+  // The persistent Edge context is launched once and shared by every job, so a
+  // single crash used to poison the rest of the batch: each later job then threw
+  // "Target page, context or browser has been closed" and the run finished with
+  // one real outcome and a tail of identical noise. Observed on Ashby, where the
+  // context died right after the submit click while reCAPTCHA's webworker loaded.
+  // Relauch instead, and say so, so a batch survives one dead window.
+  const launchContext = async () => {
     if (EDGE || process.argv.includes("--edge")) {
-      console.log(`[Edge] persistent profile ${path.join(ROOT, ".edge-profile")} (msedge, headed)`);
       sharedCtx = await chromium.launchPersistentContext(path.join(ROOT, ".edge-profile"), {
         channel: "msedge",
         headless: false,
         viewport: { width: 1366, height: 900 },
       });
+      browser = null;
     } else {
       browser = await chromium.launch({ headless: !HEADED });
+      sharedCtx = null;
     }
+  };
+  const contextAlive = async () => {
+    try {
+      if (sharedCtx) {
+        if (typeof sharedCtx.pages === "function") {
+          const pages = sharedCtx.pages();
+          return pages.some((p) => {
+            try { return !p.isClosed(); } catch { return false; }
+          });
+        }
+        return true;
+      }
+      return Boolean(browser && browser.isConnected && browser.isConnected());
+    } catch {
+      return false;
+    }
+  };
+  const ensureContext = async () => {
+    if (await contextAlive()) return true;
+    console.log("  [context-lost] the browser window went away; relaunching for the rest of the batch");
+    try { if (sharedCtx) await sharedCtx.close().catch(() => {}); } catch { /* already gone */ }
+    try { if (browser) await browser.close().catch(() => {}); } catch { /* already gone */ }
+    sharedCtx = null;
+    browser = null;
+    try {
+      await launchContext();
+      return true;
+    } catch (e) {
+      console.log(`  [context-lost] relaunch failed: ${String(e?.message ?? e).slice(0, 120)}`);
+      return false;
+    }
+  };
+
+  try {
+    if (EDGE || process.argv.includes("--edge")) {
+      console.log(`[Edge] persistent profile ${path.join(ROOT, ".edge-profile")} (msedge, headed)`);
+    }
+    await launchContext();
 
     for (const job of jobs) {
+      // A window closed by hand, or a crash in the previous job, must not take
+      // the rest of the batch with it.
+      if (!(await ensureContext())) {
+        results.push({
+          company: job.company,
+          title: job.title,
+          link: job.link,
+          action: "error",
+          error: "browser context unavailable; could not be relaunched",
+        });
+        continue;
+      }
       const shouldCheckPause = !DRY_RUN || job.job_id != null || job._db_path || job._dbPath;
       if (shouldCheckPause) {
         const pause = await readSendPause(job._db_path || job._dbPath || resolveDbPath());
