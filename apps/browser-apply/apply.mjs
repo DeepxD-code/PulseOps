@@ -1308,6 +1308,38 @@ function workAuthorisation(stated) {
   return "";
 }
 
+/**
+ * Turn the profile's notice period into a concrete ISO date.
+ *
+ * "30 days" is the operator's own configured notice period, and the run already
+ * logs "earliest start -> 30 days from offer" as a [commitment] under
+ * --accept-terms. This is the same commitment expressed for a control that
+ * cannot hold prose: an availability picker is input[type=date] and rejects
+ * "30 days from offer" outright, so it stayed empty and blocked the submit.
+ * No new claim is being made - it is the already-authorised answer, formatted.
+ *
+ * Returns "" when the notice period is not a plain number of days, so an
+ * unparseable value is left for the human rather than guessed at.
+ */
+function availabilityDate(candidate, from = new Date()) {
+  const raw = String(candidate?.notice_period ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  // The UNIT matters and must be read, not thrown away. Pulling the bare number
+  // out of "2 weeks" yields 2 and would put a start date two days out on a form
+  // where the candidate actually said fortnight - a wrong date presented as a
+  // fact. Only days and weeks are converted; months are ambiguous (28 vs 30 vs
+  // calendar) and anything unrecognised is refused.
+  const m = raw.match(/(\d+)\s*(day|week)/);
+  if (!m) return "";
+  const n = Number.parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 0 || n > 365) return "";
+  const days = n * (m[2] === "week" ? 7 : 1);
+  const d = new Date(from.getTime());
+  d.setDate(d.getDate() + days);
+  const pad = (v) => String(v).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function identityFacts(candidate, stated) {
   const spec = [
     {
@@ -1365,6 +1397,18 @@ function identityFacts(candidate, stated) {
       // a false statement to the employer.
       hint: /how\s+did\s+you\s+hear\s+about|how\s+you\s+(?:heard|found)\s+(?:about|this)|where\s+did\s+you\s+(?:hear|find)\s+(?:about|this)/i,
       value: stated?.how_you_heard || "This job board",
+    },
+    {
+      tag: "availability date",
+      // A date CONTROL, not prose. The value is the operator's own notice
+      // period rendered as an ISO date; see availabilityDate().
+      hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start\s+date|date\s+(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|notice\s+period|desired\s+start|pick\s+(?:a\s+)?date|select\s+(?:a\s+)?date|choose\s+(?:a\s+)?date/i,
+      value: availabilityDate(candidate),
+    },
+    {
+      tag: "last job title",
+      hint: /your\s+current\s+or\s+(?:more\s+recent|most\s+recent)\s+job\s+title|current\s+job\s+title|most\s+recent\s+(?:job\s+)?title|previous\s+job\s+title|last\s+job\s+title/i,
+      value: stated?.current_job_title,
     },
   ];
   return spec
@@ -3482,18 +3526,25 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
    * the way combo() matches a dropdown. Never invents a value: callers pass
    * only facts already held in the profile, and skip when the fact is absent.
    */
-  const answerQuestion = async (hintRe, value, tag) => {
-    const text = String(value ?? "").trim();
-    if (!text) return null;
-    // `input[type="text"]` is an attribute selector and misses every input that
-    // relies on the HTML default, which is most of them. `input:not([type])`
-    // picks those up.
-    const fields = page.locator(
-      'input:not([type]), input[type="text"], input[type="url"], input[type="tel"], '
-      + 'input[type="email"], input[type="search"], textarea',
-    );
-    const total = await fields.count().catch(() => 0);
-    for (let i = 0; i < total && i < 40; i++) {
+    const answerQuestion = async (hintRe, value, tag) => {
+      const text = String(value ?? "").trim();
+      if (!text) return null;
+      // input[type="text"] is an attribute selector and misses every input
+      // that relies on the HTML default, which is most of them.
+      //
+      // input[type="date"] and input[type="datetime-local"] are included because
+      // an availability picker is a date control, not a text field. They were not
+      // in scope at all before, so "Pick date..." on an OpenAI form could never be
+      // matched however the hint was written. Their value must be an ISO date:
+      // sending the prose "30 days from offer" is rejected by the control, which
+      // is why the caller derives a real date before calling this.
+      const fields = page.locator(
+        'input:not([type]), input[type="text"], input[type="url"], input[type="tel"], '
+        + 'input[type="email"], input[type="search"], input[type="date"], '
+        + 'input[type="datetime-local"], textarea',
+      );
+      const total = await fields.count().catch(() => 0);
+      for (let i = 0; i < total && i < 40; i++) {
       const field = fields.nth(i);
       if (!(await field.isVisible().catch(() => false))) continue;
       if (String(await field.inputValue().catch(() => "")).trim()) continue;
@@ -5780,6 +5831,7 @@ export {
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
   identityFacts,
+  availabilityDate,
   finalGuardAction,
   isCurrentPageTrusted,
   isEligibleJob,

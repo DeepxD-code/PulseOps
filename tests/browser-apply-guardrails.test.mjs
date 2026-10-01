@@ -26,6 +26,7 @@ import {
   isAllowedNavigationUrl,
   isBlacklistedJob,
   identityFacts,
+  availabilityDate,
   finalGuardAction,
   isEligibleJob,
   isSimulationJob,
@@ -516,6 +517,7 @@ test("plain identity facts are answered from the profile, absent facts are not i
       current_location: "Greater Noida, Uttar Pradesh",
       experience_years: 2,
       expected_salary: "4-5 LPA",
+      notice_period: "30 days",
     },
     { current_company: "Acme", requires_visa_sponsorship: "Yes" },
   );
@@ -546,6 +548,27 @@ test("plain identity facts are answered from the profile, absent facts are not i
   assert.equal(identityFacts({ current_location: "Greater Noida" }, {})
     .find((f) => f.tag === "city").once, false);
 
+  // An availability picker is input[type=date] and rejects prose, so the notice
+  // period has to become a real date. Unparseable values yield nothing rather
+  // than a guessed date.
+  assert.equal(availabilityDate({ notice_period: "30 days" }, new Date("2026-10-01T00:00:00Z")), "2026-10-31");
+  assert.equal(availabilityDate({ notice_period: "2 weeks" }, new Date("2026-10-01T00:00:00Z")), "2026-10-15");
+  // The unit must be read, not discarded: "2 weeks" is 14 days, not 2.
+  assert.equal(availabilityDate({ notice_period: "1 month" }, new Date("2026-10-01T00:00:00Z")), "");
+  assert.equal(availabilityDate({ notice_period: "0 days" }, new Date("2026-10-01T00:00:00Z")), "2026-10-01");
+  assert.equal(availabilityDate({ notice_period: "immediately" }, new Date("2026-10-01T00:00:00Z")), "");
+  assert.equal(availabilityDate({}, new Date("2026-10-01T00:00:00Z")), "");
+  assert.equal(availabilityDate({ notice_period: "99999 days" }, new Date("2026-10-01T00:00:00Z")), "");
+  // Month-end rollover must not overflow.
+  assert.equal(availabilityDate({ notice_period: "10 days" }, new Date("2026-10-25T00:00:00Z")), "2026-11-04");
+  // A job title is only ever the operator's stated value, never inferred.
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "last job title"), false);
+  assert.equal(
+    identityFacts({}, { current_job_title: "Software Trainee Intern" })
+      .find((f) => f.tag === "last job title").value,
+    "Software Trainee Intern",
+  );
+
   // The hints must match the labels boards actually use. Match against the fully
   // populated profile so every hint is present to be exercised at all.
   const withEmployer = rich;
@@ -569,6 +592,10 @@ test("plain identity facts are answered from the profile, absent facts are not i
   assert.equal(match("work authorisation", "Are you currently authorized to work in the US?"), true);
   assert.equal(match("desired salary", "What is your desired salary range?"), true);
   assert.equal(match("how you heard", "How did you hear about Mixpanel as an Employer?"), true);
+  // The literal label Ashby/OpenAI put on the availability control.
+  assert.equal(match("availability date", "Pick date..."), true);
+  assert.equal(match("availability date", "Earliest you would want to start"), true);
+  assert.equal(match("availability date", "Desired start date"), true);
 
   // Genuinely personal prompts stay out of this list by design.
   const personal = "Why do you want to work at Cartesia AI?";
