@@ -68,13 +68,21 @@ search_portals:
     requires_auth: false
     url: "https://www.glassdoor.co.in/Job/india-backend-developer-intern-jobs-SRCH_KO0,27.htm"
 
-  # DISABLED 2026-09-23: server unreachable (HTTP2 protocol errors in
-  # Chromium + plain-HTTPS read timeouts). Re-enable when the site is back.
+  # RE-ENABLED 2026-10-01. Job Hai was never down: the configured URL was
+  # wrong. "/jobs/backend-developer-jobs" returns a real HTTP 404 ("Oops!
+  # Page Not Found"), which is indistinguishable from a dead board, so it
+  # was disabled on 2026-09-23 as "server unreachable". Verified in a live
+  # browser session: https://www.jobhai.com/jobs returns 200 with live
+  # listing slugs such as
+  #   /it-software-data-analyst-software-developer-application-developer-job-in-nexus-engiconsults-private-limited-...
+  # "?search=backend" is accepted (the pagination keeps the parameter) but
+  # the result set is not filtered server-side, so scan the index and let the
+  # role filter decide, exactly as with every other unfiltered portal.
   - name: "Job Hai"
     engine: jobhai
-    enabled: false
+    enabled: true
     requires_auth: false
-    url: "https://www.jobhai.com/jobs/backend-developer-jobs"
+    url: "https://www.jobhai.com/jobs"
 
   - name: "YC Combinator (Work at a Startup)"
     engine: yc
