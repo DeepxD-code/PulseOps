@@ -395,8 +395,51 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
     { host: "www.recaptcha.net", pathPrefix: "/recaptcha/api2/", types: ["document"] },
     { host: "www.google.com", pathPrefix: "/recaptcha/api2/", types: ["document"] },
     { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image", "other"] },
-  ],
-});
+    ],
+  // reCAPTCHA v2, which is what Ashby and every other non-Greenhouse board
+  // uses. The greenhouse list above covers v3/Enterprise plus the v2 checkbox
+  // frame, but nothing allowed v2's loader script, so it was blocked:
+  //
+  //   [subresource-block] script GET
+  //   https://www.recaptcha.net/recaptcha/api.js?render=6LeFb_YUAAAA...&onload=onLoadReCaptcha
+  //
+  // With api.js never loaded the invisible widget never executes,
+  // g-recaptcha-response stays unset, and Ashby answers the fully completed
+  // application with HTTP 200 and:
+  //
+  //   "We couldn't submit your application
+  //    Your application submission was flagged as possible spam."
+  //
+  // That refusal was this guard breaking the vendor's CAPTCHA, not Ashby
+  // detecting automation. The vendor allowlist lives in CAPTCHA_VENDOR_REQUESTS
+  // and is consulted for every ATS, so no per-ATS copy is needed here.
+}); 
+
+    // Google's reCAPTCHA endpoints, whichever ATS is in play.
+//
+// These are vendor endpoints, not ATS endpoints: the same three hosts serve
+// every board, and the ATS-keyed map below cannot express that without being
+// duplicated per vendor (and going stale the moment a new ATS appears - which
+// is how v2's api.js stayed blocked for Ashby while working fine on
+// Greenhouse). The captcha is a control the site owner put there; the job here
+// is to let it execute, not to obstruct it. A visible challenge is still
+// surfaced to the human by the existing handling.
+//
+//   v3/Enterprise  /recaptcha/enterprise   Greenhouse and some Greenhouse-era boards
+//   v2 loader      /recaptcha/api.js      Ashby and most other boards
+//   v2 bundle      /recaptcha/  (gstatic) language pack loaded by api.js
+//   v2 frame       /recaptcha/api2/       the anchor/checkbox document, and
+//                                           api2/webworker.js, which v2 loads
+//                                           as a script to run the challenge
+const CAPTCHA_VENDOR_REQUESTS = Object.freeze([
+  { host: "www.recaptcha.net", pathPrefix: "/recaptcha/enterprise", types: ["script", "document", "xhr", "fetch"] },
+  { host: "www.google.com", pathPrefix: "/recaptcha/enterprise", types: ["script", "document", "xhr", "fetch"] },
+  { host: "www.recaptcha.net", pathPrefix: "/recaptcha/api.js", types: ["script"] },
+  { host: "www.google.com", pathPrefix: "/recaptcha/api.js", types: ["script"] },
+  { host: "www.recaptcha.net", pathPrefix: "/recaptcha/api2/", types: ["document", "xhr", "fetch", "script"] },
+  { host: "www.google.com", pathPrefix: "/recaptcha/api2/", types: ["document", "xhr", "fetch", "script"] },
+  { host: "www.gstatic.com", pathPrefix: "/recaptcha/", types: ["script", "stylesheet", "font", "image", "other"] },
+]);
 const CLAIM_RECOVERY_MS = (() => {
   const parsed = Number.parseInt(process.env.PULSEOPS_BROWSER_CLAIM_RECOVERY_MS || "3600000", 10);
   return Number.isFinite(parsed) && parsed >= 60000 ? parsed : 3600000;
@@ -1806,11 +1849,15 @@ function isAllowedReadOnlyApiRequest(requestUrl, requestType, method, ats) {
     return false;
   }
   const entries = ATS_TRUSTED_REQUEST_HOSTS[String(ats || "").toLowerCase()] || [];
-  return entries.some((entry) => (
+  const matches = (entry) => (
     canonicalHost(url.hostname) === canonicalHost(entry.host)
     && url.pathname.startsWith(entry.pathPrefix)
     && entry.types.includes(requestTypeName)
-  ));
+  );
+  // The captcha vendor is the same for every board, so its endpoints are
+  // consulted regardless of which ATS is filling the form. Without this,
+  // reCAPTCHA only worked on the ATS whose list happened to carry the entry.
+  return CAPTCHA_VENDOR_REQUESTS.some(matches) || entries.some(matches);
 }
 
 /**
@@ -1863,12 +1910,19 @@ function collectPresignedUploadHosts(payload, uploadHosts) {
  * and path are the vendor's captcha endpoints exactly, the body is produced by
  * Google's own script and carries the site key and challenge state rather than
  * anything typed into the form, and no other host or path is opened.
+ *
+ * Both reCAPTCHA generations are covered. v3/Enterprise POSTs to
+ * /recaptcha/enterprise/reload; v2's invisible widget POSTs to
+ * /recaptcha/api2/reload. Withholding the v2 path left the invisible widget
+ * unable to obtain a token, which is what made Ashby report the completed
+ * application as spam.
  */
 function isAllowedCaptchaTokenRequest(requestUrl, requestType) {
   const url = parseHttpUrl(requestUrl);
   if (!url || url.protocol !== "https:") return false;
   if (!/^www\.(recaptcha\.net|google\.com)$/i.test(canonicalHost(url.hostname))) return false;
-  if (!url.pathname.startsWith("/recaptcha/enterprise")) return false;
+  const path = url.pathname;
+  if (!path.startsWith("/recaptcha/enterprise") && !path.startsWith("/recaptcha/api2/")) return false;
   return ["xhr", "fetch"].includes(String(requestType || "").toLowerCase());
 }
 
@@ -4973,7 +5027,12 @@ async function processJob(browser, job, profile, runtime = {}) {
     let confirmed = clicked && (serverApplied || await page.evaluate(() =>
       /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received/i.test(document.body?.innerText || "")
     ).catch(() => false));
-    // A final click that lands on an SMS verification step is not a submission.
+    // Declared at function scope on purpose: the final return that records this
+    // value sits outside BOTH the `if (clicked && !confirmed)` block and the
+    // post-submit inspection block, so declaring it inside either one made
+    // every submission throw "spamRefused is not defined" on the return.
+    let spamRefused = false;
+// A final click that lands on an SMS verification step is not a submission.
     // With --enter-otp the operator supplies the code they received.
     if (clicked && !confirmed) {
       const otp = await completeSmsVerification(page);
@@ -5019,7 +5078,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       // is not recorded as "a human just needs to confirm" - which is what
       // makes an operator sit and wait for something that will never arrive.
       const body = String(outcome?.body || "");
-      const spamRefused = /flagged as possible spam|couldn't submit your application|we could not submit your application/i.test(body);
+      spamRefused = /flagged as possible spam|couldn't submit your application|we could not submit your application/i.test(body);
       let wantsCodeNow = false;
       if (captchaRefused) {
         // Greenhouse shows an invisible reCAPTCHA badge, but the thing actually
@@ -5066,18 +5125,6 @@ async function processJob(browser, job, profile, runtime = {}) {
       if (spamRefused) {
         console.log("  [spam-refused] the board accepted the form and then rejected the submission as spam.");
         console.log("  [spam-refused] this is an anti-automation verdict, not a missing answer; not retried and not worked around.");
-      }
-
-      if (missingFieldsOnly) {
-        recordPendingQuestion({
-          company: job.company,
-          title: job.title,
-          link: url,
-          ats,
-          fields: requiredEmpty,
-        });
-        console.log(`  [pending-question] recorded ${requiredEmpty.length} unanswered field(s) for review: ${requiredEmpty.join(", ")}`);
-        console.log("  [pending-question] not blocking the batch — this needs one pass at the end of the run");
       }
 
       if (OTP_PAUSE && needsHumanNow && !spamRefused) {

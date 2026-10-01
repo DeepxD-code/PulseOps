@@ -1212,23 +1212,50 @@ test("the submit-time captcha and vendor data are reachable, writes are not", ()
     ),
     true,
   );
-  // The scope stops at /enterprise: another reCAPTCHA path is not opened.
+  // The scope stops at the vendor's own paths: an unrelated gstatic file is
+  // still not opened.
   assert.equal(
     isAllowedReadOnlyApiRequest("https://www.gstatic.com/recaptcha/x.js", "xhr", "GET", "greenhouse"),
     false,
   );
-  // A captcha script is not a general-purpose exemption: no writes, and the
-  // same trust is not extended to another ATS.
+  // reCAPTCHA v2 is now reachable too. v2's loader and anchor frame were
+  // blocked, so the invisible widget never produced a token and Ashby
+  // answered the finished application with "flagged as possible spam".
   assert.equal(
-    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api2/anchor", "xhr", "GET", "greenhouse"),
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api.js?render=KEY", "script", "GET", "ashby"),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.gstatic.com/recaptcha/releases/kemd/recaptcha__en.js", "other", "GET", "ashby"),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api2/anchor?k=KEY", "xhr", "GET", "ashby"),
+    true,
+  );
+  // ...and it is ATS-independent by design: the captcha vendor is the same for
+  // every board, so keying it per ATS is what left Ashby broken.
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api.js?render=KEY", "script", "GET", "lever"),
+    true,
+  );
+  // Still not a general-purpose exemption.
+  //  - no writes: only GET/HEAD is ever allowed, on any captcha path
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api2/reload", "xhr", "POST", "ashby"),
     false,
   );
   assert.equal(
-    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/enterprise.js", "script", "GET", "lever"),
+    isAllowedReadOnlyApiRequest("https://www.recaptcha.net/recaptcha/api.js", "script", "POST", "greenhouse"),
+    false,
+  );
+  //  - and the host is pinned: a lookalike domain gets nothing
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://evil.recaptcha.net/recaptcha/api.js", "script", "GET", "greenhouse"),
     false,
   );
   assert.equal(
-    isAllowedReadOnlyApiRequest("https://evil.recaptcha.net/recaptcha/enterprise.js", "script", "GET", "greenhouse"),
+    isAllowedReadOnlyApiRequest("https://recaptcha.net.evil.example/recaptcha/api.js", "script", "GET", "greenhouse"),
     false,
   );
 });
