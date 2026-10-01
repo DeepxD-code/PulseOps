@@ -7,7 +7,18 @@ param(
     # commitments in profile.application_answers. Those are statements made on
     # the candidate's behalf, so they are opt-in per run and every answer is
     # logged as [commitment]/[attestation].
-    [switch]$AcceptTerms
+    [switch]$AcceptTerms,
+    # A SEPARATE authorisation class from -AcceptTerms. This one is for
+    # arbitration agreements and other binding legal terms, which are
+    # materially different from ticking a privacy checkbox. Both are opt-in and
+    # every answer is logged as [legal]. Omitting this leaves
+    # application_answers.arbitration_agreement untouched, which is the point.
+    [switch]$AcceptLegal,
+    # After the run, open every job page that G10 parked for human review (no
+    # verified recruiter email found) in the default browser. Opt-in because it
+    # takes over the operator's screen.
+    [switch]$OpenG10Reviews,
+    [int]$G10ReviewLimit = 25
 )
 
 # Native CLIs (Python/Node) may write warnings to stderr without failing.
@@ -38,11 +49,22 @@ if (-not $SkipBrowserApply) {
     }
     $applyArgs = @("apps/browser-apply/apply.mjs", "--live", "--headed", "--auto", "--otp-pause")
     if ($AcceptTerms) { $applyArgs += "--accept-terms" }
+    if ($AcceptLegal) { $applyArgs += "--accept-legal" }
     & node @applyArgs
     $browserExit = $LASTEXITCODE
     Write-Host "browser_apply_exit=$browserExit"
 } else {
     Write-Host "=== Browser apply skipped by switch ==="
+}
+
+if ($OpenG10Reviews) {
+    # G10 parked these listings because it could not find a verified recruiter
+    # email. Their Discord cards carry a link nobody has opened yet, so surface
+    # the pages in the operator's browser for review. Read-only: it opens links
+    # that are already in the database and drives nothing.
+    Write-Host "=== Opening G10 review pages ==="
+    & node apps/browser-apply/tools/open_g10_reviews.mjs --limit $G10ReviewLimit
+    Write-Host "g10_open_exit=$LASTEXITCODE"
 }
 
 if (-not $NoPush) {

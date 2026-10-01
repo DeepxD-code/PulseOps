@@ -22,3 +22,15 @@ jobs:
             if [ -f "$pkg/pyproject.toml" ]; then python -m pip install -e "$pkg"; fi
           done
           python -m pytest tests -q
+
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # The guardrail suites under tests/*.test.mjs run on the built-in node
+      # test runner and import nothing from node_modules, so no install step.
+      - run: node --test tests/*.test.mjs
+

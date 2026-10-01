@@ -3,7 +3,18 @@
 # ── Secrets (never commit) ──────────────────────────────────
 .env
 portal/storageState.json
+# Playwright storageState files are live authenticated sessions (cookies +
+# tokens for .naukri.com, .autter.dev, .github.com and friends), so the
+# portal name is part of the filename ("autter-storageState.json"). The two
+# rules above anchor at the START of the filename and therefore match only the
+# unprefixed form — they never covered the prefixed one. Match the shape and
+# the known locations instead of one fixed filename, so a new portal cannot
+# silently produce a committable session.
 portal/storageState*.json
+portal/*-storageState.json
+**/storageState*.json
+**/*-storageState.json
+apps/browser-apply/*storageState*.json
 config/profile.yml
 config/settings.yml
 config/blacklist.txt
@@ -62,3 +73,48 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# ── One-off investigation scratch ─────────────────────────────────────
+# Throwaway probes written to answer a single question about one page
+# (probe-*.mjs, check-*.mjs, dbg-*.mjs, mark*.py, probe_*.py, ...). Each run
+# produces several more, so without this the real diff is buried under ~95
+# untracked files and stops being reviewable. Deliberately narrow: it does NOT
+# ignore the tools that are part of the pipeline.
+apps/browser-apply/tools/probe-*.mjs
+apps/browser-apply/tools/probe-*.py
+apps/browser-apply/tools/check-*.mjs
+apps/browser-apply/tools/check-*.py
+apps/browser-apply/tools/dbg-*.mjs
+apps/browser-apply/tools/dbg-*.py
+apps/browser-apply/tools/hold-*.mjs
+apps/browser-apply/tools/*-2.mjs
+apps/browser-apply/tools/*-3.mjs
+apps/browser-apply/tools/*-4.mjs
+apps/browser-apply/tools/*-5.mjs
+apps/browser-apply/tools/*-6.mjs
+apps/browser-apply/tools/*-live.mjs
+apps/browser-apply/tools/autter-*.mjs
+apps/browser-apply/tools/explore-*.mjs
+apps/browser-apply/tools/verify-shine*.mjs
+apps/browser-apply/tools/wait-*.mjs
+portal/save_*.mjs
+# Root-level one-off scripts (add_naukri*.py, mark*.py, verify_*.py, ...).
+/probe_*.py
+/verify_*.py
+/mark*.py
+/next_targets.py
+/q_pending.py
+/list_applied.py
+/portal_jobs.py
+/li_links.py
+/find_naukri.py
+/fetch_*.py
+/preflight.py
+/run7_jobs.py
+/build_pdfs.py
+/build_missing_pdfs.py
+/add_naukri*.py
+/apply_queue.py
+/ezyev_link.py
+/watch_yc_mail.py
+/liveness*.json
