@@ -575,20 +575,78 @@ async function scrapeNaukri(page, portal) {
 }
 
 async function scrapeWellfound(page, portal) {
-  await page.goto(portal.url, { waitUntil: "networkidle", timeout: 30000 });
-  await page.waitForTimeout(1500); // SPA hydration
+  // NOT `networkidle`. Wellfound keeps long-lived analytics connections open
+  // (rddrstck.wellfound.com / Segment), so the network never goes idle and
+  // `networkidle` reliably hit its timeout - which surfaced as
+  // "failed: Wellfound India" in the scan summary, i.e. the portal was
+  // reported broken when the listing markup was fine.
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  // Listings are client-rendered. Wait for a real listing link, not a fixed sleep.
+  await page.waitForSelector(
+    "a[href*='/jobs/']:not([href*='/jobs/applications']):not([href*='/jobs/messages'])",
+    { timeout: 25000 },
+  ).catch(() => {});
+  await page.waitForTimeout(2500);
+  // Scroll a little so the first pages of the feed render.
+  for (let i = 0; i < 2; i++) {
+    await page.mouse.wheel(0, 2200);
+    await page.waitForTimeout(1200);
+  }
+
   return page.$$eval(
-    "a[href*='/jobs/'], a[href*='/role/']",
-    (nodes, sourceName) =>
-      nodes
-        .map((a) => ({
-          title: (a.textContent || "").trim(),
+    "a[href*='/jobs/']",
+    (nodes, sourceName) => {
+      // The nav carries /jobs/applications, /jobs/messages, /jobs/starved,
+      // /jobs/hidden and the bare /jobs index. Matching them turned the nav bar
+      // into five fake jobs titled "Applied", "Messages", "Browse all".
+      const NAV = /\/jobs\/(applications|messages|starred|hidden|home)?$/;
+      // A real listing is /jobs/<numeric id>-<slug>.
+      const LISTING = /^\/jobs\/(\d+)-([a-z0-9][a-z0-9-]*)$/i;
+      const out = [];
+      const seen = new Set();
+      for (const a of nodes) {
+        const href = a.getAttribute("href") || "";
+        const m = LISTING.exec(href);
+        if (NAV.test(href) || !m) continue;
+        const url = new URL(href, location.origin);
+        url.search = "";
+        if (seen.has(url.href)) continue;
+
+        // The title comes from the slug, not the card text. The rendered card
+        // concatenates its own chrome with the role - "Forward Deployed Engineer
+        // recently activePosted 7 days agoicn_repost" - and stripping that with
+        // regexes left fragments like "Senior Java Backend EngineerIn officeChennai
+        // L - 35L". The slug is the same title, clean and deterministic:
+        //   /jobs/4777702-senior-java-backend-engineer
+        const title = m[2]
+          .replace(/-+/g, " ")
+          .replace(/\b\w/g, (ch) => ch.toUpperCase())
+          .trim();
+        if (title.length < 5) continue;
+
+        // The card text still earns its keep as the description: it is where the
+        // salary band lives, and a stated salary under the floor is a skip
+        // reason rather than something to re-derive from the slug.
+        const card = (a.textContent || "").replace(/\s+/g, " ").trim();
+        const salary = card.match(/[₹$€£]\s?[\d,.]+\s*(?:[kK]|[Ll])?\s*(?:[-–—]\s?[₹$€£]?\s?[\d,.]+\s*(?:[kK]|[Ll])?)?/);
+        const workMode = /\b(remote only|remote|in office|hybrid|onsite)\b/i.exec(card);
+
+        seen.add(url.href);
+        out.push({
+          title: title.slice(0, 118),
           company: "Unknown",
-          link: a.href,
-          description: `Source: ${sourceName}.`,
-        }))
-        .filter((j) => j.title && j.title.length > 4 && j.title.length < 120),
-    portal.name
+          link: url.href,
+          description: [
+            salary ? `Salary shown: ${salary[0]}` : "Salary: not stated",
+            workMode ? `Work mode: ${workMode[1]}` : "",
+            `Source: ${sourceName}.`,
+            card ? `Card text: ${card.slice(0, 200)}` : "",
+          ].filter(Boolean).join(" "),
+        });
+      }
+      return out;
+    },
+    portal.name,
   );
 }
 
