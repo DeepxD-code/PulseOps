@@ -1379,11 +1379,23 @@ function identityFacts(candidate, stated) {
     {
       tag: "work authorisation",
       // Derived, not guessed: the operator already declared that visa
-      // sponsorship is required, so "are you authorised to work here?" is
+      // sponsorship is required, so "are you authorised to work HERE?" is
       // necessarily "No". If that answer changes, this changes with it.
-      hint: /are\s+you\s+(?:legally\s+)?(?:currently\s+)?authori[sz]ed\s+to\s+work|authori[sz]ed\s+to\s+work\s+in|do\s+you\s+have\s+the\s+right\s+to\s+work/i,
+      //
+      // The hint therefore requires the question to be about the JOB's
+      // country, not any country at all. These forms ask two different
+      // things in one breath:
+      //   "Are you currently authorized to work in the country outlined for
+      //    this job (e.g. H-1B status)?"      -> No, sponsorship is required
+      //   "Are you legally authorized to work in <their own country>?"  -> Yes
+      // Answering the derived "No" to the second would be a false statement
+      // about a legal status. Anything not clearly scoped to the job's
+      // country is left for the human instead.
+      //
+      // No longer capped at one match: a form carrying two US-scoped
+      // questions needs both filled, or the second blocks the submit.
+      hint: /authori[sz]ed\s+to\s+work\s+in\s+the\s+country\s+outlined|authori[sz]ed\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)|right\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)/i,
       value: workAuthorisation(stated),
-      once: true,
     },
     {
       tag: "desired salary",

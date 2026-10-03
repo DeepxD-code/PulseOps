@@ -540,11 +540,19 @@ test("plain identity facts are answered from the profile, absent facts are not i
   assert.equal(richByTag["how you heard"], "This job board");
   assert.equal(identityFacts({}, { how_you_heard: "A colleague" }).find((f) => f.tag === "how you heard").value, "A colleague");
 
-  // Work authorisation is written at most once per form: a form can ask about
-  // the US and about the candidate's own country, and one derived answer is
-  // only correct for the jurisdiction it was derived for.
-  assert.equal(identityFacts({}, { requires_visa_sponsorship: "Yes" })
-    .find((f) => f.tag === "work authorisation").once, true);
+  // Work authorisation is answered only where the question is scoped to the
+  // job's country. A form can ask about the job's country AND the candidate's
+  // own country in one breath; the derived "No" (sponsorship required) is
+  // right for the first and a false statement for the second.
+  const authFact = identityFacts({}, { requires_visa_sponsorship: "Yes" })
+    .find((f) => f.tag === "work authorisation");
+  assert.equal(authFact.value, "No");
+  assert.equal(authFact.once, false, "must not be capped at one match");
+  assert.equal(authFact.hint.test("Are you currently authorized to work in the country outlined for this job (e.g. H-1B status)?"), true);
+  assert.equal(authFact.hint.test("Are you legally authorized to work in the United States?"), true);
+  assert.equal(authFact.hint.test("Are you currently bound by any non-compete agreement?"), false);
+  // A jurisdiction-less question must not inherit the derived answer.
+  assert.equal(authFact.hint.test("Are you authorized to work in this role?"), false);
   assert.equal(identityFacts({ current_location: "Greater Noida" }, {})
     .find((f) => f.tag === "city").once, false);
 
