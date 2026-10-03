@@ -1394,7 +1394,7 @@ function identityFacts(candidate, stated) {
       //
       // No longer capped at one match: a form carrying two US-scoped
       // questions needs both filled, or the second blocks the submit.
-      hint: /authori[sz]ed\s+to\s+work\s+in\s+the\s+country\s+outlined|authori[sz]ed\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)|right\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)/i,
+      hint: /authori[sz]ed\s+to\s+work\s+in\s+the\s+country\s+(?:outlined|where)|authori[sz]ed\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)|right\s+to\s+work\s+in\s+(?:the\s+)?(?:us|usa|united\s+states)/i,
       value: workAuthorisation(stated),
     },
     {
@@ -3657,12 +3657,31 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   await answerQuestion(/linkedin/, candidate.linkedin, "linkedin profile");
   await answerQuestion(/website|portfolio|github/, site, "website");
   // A stated work location is a fact from the profile, so it is safe to give.
+  // PlanetScale asks "Where are you located?" and "Where are you based?" -
+  // neither matched the old pattern, and both blocked the submit.
   await answerQuestion(
-    /address from which|which city|relocat|work from|current location/,
+    /address from which|which city|relocat|work from|current location|where\s+are\s+you\s+(?:located|based|residing)|where\s+(?:do|did)\s+you\s+(?:live|reside)|your\s+(?:current\s+)?location|which\s+city\s+are\s+you/i,
     String(candidate.current_location || "").trim(),
     "work location",
   );
   if (ACCEPT_TERMS) {
+    // Some boards split the name across two required fields: "Legal First Name"
+    // and "Legal Last Name" (sierra). One profile name has to feed both, or the
+    // submit is blocked on a box that is plainly answerable.
+    const nameParts = String(candidate?.name || "").trim().split(/\s+/).filter(Boolean);
+    if (nameParts.length > 1) {
+      await answerQuestion(
+        /legal\s*first\s*name|^\s*(?:first|given)\s*name\s*$/i,
+        nameParts[0],
+        "legal first name",
+      );
+      await answerQuestion(
+        /legal\s*last\s*name|^\s*(?:last|family|sur)\s*name\s*$/i,
+        nameParts[nameParts.length - 1],
+        "legal last name",
+      );
+    }
+
     // Availability and timeline are commitments about the candidate, so they
     // are only stated under the operator flag and every answer is logged.
     const notice = String(candidate.notice_period || "").trim();
@@ -3702,7 +3721,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       await answerQuestion(fact.hint, fact.value, fact.tag);
     }
     const commitments = [
-      { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously)|previous(?:ly)? interview|applied (?:here|before|previously)/, tag: "prior interview history" },
+      { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously|with|at)|previous(?:ly)? interview|applied (?:here|before|previously)|have\s+you\s+(?:ever\s+)?(?:interviewed|spoken|applied)|in\s+the\s+past/i, tag: "prior interview history" },
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
       { key: "future_us_residence", hint: /(?:reside|work|live|located?|relocate) (?:now or )?(?:in|to) the (?:us|usa|united states)|future.*(?:united states)|\bthe us\b/i, tag: "future US residence" },
       { key: "requires_visa_sponsorship", hint: /sponsorship|require a visa|need a visa|visa support|work authorization|right to work/, tag: "visa sponsorship" },
