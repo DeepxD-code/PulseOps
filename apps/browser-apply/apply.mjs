@@ -3598,7 +3598,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
    * the way combo() matches a dropdown. Never invents a value: callers pass
    * only facts already held in the profile, and skip when the fact is absent.
    */
-    const answerQuestion = async (hintRe, value, tag) => {
+    const answerQuestion = async (hintRe, value, tag, once = false) => {
       const text = String(value ?? "").trim();
       if (!text) return null;
       // input[type="text"] is an attribute selector and misses every input
@@ -3616,30 +3616,37 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         + 'input[type="datetime-local"], textarea',
       );
       const total = await fields.count().catch(() => 0);
+      let filled = 0;
       for (let i = 0; i < total && i < 40; i++) {
-      const field = fields.nth(i);
-      if (!(await field.isVisible().catch(() => false))) continue;
-      if (String(await field.inputValue().catch(() => "")).trim()) {
+        const field = fields.nth(i);
+        if (!(await field.isVisible().catch(() => false))) continue;
+        // Never overwrite a value that is already there.
+        if (String(await field.inputValue().catch(() => "")).trim()) continue;
+        const signature = await field.evaluate(controlSignatureMatcher()).catch((e) => {
+          console.log(`    [answer] ${tag}: matcher failed (${String(e.message || e).slice(0, 80)})`);
+          return "";
+        });
+        if (!hintRe.test(String(signature))) continue;
+        await field.fill(text).catch(() => {});
+        await page.waitForTimeout(150);
+        // A controlled input can reject the value it was given. Say so, rather
+        // than logging a fill that did not happen.
+        const landed = String(await field.inputValue().catch(() => "")).trim();
+        if (landed !== text) {
+          console.log(`    [answer] ${tag}: value did not stick (got "${landed.slice(0, 40)}")`);
+          continue;
+        }
+        console.log(`    [fill] ${tag} -> "${text.slice(0, 40)}"`);
+        filled += 1;
+        // Keep going instead of returning on the first match: a form can ask
+        // the same fact twice - PlanetScale asks both "Where are you located?"
+        // and "Where are you based?" - and stopping after the first left the
+        // second empty and blocked the submit while the log showed a
+        // successful fill. `once` still stops at the first, which is what keeps
+        // the work-authorisation answer scoped to one jurisdiction.
+        if (once) return text;
       }
-      const signature = await field.evaluate(controlSignatureMatcher()).catch((e) => {
-        console.log(`    [answer] ${tag}: matcher failed (${String(e.message || e).slice(0, 80)})`);
-        return "";
-      });
-      if (!hintRe.test(String(signature))) {
-      }
-      await field.fill(text).catch(() => {});
-      await page.waitForTimeout(150);
-      // A controlled input can reject the value it was given. Say so, rather
-      // than logging a fill that did not happen.
-      const landed = String(await field.inputValue().catch(() => "")).trim();
-      if (landed !== text) {
-        console.log(`    [answer] ${tag}: value did not stick (got "${landed.slice(0, 40)}")`);
-        continue;
-      }
-      console.log(`    [fill] ${tag} → "${text.slice(0, 40)}"`);
-      return text;
-    }
-    // Same rule as combo(): a hint that matches nothing must be visible.
+      if (filled) return text;
     console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
@@ -3727,13 +3734,9 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
 
     const answeredOnce = new Set();
     for (const fact of identityFacts(candidate, stated)) {
-      if (fact.once) {
-        if (answeredOnce.has(fact.tag)) continue;
-        const filled = await answerQuestion(fact.hint, fact.value, fact.tag);
-        if (filled) answeredOnce.add(fact.tag);
-        continue;
-      }
-      await answerQuestion(fact.hint, fact.value, fact.tag);
+      // `once` facts stop after the first matching control; the rest fill every
+      // match, because a form may ask the same fact more than once.
+      await answerQuestion(fact.hint, fact.value, fact.tag, fact.once === true);
     }
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously|with|at)|previous(?:ly)? interview|applied (?:here|before|previously)|have\s+you\s+(?:ever\s+)?(?:interviewed|spoken|applied)|in\s+the\s+past/i, tag: "prior interview history" },
