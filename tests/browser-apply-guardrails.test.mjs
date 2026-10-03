@@ -26,6 +26,7 @@ import {
   isAllowedNavigationUrl,
   isBlacklistedJob,
   identityFacts,
+  portalAssetHostAllowed,
   availabilityDate,
   finalGuardAction,
   isEligibleJob,
@@ -632,6 +633,26 @@ test("a contended listing is per-row, and only a global pause stops the batch", 
   assert.equal(finalGuardAction({ reason: "profile-incomplete" }), "profile-incomplete");
   assert.equal(finalGuardAction({ error: "boom" }), "needs-verification");
   assert.equal(finalGuardAction({}), null);
+});
+
+test("a portal's own scripts load, and only while on that portal", () => {
+  const u = (s) => new URL(s);
+  // Instahyre's interface is jQuery + Bootstrap from two CDNs plus its own
+  // bundles. Blocked, the page never hydrates and the run times out on a dead
+  // "Apply now" button - 22 consecutive timeouts before this was found.
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://static.instahyre.com/js/output.1.js")), true);
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://ajax.googleapis.com/ajax/libs/jquery-1.11.1/jquery.min.js")), true);
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/3.3.7/js/bootstrap.min.js")), true);
+  // Analytics and error reporting are NOT needed to fill a form, and a script
+  // that can read the page can read what was typed.
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://browser.sentry-cdn.com/5.1.0/bundle.min.js")), false);
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://static.cloudflareinsights.com/beacon.min.js")), false);
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com", u("https://www.googletagmanager.com/gtag/js?id=G-X")), false);
+  // Scoped by host: the same CDNs stay blocked anywhere else. Keying this on
+  // the ATS would have widened script trust across every generic site.
+  assert.equal(portalAssetHostAllowed("https://jobs.ashbyhq.com", u("https://ajax.googleapis.com/ajax/libs/jquery-1.11.1/jquery.min.js")), false);
+  assert.equal(portalAssetHostAllowed("https://evil.example", u("https://static.instahyre.com/js/output.1.js")), false);
+  assert.equal(portalAssetHostAllowed("https://www.instahyre.com.evil.example", u("https://static.instahyre.com/js/output.1.js")), false);
 });
 
 test("blacklist matching is enforced independently of the SQL query", () => {

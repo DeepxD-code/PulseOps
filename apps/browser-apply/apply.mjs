@@ -1881,6 +1881,57 @@ function requestFrameOrigin(request, page) {
   }
 }
 
+/**
+ * Hosts a specific portal needs in order to function at all.
+ *
+ * Keyed by the portal's own hostname rather than by ATS, because these boards
+ * infer as `generic` and a generic entry would widen script trust across every
+ * unrecognised site on the web. Keying by host means the allowance applies only
+ * while filling a form on that portal.
+ *
+ * Instahyre is here because its whole interface is jQuery + Bootstrap loaded
+ * from two third-party CDNs, plus its own bundles on static.instahyre.com.
+ * With those blocked the page never hydrates, no application form ever renders,
+ * and the run spends 15 seconds per job timing out on a dead "Apply now"
+ * button - 22 consecutive timeouts in one run before this was found.
+ *
+ * Error reporting and analytics (sentry-cdn.com, cloudflareinsights.com,
+ * Google Tag Manager) are deliberately NOT listed. They are not needed to fill
+ * a form, and a script that can read the page can also read what was typed.
+ */
+const PORTAL_ASSET_HOSTS = Object.freeze({
+  // Both spellings are listed because canonicalHost deliberately does NOT strip
+  // "www." - it is a distinct hostname for trust purposes - and the board is
+  // actually served from www.instahyre.com.
+  "instahyre.com": [
+    "static.instahyre.com",
+    "ajax.googleapis.com",
+    "cdnjs.cloudflare.com",
+  ],
+  "www.instahyre.com": [
+    "static.instahyre.com",
+    "ajax.googleapis.com",
+    "cdnjs.cloudflare.com",
+  ],
+});
+
+function portalAssetHostAllowed(pageOrigin, url) {
+  if (!pageOrigin || !url) return false;
+  // canonicalHost takes a HOSTNAME. Handing it a full origin left the scheme
+  // attached ("https://www.instahyre.com") so the lookup never matched and
+  // every portal script stayed blocked.
+  let pageHost = "";
+  try {
+    pageHost = canonicalHost(new URL(pageOrigin).hostname);
+  } catch {
+    return false;
+  }
+  const hosts = PORTAL_ASSET_HOSTS[pageHost];
+  if (!hosts) return false;
+  const host = canonicalHost(url.hostname);
+  return hosts.some((candidate) => canonicalHost(candidate) === host);
+}
+
 function isAllowedAssetRequest(requestUrl, requestType, ats) {
   const url = parseHttpUrl(requestUrl);
   const type = String(requestType || "").toLowerCase();
@@ -2079,7 +2130,8 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           || parseHttpUrl(navigationPinnedOrigin(boundary));
         const requestParsed = parseHttpUrl(requestUrl);
         const blankFrame = /^about:blank(?:[#?].*)?$/i.test(String(requestUrl || ""));
-        const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, ats);
+        const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, ats)
+          || portalAssetHostAllowed(frameOrigin, requestParsed);
         const trustedReadOnlyApi = isAllowedReadOnlyApiRequest(
           requestUrl, requestType, requestMethod, ats
         );
@@ -5901,6 +5953,7 @@ export {
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
   identityFacts,
+  portalAssetHostAllowed,
   availabilityDate,
   finalGuardAction,
   isCurrentPageTrusted,
