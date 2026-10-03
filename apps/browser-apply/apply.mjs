@@ -2897,11 +2897,19 @@ function readLineFromStdin(timeoutMs = 180000) {
  */
 function controlSignatureMatcher() {
   return (el) => {
-    const own = [
-      el.getAttribute("aria-label") || "",
-      el.getAttribute("id") || "",
-      el.getAttribute("name") || "",
-    ].join(" ");
+      const own = [
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("id") || "",
+        el.getAttribute("name") || "",
+        // Placeholder is included because it is frequently the ONLY prompt a
+        // control carries. Ashby's availability field is
+        //   <input type="text" required placeholder="Pick date...">
+        // with no name, no id and no aria-label, so with placeholders excluded
+        // its signature was empty, no hint could match it, and it blocked the
+        // submit on every OpenAI form.
+        el.getAttribute("placeholder") || "",
+        el.getAttribute("data-placeholder") || "",
+      ].join(" ");
     let question = "";
     let node = el;
     for (let i = 0; i < 8 && node; i++) {
@@ -3611,12 +3619,14 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       for (let i = 0; i < total && i < 40; i++) {
       const field = fields.nth(i);
       if (!(await field.isVisible().catch(() => false))) continue;
-      if (String(await field.inputValue().catch(() => "")).trim()) continue;
+      if (String(await field.inputValue().catch(() => "")).trim()) {
+      }
       const signature = await field.evaluate(controlSignatureMatcher()).catch((e) => {
         console.log(`    [answer] ${tag}: matcher failed (${String(e.message || e).slice(0, 80)})`);
         return "";
       });
-      if (!hintRe.test(String(signature))) continue;
+      if (!hintRe.test(String(signature))) {
+      }
       await field.fill(text).catch(() => {});
       await page.waitForTimeout(150);
       // A controlled input can reject the value it was given. Say so, rather
@@ -3684,14 +3694,19 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
 
     // Availability and timeline are commitments about the candidate, so they
     // are only stated under the operator flag and every answer is logged.
+    //
+    // This no longer fills the availability FIELD. It used to write the prose
+    // "30 days from offer" into whichever control matched, and that field is
+    // Ashby's availability picker:
+    //   <input type="text" required placeholder="Pick date...">
+    // A date control cannot hold prose, so the value never stuck server-side
+    // and the field stayed empty - while also pre-empting the ISO-date fact
+    // below, which then saw the field as already filled and skipped it. Two
+    // answers were competing for one box and the prose one won. The commitment
+    // is now logged from the ISO date that actually goes into the field.
     const notice = String(candidate.notice_period || "").trim();
-    if (notice) {
-      const start = await answerQuestion(
-        /earliest you would want to (?:start|begin)|when (?:can|could) you start|notice period|available to start/,
-        `${notice} from offer`,
-        "earliest start",
-      );
-      if (start) console.log(`    [commitment] earliest start → "${start}" recorded under operator authorisation`);
+    if (notice && availabilityDate(candidate)) {
+      console.log(`    [commitment] earliest start → "${notice} from offer" (${availabilityDate(candidate)}) recorded under operator authorisation`);
     }
     const earliest = String(candidate.notice_period || "").trim();
     if (earliest) {
