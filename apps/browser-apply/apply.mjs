@@ -1453,6 +1453,24 @@ function identityFacts(candidate, stated) {
       value: availabilityDate(candidate),
     },
     {
+      // Two phrasings reach this, and the second one was unhandled for 13
+      // submissions. The classic form asks "Are you subject to a non-compete,
+      // non-solicitation or non-disclosure agreement...?" but several boards
+      // ask it as "Are you bound by any agreements with a current or former
+      // employer that may restrict your ability to work for us?", which shares
+      // no keyword with the first. current_non_compete sat in profile.yml the
+      // whole time without a pattern to match, so the answer was never written.
+      // Left unset in the profile, the fact is dropped by the filter below and
+      // the question stays pending rather than being guessed at.
+      tag: "non-compete",
+      hint: /non[-\s]?compete|non[-\s]?solicitation|non[-\s]?disclosure|bound\s+by\s+any\s+agreements|restrict(?:ed|ing)?\s+(?:your\s+)?(?:ability|employment|work)|any\s+agreements?\s+with\s+a\s+(?:current|former|previous)/i,
+      value: stated?.current_non_compete,
+      // Asked once per form. Repeating the same legal assertion on a second
+      // matching control would be asserting it about a jurisdiction it was
+      // never stated for.
+      once: true,
+    },
+    {
       tag: "last job title",
       hint: /your\s+current\s+or\s+(?:more\s+recent|most\s+recent)\s+job\s+title|current\s+job\s+title|most\s+recent\s+(?:job\s+)?title|previous\s+job\s+title|last\s+job\s+title/i,
       value: stated?.current_job_title,
@@ -3000,22 +3018,70 @@ function controlSignatureMatcher() {
       ].join(" ");
     let question = "";
     let node = el;
+    // Clipped at a word boundary rather than mid-word. See the length rule below.
+    const LIMIT = 260;
+    const clipTail = (s) => {
+      if (!s || s.length <= LIMIT) return s;
+      const cut = s.slice(-LIMIT);
+      const sp = cut.indexOf(" ");
+      return (sp >= 0 ? cut.slice(sp + 1) : cut).trim();
+    };
     for (let i = 0; i < 8 && node; i++) {
       node = node.parentElement;
       if (!node) break;
       // `document` is absent when this runs outside a page, e.g. in a unit test.
       if (typeof document !== "undefined" && node === document.body) break;
+
+      // Where the control sits inside this ancestor decides which text is this
+      // field's prompt and which is a neighbouring question's. Mark the control,
+      // clone, then swap the marked copy for a delimiter BEFORE the widgets are
+      // stripped - the control is itself an input/select/textarea, so stripping
+      // first would take the marker with it and the split point would be lost.
+      const marker = "data-pulseops-sig";
+      el.setAttribute(marker, "1");
       const clone = node.cloneNode(true);
+      el.removeAttribute(marker);
+      // U+0001: a character that cannot occur in a form prompt, so the split is
+      // unambiguous. Written as an escape rather than a literal because the whole
+      // matcher is stringified and evaluated inside the page, and a literal
+      // control byte in the source can be mangled on the way through.
+      const delim = "\u0001";
+      const marked = typeof clone.querySelector === "function"
+        ? clone.querySelector("[" + marker + "]") : null;
+      // `document` is absent in a unit test, where there is no real tree to
+      // split. Without it the whole text is treated as the prompt, which is the
+      // previous behaviour rather than a wrong one.
+      const canSplit = Boolean(marked) && typeof document !== "undefined";
+      if (canSplit) marked.replaceWith(document.createTextNode(delim));
       clone.querySelectorAll(
-        "input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
+        "[" + marker + "], input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
         + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
       ).forEach((n) => n.remove());
       const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
+
       // The nearest wrappers of a dropdown hold only the input and its
       // "Select…" placeholder, so stripping them leaves nothing. Keep climbing
       // until an ancestor yields real prompt text — and stop there, because an
       // ancestor further up wraps the whole form and would match everything.
-      if (text && text.length <= 260) { question = text; break; }
+      if (!text) continue;
+
+      // Split at the control. The prompt sits next to its input, so the text
+      // immediately BEFORE it is this field's label and the text immediately
+      // after is its help text. Everything earlier is a previous question's.
+      const cut = canSplit ? text.indexOf(delim) : -1;
+      const before = cut >= 0 ? text.slice(0, cut).replace(/\s+/g, " ").trim() : text;
+      const after = cut >= 0 ? text.slice(cut + delim.length).replace(/\s+/g, " ").trim() : "";
+
+      // Previously anything over 260 chars was discarded and the walk continued,
+      // so on a dense form - where every ancestor holds several questions and so
+      // every ancestor is over the limit - the signature came back empty. That
+      // is what blocked Scale AI's authorisation question and `Location (City)*`
+      // on ~40 submissions: no signature, so no hint could ever match, so the
+      // field stayed empty and the submit was refused. Clipping the tail of the
+      // preceding text keeps the part ADJACENT to this control, which is the
+      // part that belongs to it, instead of discarding it entirely.
+      question = [clipTail(before), after.length <= 120 ? after : clipTail(after)].filter(Boolean).join(" ").trim();
+      if (question) break;
     }
     return `${own} ${question}`.trim().toLowerCase();
   };

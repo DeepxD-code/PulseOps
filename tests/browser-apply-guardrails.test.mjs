@@ -621,6 +621,32 @@ test("plain identity facts are answered from the profile, absent facts are not i
     "Software Trainee Intern",
   );
 
+  // The non-compete answer has to match BOTH phrasings boards use. The classic
+  // form and the "bound by any agreements with a current or former employer"
+  // form share no keyword, and only the first was handled - which left 13
+  // submissions blocked on a question the profile already had the answer to.
+  const nonCompete = identityFacts({}, { current_non_compete: "No" })
+    .find((f) => f.tag === "non-compete");
+  assert.ok(nonCompete, "current_non_compete must produce an answerable fact");
+  assert.equal(nonCompete.value, "No");
+  // Asked once per form: a second match would assert the same legal answer
+  // about a jurisdiction it was never stated for.
+  assert.equal(nonCompete.once, true);
+  const phrasings = [
+    "are you subject to a non-compete, non-solicitation or non-disclosure agreement?",
+    "are you bound by any agreements with a current or former employer that may restrict your ability to work for us?",
+    "do you have any non-compete obligations?",
+    "are you subject to any agreements that restrict your employment?",
+  ];
+  for (const p of phrasings) {
+    assert.ok(nonCompete.hint.test(p), `non-compete hint must match: ${p}`);
+  }
+  // A question that is not about restrictions must not be answered with this.
+  assert.equal(nonCompete.hint.test("what is your expected salary?"), false);
+  // Unset in the profile means no answer is offered at all, so the question
+  // stays pending rather than being guessed at.
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "non-compete"), false);
+
   // The hints must match the labels boards actually use. Match against the fully
   // populated profile so every hint is present to be exercised at all.
   const withEmployer = rich;
@@ -1040,10 +1066,17 @@ test("a control's question text is its own prompt, never the whole form", () => 
   const mkNode = (text, children = [], stripped = text) => ({
     textContent: text,
     getAttribute: () => "",
+    // The matcher marks the control before cloning so it can find where the
+    // control sits inside the ancestor's text. A stub without these throws.
+    setAttribute() {},
+    removeAttribute() {},
     parentElement: null,
     cloneNode() {
       return {
         textContent: stripped,
+        // No real tree here, so the split is unavailable and the whole text is
+        // treated as the prompt - which is what the matcher falls back to.
+        querySelector: () => null,
         querySelectorAll: () => children.map((c) => ({ remove() {} })),
       };
     },
@@ -1063,11 +1096,26 @@ test("a control's question text is its own prompt, never the whole form", () => 
   assert.doesNotMatch(sig, /anthropic/);
   assert.doesNotMatch(sig, /country/);
 
-  // When no ancestor is small enough to be a question, there is nothing to
-  // match on — returning "" keeps the caller from matching unrelated text.
-  const huge = mkNode("x".repeat(400), []);
-  huge.parentElement = null;
-  assert.equal(signature(huge), "");
+  // An ancestor whose text exceeds the limit used to be discarded outright and
+  // the walk continued, so on a dense form - where every ancestor holds several
+  // questions and so every one of them is over the limit - the signature came
+  // back empty. That is what blocked Scale AI's authorisation question and
+  // `Location (City)*`: empty signature, no hint could match, field left blank,
+  // submit refused. The text adjacent to the control must survive instead.
+  const denseControl = mkNode("", []);
+  const denseWrapper = mkNode("Are you legally authorised to work in the country where this role is based? ".repeat(4), [denseControl]);
+  denseControl.parentElement = denseWrapper;
+  denseWrapper.parentElement = null;
+  const denseSig = signature(denseControl);
+  assert.notEqual(denseSig, "", "an over-long ancestor must still yield a matchable signature");
+  assert.match(denseSig, /legally authorised/);
+  // Clipped, not unbounded: the signature has to stay small enough to compare.
+  assert.ok(denseSig.length <= 300, `signature should stay bounded, got ${denseSig.length}`);
+
+  // A control with no ancestor at all still has no prompt to offer.
+  const orphan = mkNode("", []);
+  orphan.parentElement = null;
+  assert.equal(signature(orphan), "");
 
   // The control's own attributes are always part of the signature.
   const named = mkNode("Select...", []);
