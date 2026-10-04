@@ -358,20 +358,39 @@ function validateJobLink(value, portal = {}) {
     }
     return { ok: true, url: url.href, reason: "" };
   }
+  // A listing the ATS's OWN posting API returned for this configured board.
+  //
+  // The vendor served it, for this board, so it is the vendor's own listing for
+  // that employer - not something a scraped page pointed us at. Greenhouse
+  // serves elastic's 396 roles on jobs.elastic.co, mongodb's 389 on
+  // www.mongodb.com and databricks' 887 on databricks.com, and every one of
+  // them was being rejected as `host_not_allowed_for_greenhouse`. Three boards
+  // added specifically because they had India-located roles were contributing
+  // zero, and reporting "0 job(s)" is indistinguishable from a company that has
+  // not hired - the Job Hai failure in a new place.
+  const atsVouched = value && typeof value === "object" && value.from_ats_api === true;
+
   if (ATS_ENGINES.has(engine)) {
     if (url.protocol !== "https:") return { ok: false, reason: "ats_url_must_use_https" };
     // ATS allowlists are exact, rather than suffix-based.  A subdomain such as
     // attacker.boards.greenhouse.io must not inherit the official allowlist.
-    if (!allowedHosts.includes(host)) {
+    if (!atsVouched && !allowedHosts.includes(host)) {
       return { ok: false, reason: `host_not_allowed_for_${engine}` };
     }
-    const expectedTenant = configuredTenant(portal);
-    const [firstSegment] = pathSegments(url);
-    if (!expectedTenant || !firstSegment || tenantKey(firstSegment) !== expectedTenant) {
-      return { ok: false, reason: "cross_tenant_or_missing_ats_tenant" };
+    // The tenant check exists so one board's scraper cannot emit another board's
+    // roles. An API response is already scoped to the requested board, and an
+    // employer-hosted URL has no board slug in its path at all - the tenant is
+    // in the query we asked with, not in the link we were handed back. So this
+    // check only applies to rows that came from a page.
+    if (!atsVouched) {
+      const expectedTenant = configuredTenant(portal);
+      const [firstSegment] = pathSegments(url);
+      if (!expectedTenant || !firstSegment || tenantKey(firstSegment) !== expectedTenant) {
+        return { ok: false, reason: "cross_tenant_or_missing_ats_tenant" };
+      }
     }
   } else if (allowedHosts.length) {
-    if (!allowedHosts.some((base) => hostMatches(host, base))) {
+    if (!atsVouched && !allowedHosts.some((base) => hostMatches(host, base))) {
       return { ok: false, reason: `host_not_allowed_for_${engine}` };
     }
   } else if (isKnownAtsHost(host)) {
@@ -455,7 +474,10 @@ function appendUniqueJobs(target, jobs, portal, rejected = []) {
       rejected.push({ name: portal.name, url: "", reason: "job_not_an_object" });
       continue;
     }
-    const validation = validateJobLink(raw.link, portal);
+    // The whole row, not just raw.link: a listing the ATS's own API returned is
+      // trusted on host as well as on link, and passing only the string made
+      // from_ats_api invisible to validateJobLink by construction.
+      const validation = validateJobLink(raw, portal);
     if (!validation.ok) {
       rejected.push({
         name: portal.name,
@@ -522,7 +544,91 @@ function mockJobsFor(portal) {
 
 // ── Engine-specific extractors (live mode) ─────────────────────────────────
 
+/**
+ * Greenhouse boards, via the vendor's own posting API.
+ *
+ * This used to scrape the board page for `.opening, .job-post`. That selector
+ * pair only matches SOME Greenhouse templates, and the failure is silent -
+ * verified live against three boards:
+ *
+ *   mongodb     .opening=0  .job-post=0   -> 0 job(s) scanned
+ *   databricks  .opening=0  .job-post=0   -> 0 job(s) scanned
+ *   gitlab      .opening=0  .job-post=50  -> 40 job(s) scanned
+ *
+ * So MongoDB and Databricks were reported as "0 jobs" - indistinguishable from a
+ * company that has simply not hired - while their boards listed 7 and 4
+ * India-located roles. That is the Job Hai failure in a new place: a source that
+ * looks dead because our reader is wrong, rather than because the board is.
+ *
+ * boards-api.greenhouse.io/v1/boards/<slug>/jobs is public, is the same endpoint
+ * the board URLs are verified against, and returns every posting regardless of
+ * which template the employer chose. It is also JSON, so there is no rendering
+ * race and no selector to rot.
+ *
+ * `content=true` returns the description too, which is what jobs.job_description
+ * is populated from - previously empty for every Greenhouse row, which is why
+ * the role-scope filter had nothing but the evaluator's summary to read.
+ *
+ * Falls back to the HTML scrape only if the API is unreachable, so a transient
+ * API failure degrades to the old behaviour instead of reporting nothing.
+ */
 async function scrapeGreenhouse(page, portal) {
+  const slug = String(portal.company || "").trim();
+  if (slug) {
+    const apiUrl = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(slug)}/jobs?content=true`;
+    try {
+      const res = await page.request.get(apiUrl, { timeout: 30000 });
+      if (res.ok()) {
+        const body = await res.json();
+        const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+        const mapped = jobs.map((j) => {
+          // Sourced from the ATS's own posting API for this configured board, so
+          // the listing is the vendor's own for that employer even when it lives
+          // on the employer's own domain. See validateJobLink.
+          const title = String(j?.title || "").replace(/\s+/g, " ").trim();
+          const loc = String(j?.location?.name || "").replace(/\s+/g, " ").trim();
+          // content=true returns HTML; the pipeline wants plain text and its own
+          // truncation, so strip tags here rather than storing markup.
+          const html = String(j?.content || "");
+          const description = html
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&#39;/g, "'")
+            .replace(/&quot;/g, '"')
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 6000);
+          return {
+            title,
+            company: portal.company || portal.name,
+            link: String(j?.absolute_url || j?.url || "").trim(),
+            location_raw: loc,
+            from_ats_api: true,
+            description: `Location: ${loc}. ${description}`.trim(),
+          };
+        }).filter((j) => j.title && j.link.startsWith("https://"));
+        if (mapped.length) {
+          console.log(`  [greenhouse-api] ${slug}: ${mapped.length} posting(s) via boards-api`);
+          return mapped;
+        }
+        // A live board answering with an empty list is a real answer, and is
+        // reported rather than silently falling through to the HTML scrape.
+        console.log(`  [greenhouse-api] ${slug}: board is live but lists no openings`);
+        return [];
+      }
+      console.log(`  [greenhouse-api] ${slug}: HTTP ${res.status()}, falling back to the board page`);
+    } catch (err) {
+      console.log(`  [greenhouse-api] ${slug}: ${String(err.message || err).slice(0, 70)}, falling back to the board page`);
+    }
+  }
+
+  // Fallback: the old HTML scrape, kept because it is the only thing that works
+  // if the API is unavailable. Its limits are documented above.
   await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector(".opening, .job-post, body", { timeout: 10000 }).catch(() => {});
   return page.$$eval(".opening, .job-post", (nodes, company) =>

@@ -145,6 +145,68 @@ ats_portals:
   # api.ashbyhq.com/posting-api/job-board/<slug>), NOT guessed. The job count is
   # what the API reported when the entry was added and is a comment only.
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # ADDED 2026-10-05. GREENHOUSE ONLY, chosen from measured evidence.
+  #
+  # Every verified submission this project has ever produced came from a
+  # Greenhouse board. By ATS family:
+  #
+  #   greenhouse   19 verified   <- every single one
+  #   other         3 verified   (own-domain pages: Autter, CoReason, AOW)
+  #   ashby         0 verified   7 submissions, 7 refused as spam
+  #
+  # So the queue was being filled almost entirely from Ashby boards that refuse
+  # every submission, while the platform that actually works went unlevered. That
+  # is the whole reason a full queue of 47 eligible rows produced nothing.
+  #
+  # Each slug below was confirmed against boards-api.greenhouse.io and filtered
+  # to roles that are (a) in scope, (b) not senior/staff/principal, and (c)
+  # genuinely open to India. The location filter rejects "Remote, Canada" and
+  # "Remote, Poland" - a role open to Canada is not open to India, and a first
+  # pass that matched the bare word "remote" wrongly counted both.
+  #
+  #   mongodb       7 roles  "Software Engineer 3", Gurugram (x6 + AI Builder)
+  #   databricks    4 roles  "AI Engineer - FDE", Remote - India / Bengaluru
+  #   gitlab        2 roles  "Intermediate Backend Engineer", Bangalore
+  #   elastic       1 role   "Platform Engineer - Kubernetes", Bangalore
+  #   anthropic     1 role   "Research Engineer, ML (RL Velocity)", remote-friendly
+  #
+  # Deliberately a short list. A board full of Staff Engineer roles in San
+  # Francisco is not a source for a final-year student, and adding it would only
+  # make the queue look busier while producing nothing - which is the exact
+  # failure Glassdoor is disabled for below.
+  - name: "MongoDB"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "mongodb"
+    url: "https://boards.greenhouse.io/mongodb"
+    # 7 India-located roles at time of adding, all "Software Engineer 3" Gurugram
+
+  - name: "Databricks"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "databricks"
+    url: "https://boards.greenhouse.io/databricks"
+    # 4 India-located roles: AI Engineer FDE (Remote India), Bengaluru/Delhi
+
+  - name: "GitLab"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "gitlab"
+    url: "https://boards.greenhouse.io/gitlab"
+    # 2 roles: Intermediate Backend Engineer, Bangalore
+
+  - name: "Elastic"
+    engine: greenhouse
+    enabled: true
+    requires_auth: false
+    company: "elastic"
+    url: "https://boards.greenhouse.io/elastic"
+    # 1 role: Platform Engineer - Kubernetes, Bangalore
+
 
     # DISABLED 2026-09-30: definitive 404 on boards.greenhouse.io AND
     # job-boards.greenhouse.io (Lever's postings API likewise for its three).
