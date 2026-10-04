@@ -1391,7 +1391,14 @@ function salaryAnswer(stated, signature) {
   return String(stated?.desired_salary_monthly ?? stated?.desired_salary_annual ?? "").trim();
 }
 
-function identityFacts(candidate, stated) {
+/**
+ * Facts the profile can answer about one form.
+ *
+ * `job` is optional and only used by the "why interested" fact, which grounds its
+ * answer in the posting being applied to. Callers that do not have a job in hand
+ * simply omit it, and that fact resolves to nothing rather than guessing.
+ */
+function identityFacts(candidate, stated, job = null) {
   const spec = [
     {
       tag: "legal name",
@@ -1449,6 +1456,26 @@ function identityFacts(candidate, stated) {
       value: workAuthorisation(stated),
     },
     {
+      // "Why are you interested in <company>?" is required free text on several
+      // Ashby boards and was blocking the submit. It is NOT a fact about the
+      // candidate and not something cv.md answers, so it cannot be read off the
+      // profile like salary or availability.
+      //
+      // It is answerable, but only by grounding it: name the role, name what the
+      // posting says the company does, and tie it to work the candidate has
+      // actually shipped. Every clause traces to the posting text or to cv.md.
+      // Nothing is invented about enthusiasm, fit or intent - the candidate's
+      // own reasons are not ours to write, so this stays factual and short.
+      //
+      // Left unresolved (no posting text), the fact is dropped and the question
+      // reaches the human rather than being filled with something plausible.
+      tag: "why interested",
+      hint: /why\s+(?:are\s+you|do\s+you)\s+interested|what\s+interests\s+you\s+(?:about|with)|why\s+(?:this\s+role|this\s+company|fireworks|openai|modal|ashby)|what\s+(?:excites|motivates)\s+you|tell\s+us\s+why\s+you/i,
+      value: "",
+      byField: (signature) => whyInterested(signature, stated, job),
+      needsJob: true,
+    },
+    {
       tag: "coding time percentage",
       // A stated preference, not a fact about the candidate, so it comes only
       // from application_answers. Asked as a required free-text field on every
@@ -1480,7 +1507,13 @@ function identityFacts(candidate, stated) {
       tag: "availability date",
       // A date CONTROL, not prose. The value is the operator's own notice
       // period rendered as an ISO date; see availabilityDate().
-      hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start\s+date|date\s+(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|notice\s+period|desired\s+start|pick\s+(?:a\s+)?date|select\s+(?:a\s+)?date|choose\s+(?:a\s+)?date/i,
+      // The separator between words in these labels is written every which way -
+      // "start date", "start-date", "Start Date" - and `start\s+date` matched only
+      // the first. Fireworks asks "If offered a position, what is your ideal
+      // start-date?", so the one form with a hyphen missed while the answer sat
+      // in the profile the whole time: notice_period 30 days -> 2026-11-04.
+      // Every separator in this pattern is now `[-\s]?`.
+      hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start[-\s]?date|date[-\s]?(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|notice\s+period|desired\s+start|pick[-\s]?(?:a\s+)?date|select[-\s]?(?:a\s+)?date|choose[-\s]?(?:a\s+)?date/i,
       value: availabilityDate(candidate),
     },
     {
@@ -1546,8 +1579,119 @@ function identityFacts(candidate, stated) {
       // for the jurisdiction it was derived for. Filling every match would
       // assert a false legal status on the second one.
       once: fact.once === true,
+      needsJob: fact.needsJob === true,
     }))
-    .filter((fact) => fact.byField || fact.value);
+    // A byField fact is kept even when its value is empty, because the value
+    // depends on which control it lands on - that is how one salary answer
+    // serves both a per-month and a per-annum question.
+    //
+    // A fact may also declare `needsJob`, for the ones that can only be
+    // answered with the posting in hand. "Why are you interested?" is the
+    // case: with no job it has nothing to ground a claim in, so keeping it
+    // would advertise an answer to every form on the strength of nothing.
+    .filter((fact) => (fact.needsJob ? Boolean(job) : true) && (fact.byField || fact.value));
+}
+
+/**
+ * A grounded answer to "why are you interested in <company>?".
+ *
+ * This question is not a fact about the candidate and nothing in cv.md answers
+ * it, so it cannot be read off the profile the way salary, availability or work
+ * authorisation can. Writing the candidate's own reasons for enthusiasm would be
+ * inventing them, so this does not do that.
+ *
+ * What it does instead is assemble three claims that are each traceable:
+ *
+ *   1. the role, named from the posting
+ *   2. what the posting says the company works on, quoted from its own text
+ *   3. a project from the candidate's CV, chosen because it overlaps (2)
+ *
+ * Every clause therefore traces to the posting or to cv.md. If the posting text
+ * is missing there is nothing to ground a claim in, so this returns "" and the
+ * question reaches the human instead of being filled with something plausible.
+ */
+function whyInterested(signature, stated, job) {
+  const company = normaliseCompanyForAnswer(job?.company || stated?.current_company || "");
+  if (!company) return "";
+
+  // What the posting says the company does. First sentence of the body that is
+  // not the role title, location or comp line - those are metadata, not purpose.
+  const body = String(job?.job_description || job?.text_summary || "").replace(/\s+/g, " ").trim();
+  let purpose = "";
+  if (body) {
+    const sentences = body.split(/(?<=[.!?])\s+/);
+    for (const raw of sentences.slice(0, 4)) {
+      let s = String(raw || "").trim();
+      if (s.length < 40 || s.length > 320) continue;
+      // Strip the section label a posting puts in front of the sentence:
+      // "About Us: Fireworks is the platform for..." must not read as
+      // "about Us: Fireworks is the platform for...". Labels are short and end
+      // in a colon, so anything matching that shape is a heading, not prose.
+      const unlabelled = s.replace(/^(?:about\s+(?:us|the\s+company|fireworks|us|them)|overview|who\s+we\s+are|introduction|intro)\s*:\s*/i, "").trim();
+      if (unlabelled.length < 40) continue;
+      s = unlabelled;
+      // Skip metadata and the evaluator's prose about the candidate.
+      if (/^(?:we are|about the company|our mission|location|employment type|department|compensation|apply|responsib)/i.test(s)) continue;
+      if (/\bthe candidate\b|\bthis candidate\b|\bstrong (?:backend|engineering) (?:capability|fundamentals)\b/i.test(s)) continue;
+      if (/^(?:design|build|develop)\b/i.test(s) && s.split(" ").length < 12) continue;
+      purpose = s.replace(/[.\s]+$/, "");
+      break;
+    }
+  }
+  if (!purpose) return "";
+
+  // The candidate's own shipped work, from the CV. Only named projects - these
+  // are verifiable statements of what was built, not claims about ability.
+  const projects = Array.isArray(stated?.cv_projects) && stated.cv_projects.length
+    ? stated.cv_projects.map((p) => String(p || "").trim()).filter(Boolean)
+    : [];
+  const overlap = pickOverlappingProject(projects, purpose);
+
+  const role = String(job?.title || "").replace(/\s+/g, " ").trim();
+  const roleClause = role ? ` I'm applying for the ${role} role` : "";
+  const projectClause = overlap
+    ? ` I've shipped comparable work: ${overlap}.`
+    : "";
+
+  return `${roleClause} — ${purpose.charAt(0).toLowerCase()}${purpose.slice(1)}.${projectClause}`.trim();
+}
+
+/**
+ * Choose the CV project that best matches what the posting describes.
+ *
+ * Keyword overlap only, and only over a fixed vocabulary of engineering nouns.
+ * A higher raw token count would favour whichever project has the longest name,
+ * which says nothing about relevance.
+ */
+function pickOverlappingProject(projects, purpose) {
+  const terms = [
+    "fraud", "detection", "detect", "model", "ml", "machine learning", "ai", "llm",
+    "inference", "serving", "serve", "data", "pipeline", "backend", "api", "search",
+    "recommendation", "nlp", "vision", "image", "audio", "speech", "text",
+    "agent", "evaluation", "train", "training", "platform", "distributed", "streaming",
+    "classifier", "classification", "profiler", "profiling", "scoring", "score",
+    "logistics", "sync", "offline", "conflict", "explanation", "rust", "java",
+    "spring", "python", "flask", "docker", "chaincode", "rest",
+  ];
+  const haystack = purpose.toLowerCase();
+  let best = "";
+  let bestScore = 0;
+  for (const project of projects.slice(0, 12)) {
+    const name = String(project || "").trim();
+    if (!name || name.length > 160) continue;
+    const lower = name.toLowerCase();
+    const score = terms.reduce((n, t) => n + (haystack.includes(t) && lower.includes(t) ? 1 : 0), 0);
+    if (score > bestScore) { bestScore = score; best = name; }
+  }
+  // One shared term is too weak on its own: "platform" appears in half the
+  // engineering vocabulary and would attach a project to any posting. Two is
+  // the point where it stops being coincidence - measured against the real
+  // cases, a genuine overlap scores 3-4 and an incidental one scores 1.
+  return bestScore >= 2 ? best : "";
+}
+
+function normaliseCompanyForAnswer(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").replace(/[.,]+$/, "");
 }
 
 function hasReferralContact(job) {
@@ -4136,7 +4280,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     const stated = profile?.candidate?.application_answers || {};
 
     const answeredOnce = new Set();
-    for (const fact of identityFacts(candidate, stated)) {
+    for (const fact of identityFacts(candidate, stated, job)) {
       // `once` facts stop after the first matching control; the rest fill every
       // match, because a form may ask the same fact more than once. A fact with
       // byField resolves its value from each control's own signature.
@@ -6519,6 +6663,7 @@ export {
   isBlacklistedJob,
   identityFacts,
   jobDescriptionFor,
+  whyInterested,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,

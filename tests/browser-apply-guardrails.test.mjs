@@ -27,6 +27,7 @@ import {
   isBlacklistedJob,
   identityFacts,
   jobDescriptionFor,
+  whyInterested,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,
@@ -1185,6 +1186,70 @@ test("a control's question text is its own prompt, never the whole form", () => 
   const labelSig = signature(labelControl);
   assert.match(labelSig, /are you currently bound by any agreements/);
   assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
+
+test("why-interested is grounded in the posting, or left to the human", () => {
+  // "Why are you interested in <company>?" is required free text on several Ashby
+  // boards and was blocking the submit. It is not a fact about the candidate and
+  // nothing in cv.md answers it, so it cannot be read off the profile like salary
+  // or availability can. Writing the candidate's own reasons for enthusiasm would
+  // be inventing them, so this assembles only traceable claims instead.
+  const projects = [
+    "AnnaSuraksha, a PDS fraud-detection platform in Java and Spring Boot with a 16-signal scoring engine and a Groq LLM explanation layer",
+    "IntelliX, an ML code-performance profiler in Python and scikit-learn using four classifiers and AST-based multi-language analysis",
+  ];
+  const stated = { cv_projects: projects };
+
+  // A real overlap attaches the matching project, and the claim is traceable to
+  // the posting's own words.
+  const fraud = whyInterested("why are you interested?", stated, {
+    company: "Acme", title: "ML Engineer",
+    job_description: "Build machine learning models to detect fraud in financial transactions at scale",
+  });
+  assert.match(fraud, /ML Engineer/);
+  assert.match(fraud, /detect fraud/);
+  assert.match(fraud, /AnnaSuraksha/);
+
+  // Nothing to ground in -> silence, so the question reaches the human rather
+  // than being filled with something plausible.
+  assert.equal(whyInterested("why?", stated, {
+    company: "Acme", title: "ML Engineer", job_description: "",
+  }), "");
+  assert.equal(whyInterested("why?", stated, {
+    company: "Acme", title: "ML Engineer", job_description: "x",
+  }), "");
+
+  // The evaluator's prose ABOUT THE CANDIDATE is not a statement of what the
+  // company does, so it must not be mined for one.
+  assert.equal(whyInterested("why?", stated, {
+    company: "Acme", title: "ML Engineer",
+    job_description: "The candidate brings strong backend engineering experience with Node.js and TypeScript.",
+  }), "");
+
+  // A weak single-term overlap is a coincidence. "platform" appears in half the
+  // engineering vocabulary, so one shared term must not attach a project.
+  const weak = whyInterested("why?", stated, {
+    company: "Acme", title: "Engineer",
+    job_description: "Run onsite logistics operations for warehouse staffing on our own platform",
+  });
+  assert.ok(!weak.includes("AnnaSuraksha"), "a single shared term must not attach a project");
+
+  // No company named -> nothing to answer.
+  assert.equal(whyInterested("why?", stated, { title: "ML Engineer", job_description: "x" }), "");
+
+  // The hint must match how boards actually word it, and not a salary question.
+  const facts = identityFacts({}, stated, { company: "Acme", title: "ML Engineer", job_description: "x" });
+  const wi = facts.find((f) => f.tag === "why interested");
+  assert.ok(wi, "the fact must exist so its hint can be matched");
+  for (const q of [
+    "Why are you interested in Fireworks AI?",
+    "why are you interested in this role?",
+    "What interests you about this company?",
+    "Tell us why you want to work here",
+  ]) {
+    assert.ok(wi.hint.test(q), `why-interested hint must match: ${q}`);
+  }
+  assert.equal(wi.hint.test("what is your expected salary?"), false);
+});
 
 test("role scope is judged on the posting, never on the evaluator's notes", () => {
   // jobs.text_summary is `eval_result["text_summary"]` - the evaluator's prose
