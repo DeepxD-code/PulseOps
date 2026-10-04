@@ -28,6 +28,7 @@ import {
   identityFacts,
   portalAssetHostAllowed,
   availabilityDate,
+  salaryAnswer,
   finalGuardAction,
   isEligibleJob,
   isSimulationJob,
@@ -495,6 +496,27 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
   assert.equal(isEligibleJob(eligible({ source: "sim:Mock" }), { explicit: true }), false);
 });
 
+  test("salary is answered in the unit the question asked for", () => {
+  const stated = {
+  desired_salary_monthly: "INR 35,000 - 45,000 per month",
+  desired_salary_annual: "INR 8,40,000 - 10,80,000 per annum",
+  };
+  // Quoting the wrong unit is a wrong number, not a format mismatch.
+  assert.equal(salaryAnswer(stated, "desired_salary desired salary range (per month)"), "INR 35,000 - 45,000 per month");
+  assert.equal(salaryAnswer(stated, "what is your expected compensation? per annum"), "INR 8,40,000 - 10,80,000 per annum");
+  assert.equal(salaryAnswer(stated, "expected salary lpa"), "INR 8,40,000 - 10,80,000 per annum");
+  assert.equal(salaryAnswer(stated, "desired monthly salary"), "INR 35,000 - 45,000 per month");
+  // No unit stated: the monthly form, which is the one the operator's floor
+  // was given in, and it carries its own unit so it cannot be misread.
+  assert.equal(salaryAnswer(stated, "what are you looking for?"), "INR 35,000 - 45,000 per month");
+  // Nothing configured: no number invented.
+  assert.equal(salaryAnswer({}, "desired salary"), "");
+  // The fact is exposed with a per-control resolver.
+  const fact = identityFacts({}, stated).find((f) => f.tag === "desired salary");
+  assert.equal(typeof fact.byField, "function");
+  assert.equal(fact.byField("desired salary per month"), "INR 35,000 - 45,000 per month");
+});
+
 test("plain identity facts are answered from the profile, absent facts are not invented", () => {
   const candidate = { name: "AVRADEEP MAJUMDER", phone: "6289050278" };
   const facts = identityFacts(candidate, {});
@@ -507,8 +529,12 @@ test("plain identity facts are answered from the profile, absent facts are not i
   assert.equal(identityFacts(candidate, { current_company: "Acme" })
     .find((f) => f.tag === "current company").value, "Acme");
 
-  // A missing profile fact yields no entry at all, so the field is left for the human.
-  assert.deepEqual(identityFacts({ phone: "6289050278" }, {}).map((f) => f.tag), ["phone number", "how you heard"]);
+
+// A missing profile fact yields no entry at all, so the field is left for the human.
+  // The salary fact is present regardless because it resolves per control from
+  // the question's own unit, and returns "" when the operator set nothing.
+  assert.deepEqual(identityFacts({ phone: "6289050278" }, {}).map((f) => f.tag),
+    ["phone number", "desired salary", "how you heard"]);
 
   // Facts derived from the profile rather than restated by hand.
   const rich = identityFacts(
@@ -525,7 +551,7 @@ test("plain identity facts are answered from the profile, absent facts are not i
   const richByTag = Object.fromEntries(rich.map((f) => [f.tag, f.value]));
   assert.equal(richByTag["city"], "Greater Noida, Uttar Pradesh");
   assert.equal(richByTag["years of experience"], "2 years");
-  assert.equal(richByTag["desired salary"], "4-5 LPA");
+  assert.equal(richByTag["desired salary"], "", "salary is resolved per control, so the fixed value stays empty");
   // Sponsorship required => not authorised. Never asserted when undeclared.
   assert.equal(richByTag["work authorisation"], "No");
   assert.equal(identityFacts({}, {}).some((f) => f.tag === "work authorisation"), false);

@@ -1340,6 +1340,26 @@ function availabilityDate(candidate, from = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/**
+ * Pick the salary rendering that matches the question's unit.
+ *
+ * The operator's floor is >= 35,000 INR per month. Quoting the wrong unit is a
+ * wrong number rather than a format mismatch - answering "INR 8,40,000" to a
+ * per-month question is off by two orders of magnitude - so the unit is read
+ * from the question itself.
+ */
+function salaryAnswer(stated, signature) {
+  const sig = String(signature || "");
+  const perMonth = /\b(?:per|a|\/)\s*month|monthly|month\s*[-–]?\s*\??\s*$/i.test(sig)
+    || /\bmonth\b/i.test(sig);
+  const perAnnum = /\b(?:per|a|\/)\s*(?:annum|year)|annually|annual|lpa|lakh\s*per\s*annum|\bctc\b/i.test(sig);
+  if (perMonth && !perAnnum) return String(stated?.desired_salary_monthly ?? "").trim();
+  if (perAnnum && !perMonth) return String(stated?.desired_salary_annual ?? "").trim();
+  // Neither unit stated: offer the monthly form, which is the one the floor
+  // was given in, and say the unit so it cannot be misread.
+  return String(stated?.desired_salary_monthly ?? stated?.desired_salary_annual ?? "").trim();
+}
+
 function identityFacts(candidate, stated) {
   const spec = [
     {
@@ -1398,9 +1418,24 @@ function identityFacts(candidate, stated) {
       value: workAuthorisation(stated),
     },
     {
+      tag: "coding time percentage",
+      // A stated preference, not a fact about the candidate, so it comes only
+      // from application_answers. Asked as a required free-text field on every
+      // OpenAI/Ashby backend role.
+      hint: /what\s+percentage\s+of\s+time|percentage\s+of\s+(?:your\s+)?time|how\s+much\s+time\s+do\s+you\s+(?:spend|enjoy)/i,
+      value: stated?.coding_time_percentage,
+    },
+    {
       tag: "desired salary",
-      hint: /desired\s+salary|salary\s+(?:range|expectation)|expected\s+(?:salary|compensation)|compensation\s+expectation/i,
-      value: candidate?.expected_salary,
+      // Two renderings because boards ask per month and per annum, and quoting
+      // the wrong unit is a wrong number rather than a format mismatch. The
+      // operator's floor is >= 35,000 INR/month; both forms sit at or above it.
+      // Falls back to expected_salary only when neither stated form exists.
+      hint: /desired\s+salary|salary\s+(?:range|expectation)|expected\s+(?:salary|compensation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)/i,
+      // Resolved per control: a board asking "per month" and one asking
+      // "per annum" need different numbers, and the same profile cannot
+      // answer both with one string.
+      byField: (signature) => salaryAnswer(stated, signature),
     },
     {
       tag: "how you heard",
@@ -1427,6 +1462,9 @@ function identityFacts(candidate, stated) {
     .map((fact) => ({
       tag: fact.tag,
       hint: fact.hint,
+      // A fact may resolve per control rather than once, when the right answer
+      // depends on what the question asked (salary per month vs per annum).
+      byField: typeof fact.byField === "function" ? fact.byField : null,
       value: String(fact.value ?? "").trim(),
       // "once" facts are only ever written to the first matching control.
       // Work authorisation is the case that matters: a form can ask about the
@@ -1436,7 +1474,7 @@ function identityFacts(candidate, stated) {
       // assert a false legal status on the second one.
       once: fact.once === true,
     }))
-    .filter((fact) => fact.value);
+    .filter((fact) => fact.byField || fact.value);
 }
 
 function hasReferralContact(job) {
@@ -3598,9 +3636,11 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
    * the way combo() matches a dropdown. Never invents a value: callers pass
    * only facts already held in the profile, and skip when the fact is absent.
    */
-    const answerQuestion = async (hintRe, value, tag, once = false) => {
-      const text = String(value ?? "").trim();
-      if (!text) return null;
+    const answerQuestion = async (hintRe, value, tag, options = {}) => {
+      const once = options?.once === true;
+      const resolve = typeof options?.resolve === "function" ? options.resolve : null;
+      const fallback = String(value ?? "").trim();
+      if (!fallback && !resolve) return null;
       // input[type="text"] is an attribute selector and misses every input
       // that relies on the HTML default, which is most of them.
       //
@@ -3617,6 +3657,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       );
       const total = await fields.count().catch(() => 0);
       let filled = 0;
+      let firstLanded = "";
       for (let i = 0; i < total && i < 40; i++) {
         const field = fields.nth(i);
         if (!(await field.isVisible().catch(() => false))) continue;
@@ -3627,6 +3668,11 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           return "";
         });
         if (!hintRe.test(String(signature))) continue;
+        // A per-control fact resolves its value from THIS control's own text,
+        // which is how one salary answer serves both a per-month and a
+        // per-annum question.
+        const text = resolve ? String(resolve(signature) ?? "").trim() : fallback;
+        if (!text) continue;
         await field.fill(text).catch(() => {});
         await page.waitForTimeout(150);
         // A controlled input can reject the value it was given. Say so, rather
@@ -3638,6 +3684,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         }
         console.log(`    [fill] ${tag} -> "${text.slice(0, 40)}"`);
         filled += 1;
+        firstLanded = firstLanded || text;
         // Keep going instead of returning on the first match: a form can ask
         // the same fact twice - PlanetScale asks both "Where are you located?"
         // and "Where are you based?" - and stopping after the first left the
@@ -3646,7 +3693,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         // the work-authorisation answer scoped to one jurisdiction.
         if (once) return text;
       }
-      if (filled) return text;
+      if (filled) return firstLanded;
     console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
@@ -3735,8 +3782,12 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     const answeredOnce = new Set();
     for (const fact of identityFacts(candidate, stated)) {
       // `once` facts stop after the first matching control; the rest fill every
-      // match, because a form may ask the same fact more than once.
-      await answerQuestion(fact.hint, fact.value, fact.tag, fact.once === true);
+      // match, because a form may ask the same fact more than once. A fact with
+      // byField resolves its value from each control's own signature.
+      await answerQuestion(fact.hint, fact.value, fact.tag, {
+        once: fact.once === true,
+        resolve: fact.byField,
+      });
     }
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously|with|at)|previous(?:ly)? interview|applied (?:here|before|previously)|have\s+you\s+(?:ever\s+)?(?:interviewed|spoken|applied)|in\s+the\s+past/i, tag: "prior interview history" },
@@ -5992,6 +6043,7 @@ export {
   identityFacts,
   portalAssetHostAllowed,
   availabilityDate,
+  salaryAnswer,
   finalGuardAction,
   isCurrentPageTrusted,
   isEligibleJob,
