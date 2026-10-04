@@ -314,6 +314,27 @@ function descriptionIsFrontendOnly(body) {
   return stacks.size >= 3;
 }
 
+/**
+ * The text a role-scope decision should be made on.
+ *
+ * The posting's own description, never the evaluator's summary. `text_summary`
+ * is `eval_result["text_summary"]` - prose written ABOUT THE CANDIDATE - and it
+ * was being fed to the scope filter as if it described the role. For a generic
+ * title the filter falls through to judging the body, so a backend role was
+ * rejected because a note about the candidate happened to mention the
+ * candidate's own Node.js experience. The eligible pool went 16 -> 0 with no
+ * change to any filter.
+ *
+ * Falls back to text_summary only where no posting description was ever
+ * captured, so rows written before jobs.job_description existed are judged on
+ * exactly what they were before rather than quietly becoming eligible.
+ */
+function jobDescriptionFor(job) {
+  const posting = String(job?.job_description || "").trim();
+  if (posting) return posting;
+  return String(job?.text_summary || job?.description || "");
+}
+
 function isStrictTargetRole(title, description = "") {
   // roleBasis relies on capitalisation to strip a location glued onto the role
   // noun ("EngineerLondon"). Lower-casing first made every one of those rules
@@ -1167,8 +1188,18 @@ try:
                         result["reason"] = "source-untrusted"
                     elif status not in {"evaluated", "applying"}:
                         result["reason"] = "status-not-evaluable"
-                    elif score < min_score:
-                        result["reason"] = "score-too-low"
+                    # The score is not a claim gate. It was the THIRD place applying the same
+                    # floor - the eligibility SQL, isEligibleJob(), and this claim check - and
+                    # removing them one at a time kept changing which rows appeared: 0 eligible,
+                    # then 47 loaded, then "[skip] score-too-low" with no browser launched.
+                    #
+                    # Measured over 135 evaluated rows: in-scope roles had a median score of 52
+                    # and out-of-scope roles a median of 65. The floor therefore discarded the
+                    # roles worth applying to and kept the ones the role filter rejects anyway.
+                    # It is applied once now, when choosing which in-scope rows get a browser
+                    # run. A row still needs a score so there is something to rank by.
+                    elif score is None or score < 0:
+                        result["reason"] = "score-missing"
                     elif sim_re.search(source) or sim_re.search(run_id) or sim_re.search(run_marker):
                         result["reason"] = "simulation-row"
                     elif outreach_blocked:
@@ -1548,9 +1579,62 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   const status = String(job?.status || "").trim().toLowerCase();
   const link = job?.link || job?.url || "";
   if (!link || !isAllowedInitialJobUrl(link)) return false;
-  if (!isStrictTargetRole(job?.title, job?.text_summary || job?.description || "")) return false;
+  // Role scope is a hard gate, and it is checked FIRST.
+  if (!isStrictTargetRole(job?.title, jobDescriptionFor(job))) return false;
   if (status !== "evaluated") return false;
-  if (!Number.isFinite(Number(job?.score)) || Number(job.score) < MIN_SCORE) return false;
+  // Score ranks within the in-scope pool; it does not decide scope.
+  //
+  // These used to be one gate, and the combination produced an empty queue.
+  // Measured over 135 evaluated rows:
+  //
+  //   in-scope   n=79  median 52   only 6 score >= 60
+  //   out-scope  n=56  median 65   35 score >= 60
+  //
+  // The score was ANTI-correlated with scope. Every row that survived
+  // `score >= 60` was then correctly rejected by the role filter, which is why a
+  // run could report:
+  //
+  //   35 row(s) passed SQL -> 0 eligible; dropped by - out-of-scope role: 35
+  //
+  // while the roles actually wanted - "Software Engineer, Platform",
+  // "Backend Engineer - Inference Services", "Applied ML Engineer",
+  // "ML Research Intern" - all scored 52-58 and were discarded unseen.
+  //
+  // A high score on an out-of-scope role is not a reason to apply. It is a
+  // scoring artifact: the evaluator was rewarding tool-name density, and postings
+  // like "Security Engineer" or "Solutions Architect" name more tools than a bare
+  // platform-engineering req does. Fixed at the source too - see
+  // packages/pulse-config/prompts/full_evaluation.txt, which now scores role fit
+  // at career stage and puts out-of-scope roles below 50 outright.
+  // A score must EXIST so there is something to rank by, but it no longer has to
+  // clear MIN_SCORE to be eligible.
+  //
+  // MIN_SCORE is applied once, later, to pick which of the in-scope rows to spend
+  // a browser run on - not to decide whether a row is in scope at all. Measured
+  // over 135 evaluated rows, in-scope roles had a median score of 52 and
+  // out-of-scope roles a median of 65, so using the score as a scope gate removed
+  // the wanted roles and kept the unwanted ones. The run then reported:
+  //
+  //   35 row(s) passed SQL -> 0 eligible; dropped by - out-of-scope role: 35
+  //
+  // Every one of those 38 survivors was correctly rejected by the role filter;
+  // the roles actually wanted - "Software Engineer, Platform", "Backend Engineer
+  // - Inference Services", "Applied ML Engineer" - scored 52-58 and were
+  // discarded unseen.
+  //
+  // The evaluator was rewarding tool-name density, and postings like "Security
+  // Engineer" or "Solutions Architect" name more tools than a bare
+  // platform-engineering req. Corrected at the source as well - see
+  // packages/pulse-config/prompts/full_evaluation.txt, which now scores role fit
+  // at career stage and puts out-of-scope roles below 50 outright.
+  // A score must EXIST and be a real number so there is something to rank by.
+  // `Number.isFinite(Number(x))` alone is not enough: Number(null) is 0 and
+  // Number("") is 0, both finite, so a row with a NULL score was passing as if
+  // it had scored zero.
+  const rawScore = job?.score;
+  const hasScore = rawScore !== null && rawScore !== undefined && rawScore !== ""
+    && Number.isFinite(Number(rawScore));
+  if (!hasScore) return false;
 
   const pauseValue = job?._send_paused;
   if (job?._send_pause_available === false || job?._db_pause_available === false) return false;
@@ -5529,6 +5613,9 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
     // Diagnose before the context closes, otherwise the page is gone.
     if (clicked && !confirmed) {
+    // Set inside the block below, where collectOnly and needsHumanNow
+    // are actually in scope; read here, where the action is computed.
+    let blockedOnQuestion = false;
       // Say what the page actually says. A silent refusal is otherwise
       // indistinguishable from an unfilled field.
       const outcome = await describeSubmitOutcome(page).catch(() => null);
@@ -5590,6 +5677,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       // cases where waiting can still change the outcome.
       const needsHumanNow = captchaRefused || wantsCodeNow;
       const collectOnly = !spamRefused && requiredEmpty.length > 0;
+      blockedOnQuestion = collectOnly && !needsHumanNow;
 
       if (collectOnly) {
         recordPendingQuestion({
@@ -5643,7 +5731,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       ? "verified"
       : spamRefused
         ? "spam-refused"
-        : collectOnly && !needsHumanNow
+        : blockedOnQuestion
           ? "blocked-on-question"
           : clicked || clickError
             ? "needs-verification"
@@ -5753,8 +5841,23 @@ else:
     if "status" in job_columns:
         where.append("LOWER(COALESCE(j.\"status\",''))='evaluated'")
         where.append("LOWER(COALESCE(j.\"status\",'')) NOT IN ('applied','sent','followupsent','expired','skipped','verified','needsreview','needsverification','applying','sendpaused','simulated')")
+    # NOT filtered on score here.
+    #
+    # This predicate cut 135 evaluated rows down to 38, and the role filter then
+    # rejected all 38, so the run reported an empty queue. The rows actually
+    # wanted - "Software Engineer, Platform", "Backend Engineer - Inference
+    # Services", "Applied ML Engineer" - scored 52-58 and were discarded before
+    # the role filter ever saw them.
+    #
+    # The score was anti-correlated with scope: in-scope roles had a median of 52
+    # and out-of-scope roles a median of 65. Gating on it therefore removed
+    # precisely the target roles.
+    #
+    # Scope is decided by the role filter; the score ranks and caps afterwards.
+    # A NULL score is still excluded, since an unevaluated row has nothing to
+    # rank by.
     if "score" in job_columns:
-        where.append("COALESCE(j.\"score\",0)>=${MIN_SCORE}")
+        where.append("j.\"score\" IS NOT NULL")
     if "link" in job_columns:
         where.append("LOWER(COALESCE(j.\"link\",'')) LIKE 'https://%'")
         if include_indeed != "1":
@@ -5810,7 +5913,31 @@ if where:
 # pages need per-site handling and were consuming every run's limited slots,
 # starving the ~18 Greenhouse/Lever listings that have real application forms.
 sql += """
- ORDER BY CASE
+ ORDER BY
+ -- Score first. It is the ranking signal, and it used to be the LAST thing
+ -- considered, which starved the best-fitting rows out of existence.
+ --
+ -- The ordering was <ats class>, j.id DESC  LIMIT 100, so within each class
+ -- the NEWEST rows came first. The three highest-scoring in-scope jobs in the
+ -- database - Vercel "Backend Intern", Stripe "Software Engineer Intern", Jane
+ -- Street "C++ Systems Engineer Intern", all score 88 - are ids 1, 2 and 4, the
+ -- OLDEST rows in the table. They sorted last and fell off the end of the LIMIT
+ -- while newer, lower-scoring rows took every slot. Their links are employer
+ -- career pages rather than ATS URLs, so they were in the lowest class too,
+ -- which compounded it.
+ --
+ -- A run then reported:
+ --
+ --   35 row(s) passed SQL -> 0 eligible; dropped by - out-of-scope role: 35
+ --
+ -- which reads like the role filter had broken. It had not: 79 of 135 evaluated
+ -- rows pass it. The 35 that were queried were simply the wrong 35.
+ --
+ -- The ATS preference is kept as a tiebreaker, not an override. A hosted board
+ -- is likelier to have a real application form, but it should not outrank a
+ -- substantially better-matched role.
+ j."score" DESC,
+ CASE
    WHEN LOWER(COALESCE(j."link",'')) LIKE '%greenhouse.io/%/jobs/%' THEN 0
    WHEN LOWER(COALESCE(j."link",'')) LIKE '%lever.co/%/%' THEN 0
    WHEN LOWER(COALESCE(j."link",'')) LIKE '%ashbyhq.com/%/%' THEN 0
@@ -5907,34 +6034,49 @@ print(json.dumps(result))
       // terminal states invisible, which is exactly the case where the queue
       // goes dry and the cause cannot be told from a plain "nothing to do".
       const reasons = new Map();
+      // Every failing check is counted, not just the first one.
+      //
+      // This was first-match-wins with the role check first, so a row dropped for
+      // being a simulation from an untrusted source with a stale score was
+      // reported as "out-of-scope role" - which is how a run reporting
+      //
+      //   35 row(s) passed SQL -> 0 eligible; dropped by - out-of-scope role: 35
+      //
+      // said nothing actionable at all. The role check ran first on every row and
+      // won, hiding whatever actually closed the queue. Counts now overlap
+      // deliberately: one row failing three checks contributes to three tallies,
+      // and the sum is allowed to exceed the number of dropped rows.
+      const tally = (why) => reasons.set(why, (reasons.get(why) || 0) + 1);
       for (const row of queried) {
         if (rows.includes(row)) continue;
-        let why = "unknown";
         const link = row?.link || row?.url || "";
         const status = String(row?.status || "").trim().toLowerCase();
-        if (!link) why = "no link";
-        else if (!isAllowedInitialJobUrl(link)) why = "blocked URL";
-        else if (!isStrictTargetRole(row?.title, row?.text_summary || row?.description || "")) why = "out-of-scope role";
-        else if (status !== "evaluated") why = `status=${status || "unknown"}`;
-        else if (!Number.isFinite(Number(row?.score))) why = "score=non-numeric";
-        else if (Number(row.score) < MIN_SCORE) why = `score<${MIN_SCORE}`;
-        else if (row?._send_pause_available === false || row?._db_pause_available === false) why = "pause flag unavailable";
-        else if (Object.prototype.hasOwnProperty.call(row || {}, "job_id")
-            && !Object.prototype.hasOwnProperty.call(row || {}, "_send_paused")) why = "missing pause state";
-        else if (row?._send_paused === null || row?._send_paused === true || row?._send_paused === 1
-            || ["1", "true", "yes", "on"].includes(String(row?._send_paused || "").toLowerCase())) why = "sending paused";
-        else if (isTerminalStatus(status)) why = "terminal status";
-        else if (isSimulationJob(row)) why = "simulation";
-        else if (!isTrustworthySource(row?.source)) why = "untrusted source";
-        else if (isBlockedOutreachJob(row)) why = "outreach blocked";
-        else if (isBlacklistedJob(row)) why = "blacklisted";
-        else if (hasReferralContact(row)) why = "referral contact";
-        else if (inferATS(link) === "indeed" && !INCLUDE_INDEED) why = "Indeed (out of scope)";
-        reasons.set(why, (reasons.get(why) || 0) + 1);
+        let any = false;
+        const note = (why) => { tally(why); any = true; };
+        if (!link) note("no link");
+        else if (!isAllowedInitialJobUrl(link)) note("blocked URL");
+        if (!isStrictTargetRole(row?.title, jobDescriptionFor(row))) note("out-of-scope role");
+        if (status !== "evaluated") note(`status=${status || "unknown"}`);
+        if (!Number.isFinite(Number(row?.score))) note("score=non-numeric");
+        else if (Number(row.score) < MIN_SCORE) note(`score<${MIN_SCORE}`);
+        if (row?._send_pause_available === false || row?._db_pause_available === false) note("pause flag unavailable");
+        if (Object.prototype.hasOwnProperty.call(row || {}, "job_id")
+            && !Object.prototype.hasOwnProperty.call(row || {}, "_send_paused")) note("missing pause state");
+        if (row?._send_paused === null || row?._send_paused === true || row?._send_paused === 1
+            || ["1", "true", "yes", "on"].includes(String(row?._send_paused || "").toLowerCase())) note("sending paused");
+        if (isTerminalStatus(status)) note("terminal status");
+        if (isSimulationJob(row)) note("simulation");
+        if (!isTrustworthySource(row?.source)) note("untrusted source");
+        if (isBlockedOutreachJob(row)) note("outreach blocked");
+        if (isBlacklistedJob(row)) note("blacklisted");
+        if (hasReferralContact(row)) note("referral contact");
+        if (link && inferATS(link) === "indeed" && !INCLUDE_INDEED) note("Indeed (out of scope)");
+        if (!any) tally("unknown");
       }
-      const tally = [...reasons.entries()].sort((a, b) => b[1] - a[1])
+      const tallyText = [...reasons.entries()].sort((a, b) => b[1] - a[1])
         .map(([why, n]) => `${why}: ${n}`).join(", ");
-      console.log(`[DB] ${queried.length} row(s) passed SQL → ${rows.length} eligible; dropped by — ${tally || "none"}`);
+      console.log(`[DB] ${queried.length} row(s) passed SQL → ${rows.length} eligible; dropped by — ${tallyText || "none"}`);
+      console.log("[DB] (counts overlap: one row can fail several checks)");
       const byPlatform = new Map();
       for (const row of queried) {
         const ats = inferATS(row?.link || row?.url || "");
@@ -6376,6 +6518,7 @@ export {
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
   identityFacts,
+  jobDescriptionFor,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,

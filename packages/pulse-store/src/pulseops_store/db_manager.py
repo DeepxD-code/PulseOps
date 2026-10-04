@@ -366,6 +366,9 @@ _JOB_FIELDS = [
     "title", "company", "company_normalised", "link", "source", "run_id",
     "score", "letter_grade", "status", "posted_at", "location_raw",
     "location_resolved", "text_summary", "skill_gap", "bullet_adjustments",
+    # The posting's own description. Distinct from text_summary, which is the
+    # evaluator's assessment OF THE CANDIDATE. Role scope is judged on this.
+    "job_description",
     "tailored_skills", "star_stories", "level_strategy", "comp_research",
     "negotiation_notes", "recruiter_message", "recruiter_email", "contact_email",
     "inferred_domain", "domain_confidence", "email_variant_used", "eval_engine",
@@ -463,7 +466,8 @@ def _letter_grade(score: int) -> str:
 def save_job(
     title: str, company: str, link: str = "", source: str = "", run_id: str = "",
     score: int = 0, posted_at: str = "", location_raw: str = "", location_resolved: str = "",
-    text_summary: str = "", skill_gap_list: list | None = None,
+    text_summary: str = "", job_description: str = "",
+    skill_gap_list: list | None = None,
     bullet_adjustments_list: list | None = None, tailored_skills: list | None = None,
     star_stories: list | None = None, level_strategy: str = "", comp_research: str = "",
     negotiation_notes: str = "", recruiter_message: str = "", recruiter_email: str = "",
@@ -494,6 +498,7 @@ def save_job(
             "score": score, "letter_grade": letter_grade or _letter_grade(score),
             "status": requested_status, "posted_at": posted_at, "location_raw": location_raw,
             "location_resolved": location_resolved, "text_summary": text_summary,
+    "job_description": job_description,
             "skill_gap": _jdump(skill_gap_list), "bullet_adjustments": _jdump(bullet_adjustments_list),
             "tailored_skills": _jdump(tailored_skills), "star_stories": _jdump(star_stories),
             "level_strategy": level_strategy, "comp_research": comp_research,

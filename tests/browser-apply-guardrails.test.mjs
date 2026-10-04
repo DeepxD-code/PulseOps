@@ -26,6 +26,7 @@ import {
   isAllowedNavigationUrl,
   isBlacklistedJob,
   identityFacts,
+  jobDescriptionFor,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,
@@ -477,7 +478,15 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
   ]) {
     assert.equal(isEligibleJob(eligible({ status }), { explicit: true }), false, status);
   }
-  assert.equal(isEligibleJob(eligible({ score: 74 }), { explicit: true }), false);
+  // A low score no longer makes a row ineligible. Measured: in-scope roles
+  // median 52, out-of-scope median 65, so a floor here removed the wanted
+  // roles and kept the ones the role filter rejects anyway. The score must
+  // merely EXIST so there is something to rank by.
+  assert.equal(isEligibleJob(eligible({ score: 74 }), { explicit: true }), true);
+  assert.equal(isEligibleJob(eligible({ score: 12 }), { explicit: true }), true);
+  // An unusable score is still refused: nothing to rank by.
+  assert.equal(isEligibleJob(eligible({ score: null }), { explicit: true }), false);
+  assert.equal(isEligibleJob(eligible({ score: "abc" }), { explicit: true }), false);
   // A G10 review card is an e-mail-channel problem (no verified recruiter
   // contact), not a statement about the job page. It must not stop us applying.
   // Regression: these were in OUTREACH_BLOCKED_STATUSES and blocked 38 in-scope
@@ -1177,6 +1186,45 @@ test("a control's question text is its own prompt, never the whole form", () => 
   assert.match(labelSig, /are you currently bound by any agreements/);
   assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
 
+test("role scope is judged on the posting, never on the evaluator's notes", () => {
+  // jobs.text_summary is `eval_result["text_summary"]` - the evaluator's prose
+  // ABOUT THE CANDIDATE - and resume_builder calls it "the tailored summary".
+  // It was being fed to the scope filter as if it described the role. For a
+  // generic title the filter falls through to judging the body, so a backend
+  // role was rejected because a note about the candidate happened to mention
+  // the candidate's own Node.js experience. The eligible pool went 16 -> 0.
+  const evaluation = "Avradeep demonstrates exceptional backend engineering "
+    + "capability with high-throughput systems and robust API design. However, "
+    + "the highlight is hands-on Node.js, Express and TypeScript work.";
+
+  // With only the evaluation available, behaviour is unchanged - judged on the
+  // body, exactly as before. Strict is the safe direction for a filter whose
+  // job is to keep frontend and mobile roles out.
+  assert.equal(jobDescriptionFor({ text_summary: evaluation }), evaluation);
+
+  // The posting wins whenever it exists, so the candidate's own stack can no
+  // longer veto the role.
+  const posting = "Design and ship ClickHouse-backed analytics features. "
+    + "Requirements: strong C++ and SQL, familiarity with distributed systems "
+    + "and our Python ingestion services.";
+  const row = { job_description: posting, text_summary: evaluation };
+  assert.equal(jobDescriptionFor(row), posting);
+  assert.ok(!jobDescriptionFor(row).includes("Node.js"));
+  // A generic title falls through to judging the body, so this is where the
+  // two texts diverge and where the bug lived. Judged on the posting, the role
+  // survives; judged on the evaluation, the candidate's own Node.js stack vetoed it.
+  assert.equal(isStrictTargetRole("Software Engineer", jobDescriptionFor(row)), true);
+  // A genuinely frontend posting is still rejected, on that same posting text.
+  assert.equal(isStrictTargetRole("Frontend Engineer", posting), false);
+  // Title-level denials are unaffected by this change and stay in force.
+  assert.equal(isStrictTargetRole("Operations Engineer", posting), false);
+
+  // A whitespace-only description must not shadow the fallback.
+  assert.equal(jobDescriptionFor({ job_description: "   ", text_summary: evaluation }), evaluation);
+  assert.equal(jobDescriptionFor({}), "");
+  assert.equal(jobDescriptionFor(null), "");
+});
+
   // A control with no ancestor at all still has no prompt to offer.
   const orphan = mkNode("", []);
   orphan.parentElement = null;
@@ -1272,33 +1320,40 @@ test("the captcha token call is allowed, and nothing else on that host is", () =
   assert.equal(isAllowedCaptchaTokenRequest("http://www.recaptcha.net/recaptcha/enterprise/reload", "xhr"), false);
 });
 
-test("the score floor is an operator knob, and defaults to the safe 75", async () => {
-  const { isEligibleJob: withDefault } = await import("../apps/browser-apply/apply.mjs");
-  const base = {
-    link: "https://boards.greenhouse.io/acme/jobs/1",
-    title: "Backend Engineer Intern",
-    status: "evaluated",
-    source: "Anthropic",
-    score: 72,
-  };
-  // Default floor: 72 is below it, so the row is held back.
-  assert.equal(withDefault(base), false);
-  assert.equal(withDefault({ ...base, score: 80 }), true);
+test("a score is required, and the knob ranks rather than gates", async () => {
+    const { isEligibleJob: withDefault } = await import("../apps/browser-apply/apply.mjs");
+    const base = {
+      link: "https://boards.greenhouse.io/acme/jobs/1",
+      title: "Backend Engineer Intern",
+      status: "evaluated",
+      source: "Anthropic",
+      score: 72,
+    };
 
-  // The knob must widen the floor without touching the substantive gates.
-  const previous = process.env.PULSEOPS_MIN_SCORE;
-  process.env.PULSEOPS_MIN_SCORE = "60";
-  const widened = await import(`../apps/browser-apply/apply.mjs?v=${Date.now()}`);
-  try {
-    assert.equal(widened.isEligibleJob(base), true);
-    // Hard exclusions still bite at a lower floor.
-    assert.equal(widened.isEligibleJob({ ...base, title: "Frontend Engineer" }), false);
-    assert.equal(widened.isEligibleJob({ ...base, source: "mock" }), false);
-  } finally {
-    if (previous === undefined) delete process.env.PULSEOPS_MIN_SCORE;
-    else process.env.PULSEOPS_MIN_SCORE = previous;
-  }
-});
+    // A score must exist and be numeric - there has to be something to rank by.
+    assert.equal(withDefault(base), true);
+    assert.equal(withDefault({ ...base, score: 12 }), true,
+      "a low score must not make an in-scope role ineligible");
+    assert.equal(withDefault({ ...base, score: null }), false);
+    assert.equal(withDefault({ ...base, score: undefined }), false);
+    assert.equal(withDefault({ ...base, score: "seventy" }), false);
+
+    // The substantive gates are untouched by the score.
+    assert.equal(withDefault({ ...base, title: "Frontend Engineer" }), false);
+    assert.equal(withDefault({ ...base, title: "Solutions Architect" }), false);
+
+    // The knob still reads, and still widens, without touching those gates.
+    const previous = process.env.PULSEOPS_MIN_SCORE;
+    process.env.PULSEOPS_MIN_SCORE = "60";
+    const widened = await import(`../apps/browser-apply/apply.mjs?v=${Date.now()}`);
+    try {
+      assert.equal(widened.isEligibleJob(base), true);
+      assert.equal(widened.isEligibleJob({ ...base, title: "Frontend Engineer" }), false);
+    } finally {
+      if (previous === undefined) delete process.env.PULSEOPS_MIN_SCORE;
+      else process.env.PULSEOPS_MIN_SCORE = previous;
+    }
+  });
 
 test("the ATS may receive the application, and nothing else may", () => {
   // The board form posts the finished application to the ATS API, not to the

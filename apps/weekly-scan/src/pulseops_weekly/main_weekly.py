@@ -428,6 +428,10 @@ def main() -> None:
                 letter_grade=grade, posted_at=job.get("posted_at", ""), location_raw=job.get("location_raw", ""),
                 location_resolved=job.get("location_resolved", ""),
                 text_summary=eval_result.get("text_summary", ""),
+                # The posting, not the evaluator's notes about the candidate.
+                # Already available here as jd_text; without persisting it the
+                # role-scope filter had only the evaluation to read.
+                job_description=str(job.get("description", "") or "")[:6000],
                 skill_gap_list=eval_result.get("skill_gap", []),
                 bullet_adjustments_list=eval_result.get("bullet_adjustments", []),
                 tailored_skills=eval_result.get("tailored_skills", []),

@@ -1,0 +1,31 @@
+-- 009_add_job_description.sql
+-- Keep the posting's own description, so role scope is judged on the job and
+-- not on the evaluator's notes about the candidate.
+--
+-- `jobs.text_summary` is `eval_result["text_summary"]`: prose written ABOUT THE
+-- CANDIDATE by the LLM evaluator, and used as such by resume_builder, which
+-- calls it "the tailored summary". The browser-apply role-scope filter was
+-- reading it as though it described the role.
+--
+-- For a generic title the filter falls through to judging the body, so backend
+-- roles were being rejected because a note about the candidate happened to
+-- mention the candidate's own Node.js experience:
+--
+--   "ClickHouse Operations Engineer"
+--     "...robust API design. However, ... Node.js, Express, PostgreSQL ..."
+--     -> dropped as out-of-scope role
+--
+-- The eligible pool went 16 -> 0 with no change to any role filter. The posting
+-- description was available at save time all along - it is already handed to the
+-- evaluator as `jd_text` - and simply was not persisted, so there was nothing
+-- else for the filter to read.
+--
+-- Populated by the weekly scan from the listing's own description. Existing
+-- rows stay NULL and the filter falls back to the previous behaviour for them,
+-- which is the strict direction: this filter exists to keep frontend and mobile
+-- roles out, so defaulting to "cannot prove in-scope, therefore out" is correct.
+--
+-- SQLite has no ADD COLUMN IF NOT EXISTS. Safe here because db_manager applies
+-- each file exactly once and records it in migrations_applied.
+
+ALTER TABLE jobs ADD COLUMN job_description TEXT;

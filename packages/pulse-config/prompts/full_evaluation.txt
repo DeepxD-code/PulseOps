@@ -19,7 +19,33 @@ Given the candidate's resume and a job description, produce a comprehensive 6-bl
 
 Produce a JSON object with ALL of these fields:
 
-1. match_percentage (int 0-100): Honest ATS score based on stack overlap, tools, project relevance, seniority fit.
+1. match_percentage (int 0-100): How well this ROLE suits the candidate at this career stage.
+   Score the fit of the role to the candidate, not the density of tool names in the
+   posting.
+
+   Score these, in this order, and let each one pull the number down:
+
+   a) Role scope. If the role is outside backend / ML / AI / GenAI — front-end,
+      mobile, full-stack-first, embedded, product, solutions, sales, GTM, security,
+      DevRel, technical writing, support, management — score it BELOW 50
+      regardless of how many tools it names. A high tool count is not evidence the
+      role is a fit; it is often the reason an out-of-scope role looks attractive.
+      Scope is a gate, not a weight.
+
+   b) Stage fit. The candidate is a final-year undergraduate with a two-month
+      internship. A role that wants 3+ years of commercial experience is not a
+      better match for having a longer requirements list — it is a worse match.
+      Score roles that explicitly suit interns, new graduates, or students highly,
+      even when the posting's stack is unfamiliar. Conversely, do not award a high
+      score to a role whose seniority is well beyond the candidate.
+
+   c) Evidence. Credit the candidate's ACTUAL documented work — named projects,
+      measured outcomes, specific technologies they have shipped. Do not credit a
+      posting for mentioning tools the candidate has never touched.
+
+   d) Gaps. A role needing a substantial unlearnable stack the candidate has no
+      evidence for should land in the 40s-50s, not the 70s. Reasonable stretch:
+   50-70. Strong documented overlap: 70+.
 
 2. letter_grade (str): A (≥90) / B (≥80) / C (≥70) / D (≥60) / F (<60)
 
