@@ -44,6 +44,13 @@ temp_linkedin_jobs.json
 temp_portal_jobs.json
 memory/.github_synced.json
 pulseops.db
+# SQLite's write-ahead log and shared-memory files. They appear beside the
+# database whenever a connection is open, so `pulseops.db` being ignored was
+# not enough - these two showed up as untracked on every run.
+pulseops.db-wal
+pulseops.db-shm
+*.db-wal
+*.db-shm
 pulseops-tui
 dashboard/tui/pulseops-tui
 
