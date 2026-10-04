@@ -24,6 +24,8 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from google import genai
+from google.genai import types
 
 
 def _gemini_client(api_key):

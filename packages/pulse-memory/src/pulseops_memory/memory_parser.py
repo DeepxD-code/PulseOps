@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from pulseops_core.exceptions import MemoryParseError
+from google import genai
+from google.genai import types
 
 
 # --- shared, bounded Gemini client -------------------------------------------

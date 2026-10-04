@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 
 from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError
+from google import genai
+from google.genai import types
 
 
 # --- shared, bounded Gemini client -------------------------------------------
@@ -377,7 +379,15 @@ def _query_groq(prompt: str) -> dict:
                     temperature=0.2,
                     response_format={"type": "json_object"},
                     timeout=30,
-                    max_tokens=2000,
+                    max_tokens=4000,
+                    # 4000, not 2000. A real evaluation prompt produces about
+                    # 3500 characters of JSON; at 2000 tokens the completion is
+                    # cut off mid-object and Groq reports that as
+                    # `400 Failed to validate JSON`, which is indistinguishable
+                    # from the model returning prose. Verified directly: the same
+                    # prompt on the same client returns valid JSON with
+                    # finish_reason=stop once the budget allows it. Truncation is a
+                    # budget problem, so the fix is budget.
                 )
                 return _parse_json(resp.choices[0].message.content or "")
             except Exception as e:
@@ -419,7 +429,13 @@ def _query_openai(prompt: str) -> dict:
                 temperature=0.2,
                 response_format={"type": "json_object"},
                 timeout=30,
-                max_tokens=2000,
+                # 4000, not 2000. The evaluation prompt was expanded to score
+                # role fit at career stage, so the completion genuinely grew and
+                # 2000 truncated it mid-object - which Groq reports as
+                # 400 Failed to validate JSON, indistinguishable from the model
+                # returning prose. Truncation is a budget problem, so the fix is
+                # budget.
+                max_tokens=4000,
             )
             return _parse_json(resp.choices[0].message.content or "")
         except Exception as e:

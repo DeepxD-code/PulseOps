@@ -25,6 +25,8 @@ from pathlib import Path
 import yaml  # type: ignore
 
 from pulseops_core.exceptions import ProfileBuildError
+from google import genai
+from google.genai import types
 
 
 # --- shared, bounded Gemini client -------------------------------------------
