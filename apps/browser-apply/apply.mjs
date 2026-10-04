@@ -1456,19 +1456,43 @@ function identityFacts(candidate, stated) {
       // Two phrasings reach this, and the second one was unhandled for 13
       // submissions. The classic form asks "Are you subject to a non-compete,
       // non-solicitation or non-disclosure agreement...?" but several boards
-      // ask it as "Are you bound by any agreements with a current or former
-      // employer that may restrict your ability to work for us?", which shares
-      // no keyword with the first. current_non_compete sat in profile.yml the
-      // whole time without a pattern to match, so the answer was never written.
-      // Left unset in the profile, the fact is dropped by the filter below and
-      // the question stays pending rather than being guessed at.
+      // ask it as "Are you bound by any agreement with a current or former
+      // employer...", which shares no keyword with the first. The singular was
+      // the blocker: the pattern wanted "agreements" and boards write "agreement".
+      //
+      // Scale AI puts BOTH phrasings on one form, and they are different questions:
+//
+//   "Are you currently bound by any agreements with a current or former
+//    employer that may restrict your ability to work for Scale AI or perform
+//    the duties of the position for which you are applying? This includes,
+//    but is not limited to, non-compete agreements, ..."          -> No
+//
+//   "Position for which you are applying? This includes, but is not limited
+//    to, non-compete agreements, ..."                             -> THE ROLE TITLE
+//
+// A keyword match cannot separate them - both contain "non-compete agreements"
+// - and would answer the second with "No", a wrong answer on a legal
+// representation.
+//
+// Excluding the literal phrase "position for which you are applying" does not
+// work either: that phrase appears in the middle of the FIRST question too, so
+// excluding it rejected the very question it was meant to let through. What
+// actually separates them is the question form - the first opens with "Are
+// you", the second is a noun phrase asking which position. So the hint requires
+// BOTH a trigger term AND a yes/no opener.
+//
+// Left unset in the profile, the fact is dropped by the filter below and
+// the question stays pending rather than being guessed at.
       tag: "non-compete",
-      hint: /non[-\s]?compete|non[-\s]?solicitation|non[-\s]?disclosure|bound\s+by\s+any\s+agreements|restrict(?:ed|ing)?\s+(?:your\s+)?(?:ability|employment|work)|any\s+agreements?\s+with\s+a\s+(?:current|former|previous)/i,
+      hint: /^(?=[\s\S]*\b(?:(?:are|do|is|will|have|were|was)\s+you|(?:is|are)\s+there)\b)(?=[\s\S]*(?:non[-\s]?compete|non[-\s]?solicitation|non[-\s]?disclosure|bound\s+by\s+any\s+agreements?|any\s+agreements?\s+with\s+a\s+(?:current|former|previous)|restrict(?:ed|ing)?\s+(?:your\s+)?(?:ability|employment|work)))/i,
       value: stated?.current_non_compete,
-      // Asked once per form. Repeating the same legal assertion on a second
-      // matching control would be asserting it about a jurisdiction it was
-      // never stated for.
-      once: true,
+      // NOT `once`. Greenhouse renders each question twice - a text input and
+      // a react-select for the same field - and filling only the first left the
+      // second empty, which blocked the submit while the log showed a
+      // successful fill. Both carry the identical prompt, so both get the same
+      // answer. Jurisdiction scoping is a property of the hint, not of `once`:
+      // the work-authorisation fact is the one that has to be scoped, because
+      // one form can ask about two countries.
     },
     {
       tag: "last job title",
@@ -3018,13 +3042,20 @@ function controlSignatureMatcher() {
       ].join(" ");
     let question = "";
     let node = el;
-    // Clipped at a word boundary rather than mid-word. See the length rule below.
+    // Long labels are reduced to ONE COMPLETE QUESTION, taken from the front.
     const LIMIT = 260;
-    const clipTail = (s) => {
-      if (!s || s.length <= LIMIT) return s;
-      const cut = s.slice(-LIMIT);
-      const sp = cut.indexOf(" ");
-      return (sp >= 0 ? cut.slice(sp + 1) : cut).trim();
+    const firstQuestion = (s) => {
+      if (!s) return s;
+      if (s.length <= LIMIT) return s;
+      // A question mark ends a self-contained question. Everything after it
+      // belongs to the next thing being said, so the question is the part worth
+      // keeping - and it is the part that says which question this is.
+      const mark = s.indexOf("?");
+      if (mark >= 0 && mark + 1 <= LIMIT) return s.slice(0, mark + 1).trim();
+      // No question mark in a long label: take the opening, on a word boundary.
+      const cut = s.slice(0, LIMIT);
+      const sp = cut.lastIndexOf(" ");
+      return (sp >= 0 ? cut.slice(0, sp) : cut).trim();
     };
     for (let i = 0; i < 8 && node; i++) {
       node = node.parentElement;
@@ -3080,7 +3111,7 @@ function controlSignatureMatcher() {
       // field stayed empty and the submit was refused. Clipping the tail of the
       // preceding text keeps the part ADJACENT to this control, which is the
       // part that belongs to it, instead of discarding it entirely.
-      question = [clipTail(before), after.length <= 120 ? after : clipTail(after)].filter(Boolean).join(" ").trim();
+      question = [firstQuestion(before), after.length <= 120 ? after : firstQuestion(after)].filter(Boolean).join(" ").trim();
       if (question) break;
     }
     return `${own} ${question}`.trim().toLowerCase();
@@ -3748,6 +3779,96 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   };
 
   /**
+   * Complete a react-select style autocomplete by picking an option.
+   *
+   * Greenhouse renders `Location (City)*` and the work-authorisation question as
+   * react-select controls. They hold their own state: a programmatic fill is
+   * accepted by the DOM and then reverted, and the field only counts as answered
+   * once an option has been chosen. fill() reported success, the value came
+   * back empty, and the submit was then blocked by a field the log had already
+   * given up on.
+   *
+   * Returns the text that was selected, or "" when the control offered nothing
+   * matching - so the caller reports the field unfilled rather than claiming an
+   * answer that is not there.
+   */
+  const pickFromAutocomplete = async (field, wanted) => {
+    const text = String(wanted || "").trim();
+    if (!text) return "";
+    const options = '[role="option"]:visible';
+    const readBack = async () => String(await field.inputValue().catch(() => "")).trim();
+    try {
+      // Focus before clicking. A react-select input is often zero-width or covered by
+      // its own control, so click() on it times out - which is what left the
+      // second work-authorisation control empty while the first filled.
+      // Focusing and typing opens the menu without needing a hit on the input.
+      await field.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await field.focus({ timeout: 3000 }).catch(() => {});
+      await field.click({ timeout: 2500 }).catch(() => {});
+      await page.waitForTimeout(300);
+      // Typing opens the filtered menu. A combobox that ignores keystrokes still
+      // offers its full list on click, which is handled below.
+      if (page.keyboard && typeof page.keyboard.type === "function") {
+        await page.keyboard.type(text.slice(0, 24), { delay: 40 });
+      }
+      await page.waitForTimeout(900);
+
+      const offered = async () => (await page.locator(options).allInnerTexts().catch(() => []))
+        .map((t) => String(t).replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      // Exact and prefix only. A country list offers "India" among many and a
+      // city list hundreds, so an option that merely CONTAINS the text is not
+      // evidence that it is the right one - it would happily accept
+      // "Indiana" for "India" or "Bengaluru, Karnataka" for "Bengaluru".
+      const exact = (t) => t.toLowerCase() === text.toLowerCase();
+      const prefix = (t) => t.toLowerCase().startsWith(text.toLowerCase());
+
+      let texts = await offered();
+      let hit = texts.find(exact) || texts.find(prefix);
+
+      if (!hit) {
+        await page.keyboard.press("Escape").catch(() => {});
+        await field.focus({ timeout: 2500 }).catch(() => {});
+        await field.click({ timeout: 2500 }).catch(() => {});
+        await page.waitForTimeout(700);
+        texts = await offered();
+        hit = texts.find(exact) || texts.find(prefix);
+      }
+      if (!hit) {
+        await page.keyboard.press("Escape").catch(() => {});
+        console.log(`    [combo-text] ${text.slice(0, 30)}: ${texts.length} option(s) offered, none matched`);
+        return "";
+      }
+      await page.locator(options).filter({ hasText: hit }).first().click({ timeout: 4000 })
+        .catch(async () => {
+          // react-select re-renders its menu as the filter changes, which
+          // detaches the option between finding it and clicking it - the click
+          // then times out on an element that is no longer the one on screen.
+          // Re-query and click again, and if the menu still will not hold
+          // still, drive it from the keyboard, which is how a person picks an
+          // option in a combobox anyway.
+          await page.locator(options).filter({ hasText: hit }).first()
+            .click({ timeout: 2500, force: true }).catch(async () => {
+              await field.click({ timeout: 2000 }).catch(() => {});
+              await page.waitForTimeout(400);
+              await page.keyboard.press("ArrowDown").catch(() => {});
+              await page.waitForTimeout(150);
+              await page.keyboard.press("Enter").catch(() => {});
+            });
+        });
+      await page.waitForTimeout(500);
+      const landed = await readBack();
+      // react-select clears the input once an option is taken, so an empty input
+      // can still mean the choice landed. What was selected is the answer.
+      console.log(`    [combo-text] ${text.slice(0, 30)} -> selected "${hit.slice(0, 40)}"`);
+      return landed || hit;
+    } catch (err) {
+      console.log(`    [combo-text] ${text.slice(0, 30)}: ${String(err.message || err).slice(0, 70)}`);
+      return "";
+    }
+  };
+
+  /**
    * Answer a free-text question from real profile data, matched on the prompt
    * the way combo() matches a dropdown. Never invents a value: callers pass
    * only facts already held in the profile, and skip when the fact is absent.
@@ -3793,8 +3914,23 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         await page.waitForTimeout(150);
         // A controlled input can reject the value it was given. Say so, rather
         // than logging a fill that did not happen.
-        const landed = String(await field.inputValue().catch(() => "")).trim();
+        let landed = String(await field.inputValue().catch(() => "")).trim();
         if (landed !== text) {
+          // Greenhouse renders several required questions as react-select
+          // autocompletes - `Location (City)*` and `Are you legally authorized to
+          // work...?` among them. Those do not accept a typed value at all: the
+          // component keeps its own state, reverts the input, and only records
+          // an answer when an option is picked. fill() succeeded, the value came
+          // back empty, and the submit was then blocked by a field the log had
+          // already tried and given up on.
+          //
+          // So: type it, then pick from the menu, exactly as combo() does for a
+          // dropdown. Only tried after the plain fill fails, so an ordinary text
+          // input never pays for a click and a keystroke.
+          const chosen = await pickFromAutocomplete(field, text);
+          if (chosen) landed = chosen;
+        }
+        if (landed !== text && !String(await field.inputValue().catch(() => "")).trim()) {
           console.log(`    [answer] ${tag}: value did not stick (got "${landed.slice(0, 40)}")`);
           continue;
         }

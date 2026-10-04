@@ -497,7 +497,34 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
   assert.equal(isEligibleJob(eligible({ source: "sim:Mock" }), { explicit: true }), false);
 });
 
-  test("the board's own fingerprint vendor is reachable, by hashed subdomain", () => {
+  test("a company board may only emit links on its own employer's domain", async () => {
+  const scan = await import("../apps/weekly-scan/scan.mjs");
+  const seed = "https://careers.example.co.in/jobs";
+
+  // Two labels is the ordinary case.
+  assert.equal(scan.registrableDomain("careers.example.com"), "example.com");
+  assert.equal(scan.registrableDomain("www.example.com"), "example.com");
+  // Three labels where the suffix is itself two labels, as in India. Getting
+  // this wrong makes every co.in listing look like a different employer.
+  assert.equal(scan.registrableDomain("careers.example.co.in"), "example.co.in");
+  assert.equal(scan.registrableDomain("www.example.co.uk"), "example.co.uk");
+
+  const portal = { engine: "company", url: seed };
+  // Same employer, different host: the normal case for a careers subdomain.
+  assert.equal(scan.validateJobLink("https://jobs.example.co.in/roles/backend", portal).ok, true);
+  // A different employer must never be filed under this one.
+  assert.equal(scan.validateJobLink("https://careers.othercompany.com/roles/backend", portal).ok, false);
+  // And the reason has to say why, so a rejection is diagnosable.
+  assert.equal(scan.validateJobLink("https://careers.othercompany.com/x", portal).reason, "off_employer_domain");
+  // Plain HTTP is refused, as it is for every other engine.
+  assert.equal(scan.validateJobLink("http://careers.example.co.in/x", portal).ok, false);
+  // An ATS URL reached through a company portal must not become a company role.
+  assert.equal(scan.validateJobLink("https://boards.greenhouse.io/acme/jobs/1", portal).ok, false);
+  // And the engine is recognised, rather than refused as unknown.
+  assert.notEqual(scan.validateJobLink("https://jobs.example.co.in/x", portal).reason, "unknown_or_unallowlisted_engine");
+});
+
+test("the board's own fingerprint vendor is reachable, by hashed subdomain", () => {
   // Enabled on the operator's instruction. A real browser loading an Ashby board
   // runs SEON; we did not, so every session was anomalous on the one signal the
   // board's classifier has. Fidelity, not evasion - nothing is spoofed.
@@ -629,10 +656,15 @@ test("plain identity facts are answered from the profile, absent facts are not i
     .find((f) => f.tag === "non-compete");
   assert.ok(nonCompete, "current_non_compete must produce an answerable fact");
   assert.equal(nonCompete.value, "No");
-  // Asked once per form: a second match would assert the same legal answer
-  // about a jurisdiction it was never stated for.
-  assert.equal(nonCompete.once, true);
+  // Deliberately NOT `once`: Greenhouse renders each question twice - a text
+  // input and a react-select for the same field - so filling only the first
+  // left the second empty and blocked the submit.
+  assert.notEqual(nonCompete.once, true);
   const phrasings = [
+    // The singular is what Scale AI actually writes; the pattern used to want
+    // "agreements" and missed every one of these.
+    "are you currently bound by any agreement",
+    "are you currently bound by any agreement with a current or former employer",
     "are you subject to a non-compete, non-solicitation or non-disclosure agreement?",
     "are you bound by any agreements with a current or former employer that may restrict your ability to work for us?",
     "do you have any non-compete obligations?",
@@ -641,8 +673,17 @@ test("plain identity facts are answered from the profile, absent facts are not i
   for (const p of phrasings) {
     assert.ok(nonCompete.hint.test(p), `non-compete hint must match: ${p}`);
   }
+  // Scale AI asks both of these on one form. The second is NOT a yes/no
+  // question - it wants the name of the role - and it mentions non-compete only
+  // while listing what such obligations include. A keyword match would answer
+  // it with "No", which is a wrong answer on a legal representation.
+  const whichPosition = "position for which you are applying? this includes, but is not limited to, non-compete agreements, non-solicitation agreements, confidentiality or non-disclosure agreements, or any other contractual obligations that could limit you";
+  assert.equal(nonCompete.hint.test(whichPosition), false, "must not answer a which-position question with the non-compete answer");
+  assert.equal(nonCompete.hint.test("which position are you applying for?"), false);
+  assert.equal(nonCompete.hint.test("what position are you applying for?"), false);
   // A question that is not about restrictions must not be answered with this.
   assert.equal(nonCompete.hint.test("what is your expected salary?"), false);
+  assert.equal(nonCompete.hint.test("what is your current or most recent job title?"), false);
   // Unset in the profile means no answer is offered at all, so the question
   // stays pending rather than being guessed at.
   assert.equal(identityFacts({}, {}).some((f) => f.tag === "non-compete"), false);
@@ -1111,6 +1152,30 @@ test("a control's question text is its own prompt, never the whole form", () => 
   assert.match(denseSig, /legally authorised/);
   // Clipped, not unbounded: the signature has to stay small enough to compare.
   assert.ok(denseSig.length <= 300, `signature should stay bounded, got ${denseSig.length}`);
+
+  // The opening of a long label is what identifies the question, so the label
+  // is reduced to its FIRST complete question and never to its tail.
+  //
+  // This is the real shape on Scale AI's form, one control, ~430 characters:
+  //   "Are you currently bound by any agreements with a current or former
+  //    employer that may restrict your ability to work for Scale AI or perform
+  //    the duties of the position for which you are applying? This includes,
+  //    but is not limited to, non-compete agreements, ..."
+  // Clipping the tail produced "position for which you are applying? This
+  // includes...", which dropped "are you ... bound by any agreement" - the only
+  // part that identifies it - so the answer could not match and the field went
+  // unanswered.
+  const longLabel = "Are you currently bound by any agreements with a current or former employer "
+    + "that may restrict your ability to work for Scale AI or perform the duties of the position "
+    + "for which you are applying? This includes, but is not limited to, non-compete agreements, "
+    + "non-solicitation agreements, confidentiality or non-disclosure agreements.";
+  const labelControl = mkNode("", []);
+  const labelWrapper = mkNode(longLabel, [labelControl]);
+  labelControl.parentElement = labelWrapper;
+  labelWrapper.parentElement = null;
+  const labelSig = signature(labelControl);
+  assert.match(labelSig, /are you currently bound by any agreements/);
+  assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
 
   // A control with no ancestor at all still has no prompt to offer.
   const orphan = mkNode("", []);
