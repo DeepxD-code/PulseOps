@@ -71,18 +71,32 @@ def query(limit: int, per_company_cap: int) -> tuple[list[dict], int]:
         # carries "spam-refused" for a board that declined, which is otherwise
         # indistinguishable from any other Skipped row - the jobs table has no
         # reason column and the table was empty until this was written.
+        #
+        # The filter has to be IN the SQL, not applied afterwards. Selecting the
+        # top N by score and then discarding the rows that turn out to be dead
+        # ends meant the fetch was spent on rows nobody could act on: the queue
+        # reported "nothing needs a person" while two Anthropic applications sat
+        # blocked on questions only the candidate can answer.
+        #
+        # Rows with no recorded outcome are kept, because a status still
+        # separates a row awaiting a person from one already sent, and older rows
+        # predate outcomes being written at all.
+        placeholders = ",".join("?" for _ in HUMAN_ACTIONABLE)
         rows = conn.execute(
-            """
+            f"""
             SELECT j.id, j.company, j.title, j.link, j.status, j.score,
                    (SELECT o.stage FROM outcomes o
                      WHERE o.job_id = j.id ORDER BY o.id DESC LIMIT 1) AS stage
               FROM jobs j
              WHERE LOWER(COALESCE(j.status,'')) IN ('needsverification','needsreview','skipped')
                AND LOWER(COALESCE(j.link,'')) LIKE 'https://%'
+               AND ( (SELECT o2.stage FROM outcomes o2
+                       WHERE o2.job_id = j.id ORDER BY o2.id DESC LIMIT 1) IN ({placeholders})
+                     OR NOT EXISTS (SELECT 1 FROM outcomes o3 WHERE o3.job_id = j.id) )
              ORDER BY COALESCE(j.score, 0) DESC, j.id DESC
              LIMIT ?
             """,
-            (max(1, min(limit, 200) * 2),),
+            (*sorted(HUMAN_ACTIONABLE), max(1, min(limit, 200)) * 8),
         ).fetchall()
     except sqlite3.OperationalError:
         # An older database without the outcomes table still works.
