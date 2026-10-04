@@ -164,6 +164,10 @@ const ENGINE_ALLOWED_HOSTS = Object.freeze({
   ashby: ["ashbyhq.com", "jobs.ashbyhq.com"],
   naukri: ["naukri.com"],
   instahyre: ["instahyre.com"],
+  // Intentionally empty. A company board is not on a fixed list of hosts - the
+  // employer is chosen per portal entry and the check that matters is that a
+  // listing shares that employer's registrable domain (see validateJobLink).
+  company: [],
   wellfound: ["wellfound.com", "angel.co"],
   indeed: ["indeed.com"],
   glassdoor: ["glassdoor.com", "glassdoor.co.in", "glassdoor.co.uk"],
@@ -288,6 +292,47 @@ function queryHasUpstreamRedirect(url) {
  * That prevents a valid-looking link for another company's board from being
  * persisted merely because the scraper found it on the configured page.
  */
+// Suffixes where the registrable domain is the last three labels rather than
+// the last two. Without these, careers.example.co.in and careers.example.com
+// would look like different employers, and a seeded co.in board would silently
+// drop every co.in listing.
+const MULTI_LABEL_SUFFIXES = new Set([
+  "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "ac.in", "gov.in", "edu.in",
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk",
+  "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+  "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+  "co.za", "org.za", "net.za", "gov.za",
+  "com.br", "com.mx", "com.ar", "com.sg", "com.hk", "com.tr", "com.cn", "com.tw",
+  "co.jp", "ne.jp", "or.jp", "co.kr", "co.il", "com.my", "com.ph", "com.vn", "com.pk",
+  "com.eg", "com.sa", "com.ua", "com.pl", "co.id", "co.th",
+]);
+
+/**
+ * The registrable domain ("example.co.in", "example.com") of a hostname.
+ *
+ * The company engine seeds from one careers URL and may only emit links on the
+ * same employer's domain, which is a registrable-domain test rather than the
+ * exact-host allowlist the ATS engines use. A fixed allowlist is impossible
+ * here because the whole point is employers whose career pages are not on a
+ * known ATS.
+ */
+function registrableDomain(host) {
+  const labels = canonicalHost(host).split(".").filter(Boolean);
+  if (labels.length < 2) return canonicalHost(host);
+  const lastTwo = labels.slice(-2).join(".");
+  if (MULTI_LABEL_SUFFIXES.has(lastTwo) && labels.length >= 3) {
+    return labels.slice(-3).join(".");
+  }
+  return lastTwo;
+}
+
+function sameEmployerDomain(a, b) {
+  const left = parseHttpUrl(a);
+  const right = parseHttpUrl(b);
+  if (!left || !right) return false;
+  return registrableDomain(left.hostname) === registrableDomain(right.hostname);
+}
+
 function validateJobLink(value, portal = {}) {
   portal = portal || {};
   const rawLink = value && typeof value === "object" ? value.link : value;
@@ -299,8 +344,19 @@ function validateJobLink(value, portal = {}) {
   const allowedHosts = ENGINE_ALLOWED_HOSTS[engine] || [];
   const host = canonicalHost(url.hostname);
 
-  if (!allowedHosts.length && engine !== "generic") {
+  if (!allowedHosts.length && engine !== "generic" && engine !== "company") {
     return { ok: false, reason: "unknown_or_unallowlisted_engine" };
+  }
+  if (engine === "company") {
+    // Arbitrary employer domains, so the check that matters is that a listing
+    // belongs to the employer that was seeded - not that it is on some list.
+    // A crawler that followed a link off the seeded domain would be reading
+    // somebody else's board and filing it as this employer's role.
+    if (url.protocol !== "https:") return { ok: false, reason: "company_url_must_use_https" };
+    if (!portal.url || !sameEmployerDomain(url, portal.url)) {
+      return { ok: false, reason: "off_employer_domain" };
+    }
+    return { ok: true, url: url.href, reason: "" };
   }
   if (ATS_ENGINES.has(engine)) {
     if (url.protocol !== "https:") return { ok: false, reason: "ats_url_must_use_https" };
@@ -867,6 +923,289 @@ async function scrapeYC(page, portal) {
   );
 }
 
+/**
+ * Read robots.txt and report whether a path is crawlable.
+ *
+ * The company engine is the only one that visits pages nobody nominated by name,
+ * so it is the only one where "am I allowed to read this?" has to be answered
+ * from the site's own rules rather than from a known API. A missing or
+ * unreachable robots.txt is treated as permitted, which is the documented
+ * default; a fetch that fails for any other reason also falls open rather than
+ * silently dropping a whole employer's board.
+ */
+async function robotsAllows(context, origin, pathname) {
+  const rules = [];
+  let applicable = false;
+  try {
+    const res = await context.request.get(`${origin}/robots.txt`, { timeout: 12000 });
+    if (!res.ok()) return { allowed: true, checked: false, note: `robots_http_${res.status()}` };
+    const body = await res.text();
+    for (const rawLine of body.split(/\r?\n/)) {
+      const line = rawLine.replace(/#.*$/, "").trim();
+      if (!line) continue;
+      const [rawKey, ...rest] = line.split(":");
+      const key = String(rawKey || "").trim().toLowerCase();
+      const value = rest.join(":").trim();
+      if (key === "user-agent") applicable = true;
+      else if (applicable && (key === "disallow" || key === "allow")) {
+        rules.push({ allow: key === "allow", path: value });
+      }
+    }
+  } catch (err) {
+    return { allowed: true, checked: false, note: "robots_unreachable" };
+  }
+  if (!rules.length) return { allowed: true, checked: true, note: "no_rules" };
+
+  // Longest matching pattern wins, per the robots.txt convention.
+  let best = null;
+  for (const rule of rules) {
+    if (!rule.path) continue;
+    if (pathname.startsWith(rule.path) || pathname === rule.path) {
+      if (!best || rule.path.length > best.path.length) best = rule;
+    }
+  }
+  return { allowed: !best || best.allow, checked: true, note: best ? `matched_${best.allow ? "allow" : "disallow"}` : "no_match" };
+}
+
+/**
+ * Crawl one employer's own career pages.
+ *
+ * Scoped as tightly as the task allows, because unlike every other engine this
+ * one has no API and no known URL shape:
+ *
+ *   - one hop from the seeded page only, so it reads a board and its listings
+ *     and nothing beyond them
+ *   - the employer's own registrable domain only; a link off it is not followed
+ *   - robots.txt decides, per path
+ *   - links must look like a job listing by path or by link text, so a nav bar
+ *     of 40 links does not become 40 requests
+ *   - hard page cap, and a pause between requests
+ */
+async function collectCompanyLinks(page, pageUrl, domain, roleWord, seenHref, jobish) {
+  const out = [];
+  const base = `${parseHttpUrl(pageUrl).protocol}//${parseHttpUrl(pageUrl).host}`;
+  let links = [];
+  try {
+    links = await page.$$eval("a[href]", (nodes, origin) => {
+      const acc = [];
+      for (const a of nodes) {
+        const href = a.getAttribute("href") || "";
+        const text = (a.textContent || "").replace(/\s+/g, " ").trim();
+        if (text.length < 6 || text.length > 160) continue;
+        if (/^(apply|apply now|view all|see all|search|filter|sort|next|back|home|more|all jobs|back to)/i.test(text)) continue;
+        let abs = "";
+        try { abs = new URL(href, origin).href; } catch { continue; }
+        if (!/^https?:/i.test(abs)) continue;
+        acc.push({ href: abs, text });
+      }
+      return acc;
+    }, base);
+  } catch {
+    return out;
+  }
+  for (const link of links) {
+    let url = null;
+    try { url = new URL(link.href); } catch { continue; }
+    if (url.protocol !== "https:") continue;
+    if (registrableDomain(url.hostname) !== domain) continue;
+    url.hash = "";
+    url.search = "";
+    const href = url.href;
+    if (href === pageUrl || seenHref.has(href)) continue;
+    if (/\.(?:pdf|docx?|xlsx?|pptx?|zip|csv|jpg|jpeg|png|gif|svg|webp|mp4|ico)(?:[/?#]|$)/i.test(url.pathname)) continue;
+    if (!jobish.test(url.pathname) && !roleWord.test(link.text)) continue;
+    seenHref.add(href);
+    out.push({ href, text: link.text });
+  }
+  return out;
+}
+
+async function scrapeCompany(page, portal) {
+  const seed = parseHttpUrl(portal.url);
+  if (!seed) return [];
+  const origin = `${seed.protocol}//${seed.host}`;
+  const domain = registrableDomain(seed.hostname);
+  const context = page.context();
+
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await page.waitForTimeout(1200);
+  // Listings are often client-rendered; give the page a moment to fill in.
+  for (let i = 0; i < 2; i += 1) {
+    await page.mouse.wheel(0, 2400);
+    await page.waitForTimeout(1200);
+  }
+
+  const links = await page.$$eval("a[href]", (nodes, base) => {
+    const out = [];
+    for (const a of nodes) {
+      const href = a.getAttribute("href") || "";
+      const text = (a.textContent || "").replace(/\s+/g, " ").trim();
+      if (text.length < 6 || text.length > 160) continue;
+      if (/^(apply|apply now|view all|see all|search|filter|sort|next|back|home|more|all jobs|back to)/i.test(text)) continue;
+      let abs = "";
+      try { abs = new URL(href, base).href; } catch { continue; }
+      if (!/^https?:/i.test(abs)) continue;
+      out.push({ href: abs, text });
+    }
+    return out;
+  }, `${origin}/`);
+  const seenHref = new Set();
+
+  // Word-boundary, not slash-boundary. Adobe's category pages are /us/en/c/engineering-and-product-jobs
+  // and Freshworks' are /company/careers/open-positions - the noun is glued to the slug with a hyphen,
+  // so requiring a leading slash matched none of them and the crawler reported 0 candidates from 135 links.
+  const jobish = /(?:^|[/_-])(?:job|jobs|career|careers|position|positions|vacanc(?:y|ies)|opening|openings|role|roles)(?:[/_-]|$)|[?&](?:jobid|jid)=|\.(?:aspx?|jsp)\b/i;
+  // A role word in the link text. This is only a cheap PRE-filter: it decides
+  // what is worth requesting, never what is a job. Trusting it as the final
+  // answer produced a Zoho product page - nav text reading "For Developers"
+  // matched, and the destination was "Mobile Device Management (MDM), made easy".
+  // What a page IS has to be decided on the page, not on the label that led to it.
+  const roleWord = /\b(?:engineer|developer|scientist|manager|analyst|architect|intern|designer|specialist|consultant|programmer|researcher|backend|frontend|full[-\s]?stack|devops|ml\s*\/?\s*ai)\b/i;
+
+  const candidates = [];
+  for (const link of links) {
+    let url = null;
+    try { url = new URL(link.href); } catch { continue; }
+    if (url.protocol !== "https:") continue;
+    if (registrableDomain(url.hostname) !== domain) continue;
+    // The seed is the board, not a role on it. Re-listing it produces a job
+    // whose title is the careers page's own headline.
+    url.hash = "";
+    url.search = "";
+    const href = url.href;
+    if (seenHref.has(href)) continue;
+    if (href === canonicalUrl(portal.url) || href === `${origin}${seed.pathname}`) continue;
+    // A document, not a page. Product and PDF links live on the same nav bar.
+    if (/\.(?:pdf|docx?|xlsx?|pptx?|zip|csv|jpg|jpeg|png|gif|svg|webp|mp4|ico)(?:[/?#]|$)/i.test(url.pathname)) continue;
+    if (!jobish.test(url.pathname) && !roleWord.test(link.text)) continue;
+    seenHref.add(href);
+    candidates.push({ href, text: link.text });
+  }
+  console.log(`  [company] ${domain}: ${candidates.length} candidate link(s) from ${links.length} link(s) on the board`);
+
+  const maxPages = Math.min(Number(portal.max_pages) || 20, 60);
+  const maxDepth = Math.min(Number(portal.max_depth) || 2, 3);
+  const pause = Math.max(Number(portal.delay_ms) || 1200, 600);
+  const sourceName = portal.name || domain;
+  const jobs = [];
+  const emitted = new Set();
+  let robotsBlocked = 0;
+  let visited = 0;
+
+  // A careers page usually links to a category page, which links to the roles.
+  // Reading only the seed found nothing on a site laid out that way - Hasura
+  // yielded 62 links and 0 candidates, because the roles sit two levels down.
+  // So a page that turns out to be an index is harvested rather than emitted,
+  // up to a depth, still on the employer's own domain and still under robots.
+  const queue = candidates.slice(0, maxPages).map((c) => ({ ...c, depth: 1 }));
+
+  while (queue.length && visited < maxPages) {
+    const candidate = queue.shift();
+    if (visited >= maxPages) break;
+    let url = null;
+    try { url = new URL(candidate.href); } catch { continue; }
+    const verdict = await robotsAllows(context, origin, url.pathname);
+    if (!verdict.allowed) { robotsBlocked += 1; continue; }
+    if (visited) await sleep(pause);
+    visited += 1;
+    try {
+      await page.goto(candidate.href, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(700);
+      const job = await page.evaluate(() => {
+        const pick = (sel, attr) => {
+          const el = document.querySelector(sel);
+          if (!el) return "";
+          return String((attr ? el.getAttribute(attr) : el.textContent) || "").replace(/\s+/g, " ").trim();
+        };
+        const body = (document.body && document.body.innerText) || "";
+        const flat = body.replace(/\s+/g, " ").trim();
+        // Signals that a page is one specific vacancy rather than marketing
+        // copy or a category index. Checked here, on the page, because the
+        // link that led here says nothing reliable about what is here.
+        const applyish = Array.from(document.querySelectorAll("a[href], button"))
+          .map((n) => String(n.textContent || "").replace(/\s+/g, " ").trim().toLowerCase())
+          .filter((t) => /^(apply|apply now|apply for this|submit application|apply for this job|view job|see job)/.test(t));
+        const requisition = /\b(?:req(?:uisition)?|job\s*(?:id|no|number|ref)|reference)\s*(?:id|no\.?|number|#)?\s*[:#-]?\s*[a-z0-9-]{3,}/i;
+        return {
+          title: pick("h1") || pick('meta[property="og:title"]', "content") || "",
+          description: pick('meta[name="description"]', "content") || body.slice(0, 1200),
+          bodyLength: flat.length,
+          hasApply: applyish.length > 0,
+          hasReqId: requisition.test(flat.slice(0, 1500)),
+          // A category page lists several roles; a vacancy describes one.
+          headingCount: document.querySelectorAll("h1, h2").length,
+          ogType: pick('meta[property="og:type"]', "content"),
+        };
+      });
+      // A page with almost no text is a shell that never rendered, not a role.
+      if (!job.title || job.title.length < 5 || job.bodyLength < 200) continue;
+      // The destination has to look like a vacancy. Without this the crawler
+      // happily returned a product page whose nav happened to say "Developers".
+      // Classify by what the page LINKS TO, not by reading its slug.
+      //
+      // A category page points at several roles; a vacancy points at almost
+      // nothing beyond its apply button. Counting same-domain role links
+      // separates the two without guessing whether "engineering-and-product-jobs"
+      // names a team or a vacancy - which is the guess that filed Freshworks'
+      // careers landing page as a role titled "We're here to uncomplicate work".
+      const roleLinks = await page.evaluate((base) => {
+        let n = 0;
+        for (const a of document.querySelectorAll("a[href]")) {
+          let abs = "";
+          try { abs = new URL(a.getAttribute("href") || "", base).href; } catch { continue; }
+          if (abs === base) continue;
+          if (/\/(?:job|jobs|career|careers|position|positions|vacanc(?:y|ies)|opening|openings|role|roles)(?:[/_-]|[/?#]|$)/i.test(abs)) n += 1;
+        }
+        return n;
+      }, `${origin}/`);
+
+      if (roleLinks >= 3) {
+        // An index of roles, whatever its slug says. The roles are one level in.
+        if (candidate.depth < maxDepth) {
+          const nested = await collectCompanyLinks(page, candidate.href, domain, roleWord, seenHref, jobish);
+          for (const n of nested) queue.push({ ...n, depth: candidate.depth + 1 });
+        }
+        continue;
+      }
+      // A single vacancy describes one role and carries an apply affordance.
+      const hasApplyAffordance = job.hasApply || job.hasReqId || jobish.test(url.pathname);
+      // AND its title names the role. This is the check that matters, because
+      // every category page also carries an "Apply" link and a job-shaped URL:
+      //   "Design"                            /us/en/c/design-jobs
+      //   "Engineering and Product"           /us/en/c/engineering-and-product-jobs
+      //   "We're here to uncomplicate work"   /company/careers/
+      //   "Adobe Newsroom"                    news.adobe.com/home/default.aspx
+      // None of those name a vacancy. A real posting's title does - "Software
+      // Engineer, Platform" - and that is the cheapest honest test available
+      // without a per-employer template.
+      const titleNamesTheRole = roleWord.test(job.title);
+      if (!(hasApplyAffordance && (titleNamesTheRole || job.hasReqId))) continue;
+      // A page carrying many headings is marketing, not a vacancy.
+      if (job.headingCount > 25) continue;
+      // A board's own title, not a vacancy's. "We're here to uncomplicate work"
+      // is the careers page's headline, and it is never the role.
+      if (/^(?:we(?:'re| are)\s|join us|our (?:team|mission|story)|careers?|open (?:positions|roles)|life at)\b/i.test(job.title)) continue;
+      if (emitted.has(candidate.href)) continue;
+      emitted.add(candidate.href);
+      jobs.push({
+        title: job.title.slice(0, 160),
+        company: candidate.company || "",
+        link: candidate.href,
+        description: `Source: ${sourceName} (company site). ${String(job.description || "").slice(0, 400)}`,
+      });
+    } catch (err) {
+      // One unreachable listing must not end the employer's whole board.
+      continue;
+    }
+  }
+
+  if (robotsBlocked) {
+    console.log(`  [robots] ${robotsBlocked} page(s) skipped on ${domain} - disallowed by robots.txt`);
+  }
+  console.log(`  [company] ${domain}: ${jobs.length} listing(s) from ${visited} page(s) read, ${candidates.length} candidate link(s)`);
+  return jobs;
+}
+
 const ENGINES = {
   greenhouse: scrapeGreenhouse,
   lever: scrapeLever,
@@ -879,6 +1218,7 @@ const ENGINES = {
   hirist: scrapeHirist,
   instahyre: scrapeInstahyre,
   yc: scrapeYC,
+  company: scrapeCompany,
 };
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -1047,7 +1387,17 @@ async function main() {
   );
 }
 
-export { main, validateJobLink, validateJobUrl, isValidJobLink, validatePortalUrl, appendUniqueJobs };
+export {
+  main,
+  validateJobLink,
+  validateJobUrl,
+  isValidJobLink,
+  validatePortalUrl,
+  appendUniqueJobs,
+  registrableDomain,
+  sameEmployerDomain,
+  scrapeCompany,
+};
 
 // Keep the module importable for unit tests.  Only the CLI entry point starts
 // Playwright or touches the configured portals.

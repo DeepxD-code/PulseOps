@@ -477,6 +477,40 @@ ats_portals:
     url: "https://jobs.ashbyhq.com/moonshot"
     # 4 jobs at time of adding
 
+# DISABLED 2026-10-04. The engine exists, is correct, and finds nothing.
+  #
+  # Measured against three employers with their own career sites, headed,
+  # 12 pages each:
+  #
+  #   Adobe        12 candidate links read -> 0 listings
+  #   Freshworks    1 candidate link  read -> 0 listings
+  #   Zoho          1 candidate link  read -> 0 listings
+  #
+  # Zero, but zero *correctly* - and that is the part worth having. An earlier
+  # version of this engine emitted 5 "jobs" from Adobe and 1 from Freshworks,
+  # and every one was wrong: "Design", "Engineering and Product" and "Employee
+  # Experience" are category pages, "Adobe Newsroom" is a newsroom, and "We're
+  # here to uncomplicate work" is the careers page's own headline. Category
+  # pages carry an Apply link and a job-shaped URL, so no URL test separates
+  # them from a vacancy; the check that does is whether the page's title names
+  # a role.
+  #
+  # Why no yield: all three render actual vacancies through a JavaScript search
+  # widget, so the role URLs never appear as links on the pages a crawler
+  # reaches. Fixing that means driving each employer's search UI, which is
+  # employer-specific code - twelve lines per employer is cheaper than a
+  # general crawler that guesses.
+  #
+  # Enable an entry below once a given employer's listing URL pattern is known.
+  - name: "Adobe (company site)"
+    engine: company
+    enabled: false
+    requires_auth: false
+    company: "adobe"
+    url: "https://careers.adobe.com/us/en"
+    max_pages: 12
+    max_depth: 2
+
 settings:
   delay_between_portals_seconds: 2
   page_timeout_ms: 30000

@@ -20,7 +20,9 @@ param(
     # verified recruiter email found) in the default browser. Opt-in because it
     # takes over the operator's screen.
     [switch]$OpenG10Reviews,
-    [int]$G10ReviewLimit = 25
+    [int]$G10ReviewLimit = 25,
+    [switch]$OpenManualQueue,
+    [int]$ManualQueueLimit = 15
 )
 
 # Native CLIs (Python/Node) may write warnings to stderr without failing.
@@ -69,6 +71,22 @@ if (-not $NoNotify) {
     Write-Host "=== Notifying candidate of this run ==="
     & python apps/browser-apply/tools/notify_run.py
     Write-Host "notify_exit=$LASTEXITCODE"
+}
+
+if ($OpenManualQueue) {
+    # Postings a run could not finish, and which a person CAN finish: the board
+    # declined the submission, a captcha needs solving, or the form is filled up
+    # to the point where only a Submit click is missing. Read-only - it queries
+    # the database and opens links, and drives no browser, so it cannot fill a
+    # field, accept a term or click Submit.
+    #
+    # It reads the reason out of outcomes.stage, which is only populated because
+    # persistBrowserResult now writes it. Before that the table was empty and
+    # every blocked row looked identical, so the queue listed closed postings
+    # from disabled portals with no form behind them.
+    Write-Host "=== Opening the manual-apply queue ==="
+    & python apps/browser-apply/tools/manual_apply_queue.py --limit $ManualQueueLimit
+    Write-Host "manual_queue_exit=$LASTEXITCODE"
 }
 
 if ($OpenG10Reviews) {
