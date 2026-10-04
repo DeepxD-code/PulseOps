@@ -5749,9 +5749,19 @@ async function persistBrowserResult(result, {
   if (requireClaim && !claimToken) return { updated: false, reason: "claim-required" };
   if (!isExistingDbPath(dbPath)) return { updated: false, reason: "db-missing" };
 
+  // The reason has to survive the write, not just the status. statusForBrowserResult
+  // collapses every non-submission outcome into "Skipped", so "spam-refused" and
+  // "expired posting" and "salary below floor" were indistinguishable the moment
+  // they were persisted - the outcomes table stayed empty and there was no way to
+  // tell afterwards which postings needed a person and which simply were done.
+  // Recorded in the same transaction as the status change, so a reason can never
+  // be written for a status update that lost its claim race.
+  const reason = String(result?.action || "").trim().slice(0, 80) || null;
+  const detail = String(result?.reason || result?.note || "").trim().slice(0, 300) || null;
+
   const pythonCode = String.raw`
 import datetime, json, os, sqlite3, sys
-path, raw_id, status, owner, raw_now = sys.argv[1:6]
+path, raw_id, status, owner, raw_now, reason, detail = sys.argv[1:8]
 result = {"updated": False, "reason": "persist-failed"}
 try:
     job_id = int(raw_id)
@@ -5778,7 +5788,24 @@ try:
                     stamp = datetime.datetime.fromtimestamp(float(raw_now) / 1000.0, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                     new_marker = "browser-apply-result|" + stamp + "|" + owner
                     cur = conn.execute("UPDATE jobs SET status=?, processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='applying' AND processed_at=?", (status, new_marker, job_id, marker))
-                    result = {"updated": cur.rowcount == 1, "reason": "updated" if cur.rowcount == 1 else "claim-race-lost"}
+                    if cur.rowcount != 1:
+                        result = {"updated": False, "reason": "claim-race-lost"}
+                    else:
+                        written = False
+                        try:
+                            ocols = {str(r[1]) for r in conn.execute("PRAGMA table_info(outcomes)")}
+                            need = {"job_id", "stage"}
+                            if need.issubset(ocols):
+                                row2 = conn.execute("SELECT title, company FROM jobs WHERE id=?", (job_id,)).fetchone()
+                                conn.execute(
+                                    "INSERT INTO outcomes (job_id, company, title, stage, notes, recorded_at) VALUES (?,?,?,?,?,?)",
+                                    (job_id, (row2[1] if row2 else ""), (row2[0] if row2 else ""),
+                                     reason or status, detail, stamp),
+                                )
+                                written = True
+                        except Exception:
+                            written = False
+                        result = {"updated": True, "reason": "updated", "outcome": written}
         conn.commit()
 except Exception:
     try:
@@ -5787,7 +5814,7 @@ except Exception:
         pass
 print(json.dumps(result))
 `;
-  const changed = runSqliteJson(dbPath, pythonCode, [dbPath, String(jobId), nextStatus, String(claimToken || ""), String(Date.now())], 7000);
+  const changed = runSqliteJson(dbPath, pythonCode, [dbPath, String(jobId), nextStatus, String(claimToken || ""), String(Date.now()), reason || "", detail || ""], 7000);
   if (changed?.updated) console.log(`  [db] job #${jobId} -> ${nextStatus} (1 row)`);
   else console.log(`  [db] job #${jobId} result not persisted (${changed?.reason || "unknown"})`);
   return changed || { updated: false, reason: "persist-failed" };
