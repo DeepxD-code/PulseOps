@@ -364,20 +364,52 @@ def _query_gemini(prompt: str) -> dict:
     raise RuntimeError("Gemini exhausted retries")
 
 
+def _retry_after_seconds(err: Exception) -> float:
+    """Seconds the provider asked us to wait, if it said.
+
+    Groq sends `retry-after` on a per-minute throttle. Using it is better than
+    guessing: the provider knows its own budget, and a guessed delay either
+    wastes time or retries straight into the same limit.
+    """
+    headers = getattr(err, "headers", None)
+    if not headers:
+        return 0.0
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        return float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _query_groq(prompt: str) -> dict:
     from groq import Groq
 
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    # gpt-oss-20b first. gpt-oss-120b is deliberately last: on this account it
+    # answers HTTP 200 with an EMPTY body every time, so leading with it spends a
+    # request from the rate limit on a model that cannot reply. Over a 20-job
+    # batch that is 20 wasted requests, which is enough on its own to trip the
+    # per-minute limit and take the working model down with it - observed as
+    # `scored=0 failed=20`, every failure a 429 that a healthy first choice would
+    # never have caused. It stays in the list in case the account changes.
+    models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
 
     for model in models:
-        for attempt in range(2):
+        for attempt in range(4):
             try:
                 resp = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.2,
-                    response_format={"type": "json_object"},
+                    # No response_format. Groq's json_object mode rejects a
+                    # prompt that enumerates many required fields - reproduced
+                    # minimally: two named fields succeed, the same request plus
+                    # eight more returns `400 Failed to validate JSON`. This
+                    # prompt needs nine, so strict mode failed on roughly half of
+                    # all evaluations while reading like a model fault.
+                    #
+                    # _parse_json below already tolerates markdown fences and
+                    # surrounding prose, so strict mode bought nothing here.
                     timeout=30,
                     max_tokens=4000,
                     # 4000, not 2000. A real evaluation prompt produces about
@@ -389,17 +421,49 @@ def _query_groq(prompt: str) -> dict:
                     # finish_reason=stop once the budget allows it. Truncation is a
                     # budget problem, so the fix is budget.
                 )
-                return _parse_json(resp.choices[0].message.content or "")
+                content = (resp.choices[0].message.content or "").strip()
+                # An empty completion is not a success. gpt-oss-120b answers
+                # HTTP 200 with an empty body on this account, so parsing its
+                # result raised `Expecting value: line 1 column 1 (char 0)`, which
+                # matched no retry condition and ended the engine - so the second
+                # model in the list, which does answer, was never tried.
+                if not content:
+                    if model == models[-1]:
+                        raise RuntimeError("every groq model returned an empty completion")
+                    break  # next model
+                return _parse_json(content)
             except Exception as e:
                 msg = str(e).lower()
+                # A JSON-validation refusal with no strict mode requested means
+                # the model returned something the parser may still recover.
+                # Retry once with a blunter instruction before giving up on the
+                # engine entirely.
+                if "json" in msg and attempt < 1:
+                    prompt = prompt + (
+                        "\n\nIMPORTANT: respond with a single raw JSON object and "
+                        "no other text, no markdown fences, no commentary."
+                    )
+                    continue
                 if any(x in msg for x in ["429", "rate limit", "daily limit"]):
                     if _is_daily_quota(msg):
                         if model == models[-1]:
                             disable_engine("groq", "daily quota exhausted")
                             raise
                         break  # try next model
-                    if attempt < 1:
-                        time.sleep(6)
+                    # A per-minute throttle, not a dead key. A single Groq call
+                    # takes ~44s on this account - ten sequential calls took
+                    # 438s - so a batch overruns the per-minute budget and every
+                    # job after the first few is throttled. Sleeping 6s and then
+                    # giving up turned a throttle into a failed job, which is how
+                    # a batch reported `scored=0 failed=20` while the same model
+                    # answered fine when called once.
+                    #
+                    # Honour Retry-After when present, otherwise back off
+                    # exponentially with jitter so retries do not re-synchronise.
+                    if attempt < 3:
+                        delay = _retry_after_seconds(e) or min(2 ** attempt * 8, 90)
+                        time.sleep(delay + (attempt * 1.7))
+                        continue
                     else:
                         break
                     continue
