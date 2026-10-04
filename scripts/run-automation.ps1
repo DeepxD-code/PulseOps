@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SkipLiveness,
     [switch]$SkipBrowserApply,
     [switch]$NoPush,
@@ -34,15 +34,15 @@ $weeklyExit = 0
 $browserExit = 0
 $pushExit = 0
 
-Write-Host "=== PulseOps weekly pipeline ==="
+Write-Output "=== PulseOps weekly pipeline ==="
 $weeklyArgs = @("apps/weekly-scan/src/pulseops_weekly/main_weekly.py")
 if ($SkipLiveness) { $weeklyArgs += "--skip-liveness" }
 & python -X utf8 @weeklyArgs
 $weeklyExit = $LASTEXITCODE
-Write-Host "weekly_exit=$weeklyExit"
+Write-Output "weekly_exit=$weeklyExit"
 
 if (-not $SkipBrowserApply) {
-    Write-Host "=== PulseOps browser apply (live + auto) ==="
+    Write-Output "=== PulseOps browser apply (live + auto) ==="
     # Operator-approved: most LinkedIn roles are off-site applies that land on
     # the employer's own careers site. Grants exactly one HTTPS host hop, then
     # re-pins. Disable with -StrictNavigation.
@@ -56,9 +56,9 @@ if (-not $SkipBrowserApply) {
     if ($AcceptLegal) { $applyArgs += "--accept-legal" }
     & node @applyArgs
     $browserExit = $LASTEXITCODE
-    Write-Host "browser_apply_exit=$browserExit"
+    Write-Output "browser_apply_exit=$browserExit"
 } else {
-    Write-Host "=== Browser apply skipped by switch ==="
+    Write-Output "=== Browser apply skipped by switch ==="
 }
 
 if (-not $NoNotify) {
@@ -68,9 +68,9 @@ if (-not $NoNotify) {
     # without watching a browser. Reports recorded outcomes only; it never
     # claims an application went out unless the run recorded one, and a mail
     # failure never changes the run's exit code.
-    Write-Host "=== Notifying candidate of this run ==="
+    Write-Output "=== Notifying candidate of this run ==="
     & python apps/browser-apply/tools/notify_run.py
-    Write-Host "notify_exit=$LASTEXITCODE"
+    Write-Output "notify_exit=$LASTEXITCODE"
 }
 
 if ($OpenManualQueue) {
@@ -84,9 +84,9 @@ if ($OpenManualQueue) {
     # persistBrowserResult now writes it. Before that the table was empty and
     # every blocked row looked identical, so the queue listed closed postings
     # from disabled portals with no form behind them.
-    Write-Host "=== Opening the manual-apply queue ==="
+    Write-Output "=== Opening the manual-apply queue ==="
     & python apps/browser-apply/tools/manual_apply_queue.py --limit $ManualQueueLimit
-    Write-Host "manual_queue_exit=$LASTEXITCODE"
+    Write-Output "manual_queue_exit=$LASTEXITCODE"
 }
 
 if ($OpenG10Reviews) {
@@ -94,13 +94,13 @@ if ($OpenG10Reviews) {
     # email. Their Discord cards carry a link nobody has opened yet, so surface
     # the pages in the operator's browser for review. Read-only: it opens links
     # that are already in the database and drives nothing.
-    Write-Host "=== Opening G10 review pages ==="
+    Write-Output "=== Opening G10 review pages ==="
     & node apps/browser-apply/tools/open_g10_reviews.mjs --limit $G10ReviewLimit
-    Write-Host "g10_open_exit=$LASTEXITCODE"
+    Write-Output "g10_open_exit=$LASTEXITCODE"
 }
 
 if (-not $NoPush) {
-    Write-Host "=== Pushing current branch ==="
+    Write-Output "=== Pushing current branch ==="
     $branch = (& git branch --show-current).Trim()
     # Retry a transient network failure rather than reporting a failed run.
     # Observed 2026-10-01: a machine-wide DNS outage took out SMTP, the GitHub
@@ -113,11 +113,11 @@ if (-not $NoPush) {
         if ($pushExit -eq 0) { break }
         if ($attempt -lt 3) {
             $wait = $attempt * 10
-            Write-Host "[push-retry] attempt $attempt failed (exit $pushExit); retrying in ${wait}s"
+            Write-Output "[push-retry] attempt $attempt failed (exit $pushExit); retrying in ${wait}s"
             Start-Sleep -Seconds $wait
         }
     }
-    Write-Host "push_exit=$pushExit"
+    Write-Output "push_exit=$pushExit"
 }
 
 Pop-Location

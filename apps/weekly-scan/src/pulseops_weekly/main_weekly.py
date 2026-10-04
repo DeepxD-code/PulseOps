@@ -35,6 +35,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# google-genai 2.24 warns once per process that `models.generate_content` with
+# automatic function calling is deprecated in favour of `chats.send_message`.
+# Six call sites use it (analyzer, domain_filter, profile_builder, memory_parser,
+# github_sync, verify_key2) and they still work, so this is a deprecation notice
+# rather than a fault.
+#
+# It is silenced here because it is actively harmful in this pipeline: it goes to
+# stderr, PowerShell surfaces stderr as a NativeCommandError, and a deprecation
+# notice rendered as an error is indistinguishable from a real failure in the run
+# log. It cost a full diagnostic cycle once already - the weekly run looked dead
+# when it had in fact completed and moved 5 rows.
+#
+# Migrating the six call sites to chats.send_message is the real fix and is left
+# deliberately undone here: it changes response handling at six production LLM
+# call sites, and the only provider with working credit is the Groq fallback, so
+# a partial migration would be untestable.
+import logging as _logging
+
+# The SDK's logger is "google_genai.models" - underscore, not dotted. Targeting
+# "google.genai" silences a logger that does not exist and changes nothing.
+for _name in ("google_genai", "google_genai.models"):
+    _logging.getLogger(_name).setLevel(_logging.ERROR)
 try:
     from pulseops_config.paths import repo_root
 
