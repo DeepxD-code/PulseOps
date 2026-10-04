@@ -49,6 +49,10 @@ HUMAN_ACTIONABLE = {
     "manual-submit-required": "form filled, submit left to you",
     "authwall-skip": "needs you signed in",
     "needs-review": "stopped before submitting",
+    # Distinct from needs-verification on purpose. "submitted, not yet
+    # confirmed" is worth chasing; "blocked on a question nobody has answered"
+    # is worth answering once, and re-running the automation cannot help it.
+    "blocked-on-question": "blocked on a question only you can answer",
     "needs-verification": "submitted, not yet confirmed",
 }
 

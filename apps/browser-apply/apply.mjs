@@ -3882,7 +3882,22 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const once = options?.once === true;
       const resolve = typeof options?.resolve === "function" ? options.resolve : null;
       const fallback = String(value ?? "").trim();
-      if (!fallback && !resolve) return null;
+      // A fact with no configured value is skipped, and that skip used to be silent.
+      // The consequence is that two completely different situations printed the
+      // same line:
+      //
+      //   "no empty field matched <hint>"   the form does not ask this
+      //   "no empty field matched <hint>"   the form asks it, and nobody has
+      //                                   supplied an answer
+      //
+      // The second is an actionable gap in config/profile.yml and the first is
+      // not, so reporting them identically hides exactly the thing worth
+      // acting on. current_non_compete sat configured-but-unmatched for 13
+      // submissions, and this silence is part of why that was hard to see.
+      if (!fallback && !resolve) {
+        console.log(`    [answer] ${tag}: not answered — no value configured in profile.yml (application_answers.${options?.key || tag})`);
+        return null;
+      }
       // input[type="text"] is an attribute selector and misses every input
       // that relies on the HTML default, which is most of them.
       //
@@ -5610,7 +5625,30 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
     if (!sharedCtx) await context.close();
-    return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : (spamRefused ? "spam-refused" : (clicked || clickError ? "needs-verification" : "needs-review")), pdf: resumePdf };
+    // A required field we could not answer is NOT the same outcome as a submitted
+    // application awaiting confirmation, and recording it as one cost twice.
+    //
+    // "needs-verification" is eligible for retry on every run, so a form blocked
+    // on a question only the candidate can answer was reopened, refilled and
+    // re-blocked on every single run - a whole browser run each time, producing
+    // nothing new, and crowding fresh jobs out of the batch.
+    //
+    // It also sent the operator to the wrong queue. "Awaiting confirmation" is
+    // worth chasing; "nobody has written this answer" is worth answering once.
+    //
+    // The status is deliberately still NeedsVerification, so nothing downstream
+    // changes shape. What changes is the action, so the retry gate and the
+    // manual queue can finally tell the two apart.
+    const action = confirmed
+      ? "verified"
+      : spamRefused
+        ? "spam-refused"
+        : collectOnly && !needsHumanNow
+          ? "blocked-on-question"
+          : clicked || clickError
+            ? "needs-verification"
+            : "needs-review";
+    return { company: job.company, title: job.title, link: url, ats, action, pdf: resumePdf };
   } catch (e) {
     console.log(`  [error] ${e.message.slice(0,300)}`);
     try { await page.screenshot({ path: path.join(ROOT, `output/apply-error-${job.company.replace(/\W/g,"_")}.png`), fullPage: true }); } catch {}
@@ -5937,6 +5975,10 @@ function statusForBrowserResult(result) {
   // never come, and re-running just repeats the refusal. Skipped is the honest
   // terminal state: we did apply, and the board declined to take it.
   if (action === "spam-refused") return "Skipped";
+  // Blocked on a required question nobody has answered. Same terminal status as
+  // an unconfirmed submission, but a different reason, so a retry gate can skip
+  // it until an answer exists instead of re-filling the same form every run.
+  if (action === "blocked-on-question") return "NeedsVerification";
   // A pause/claim miss is deliberately not written.  The existing Applying
   // marker remains recoverable instead of being downgraded to Evaluated.
   return null;
