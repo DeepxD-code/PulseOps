@@ -34,7 +34,31 @@ $weeklyExit = 0
 $browserExit = 0
 $pushExit = 0
 
+# The run writes its own log, because how it is invoked decides whether its
+# output survives at all. Invoked as `powershell -File run-automation.ps1` with
+# the caller's stdout redirected, the child's output is buffered and mostly
+# lost - which is how a 16-minute run that completed successfully and moved five
+# rows left a ten-line log and looked identical to a hang. Swapping Write-Host
+# for Write-Output fixed the common case but not this one.
+#
+# So the log is produced here rather than captured from outside. Every run gets
+# output/run-automation-<timestamp>.log whether it is double-clicked, scheduled,
+# or piped, and a failed run can be read after the fact without reproducing it.
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$logDir = Join-Path $repo "output"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$runLog = Join-Path $logDir "run-automation-$stamp.log"
+$transcriptOn = $false
+try {
+    Start-Transcript -Path $runLog -Force -ErrorAction Stop | Out-Null
+    $transcriptOn = $true
+} catch {
+    # A transcript is a convenience, never a reason to refuse to run.
+    Write-Output "[log] could not start transcript at $runLog - continuing without one"
+}
+
 Write-Output "=== PulseOps weekly pipeline ==="
+Write-Output "=== log: $runLog ==="
 $weeklyArgs = @("apps/weekly-scan/src/pulseops_weekly/main_weekly.py")
 if ($SkipLiveness) { $weeklyArgs += "--skip-liveness" }
 & python -X utf8 @weeklyArgs
@@ -121,6 +145,13 @@ if (-not $NoPush) {
 }
 
 Pop-Location
+Write-Output "=== weekly=$weeklyExit browser=$browserExit push=$pushExit ==="
+# Closed before exiting, or the tail of the run - the part that explains a
+# failure - is exactly the part that gets lost.
+if ($transcriptOn) {
+    try { Stop-Transcript | Out-Null } catch {}
+    Write-Output "=== log written: $runLog ==="
+}
 if ($weeklyExit -ne 0) { exit $weeklyExit }
 if ($browserExit -ne 0) { exit $browserExit }
 exit $pushExit
