@@ -23,6 +23,36 @@ from pathlib import Path
 
 from pulseops_core.exceptions import AllEnginesFailedError, EvaluationError
 
+
+# --- shared, bounded Gemini client -------------------------------------------
+# One client for the process, built on first use, with an explicit HTTP timeout.
+#
+# Previously each call site did `client = genai.Client(api_key=...)` inside the
+# per-job loop. That is two defects at once:
+#
+#   - no default request timeout, so one unresponsive provider call blocked the
+#     whole weekly pipeline indefinitely. Observed 2026-10-04: 69 minutes of wall
+#     time at 6 seconds of CPU, which is a process parked on a socket. The only
+#     timeout in the codebase was on the Groq fallback, so the primary path -
+#     the one that actually hangs - had none.
+#   - a fresh connection pool per call, never closed. That process held ten
+#     sockets in CLOSE_WAIT against Google's endpoints: the remote end gone, the
+#     local end never released.
+#
+# A reused client reuses its pool, which is also faster per call.
+_GEMINI_CLIENT = None
+
+
+def _gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        _GEMINI_CLIENT = genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options=types.HttpOptions(timeout=60000),
+        )
+    return _GEMINI_CLIENT
+
+
 try:
     from pulseops_config.paths import PROMPTS_DIR, repo_root
 
@@ -291,7 +321,7 @@ def _query_gemini(prompt: str) -> dict:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = _gemini_client()
     for attempt in range(4):
         try:
             pace_llm_call()

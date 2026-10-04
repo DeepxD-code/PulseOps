@@ -121,7 +121,13 @@ def _llm_bullet(readme_content: str, repo_name: str, language: str) -> str | Non
     if gemini_key:
         try:
             from google import genai
-            client = genai.Client(api_key=gemini_key)
+            from google.genai import types
+            # Bounded: genai.Client has no default request timeout, so one
+            # unresponsive provider parked the whole process indefinitely.
+            client = genai.Client(
+                api_key=gemini_key,
+                http_options=types.HttpOptions(timeout=60000),
+            )
             resp = client.models.generate_content(
                 model="gemini-flash-lite-latest", contents=prompt,
             )

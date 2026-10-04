@@ -25,6 +25,18 @@ import os
 import re
 from dataclasses import dataclass
 
+
+def _gemini_client(api_key):
+    """One bounded client per process. See profile_builder for why."""
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        _GEMINI_CLIENT = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=60000),
+        )
+    return _GEMINI_CLIENT
+
+
 # ── Result type ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -243,7 +255,7 @@ def _call_gemini_soft(title: str, desc_snippet: str, domain_title: str = "",
         from pulseops_eval.analyzer import pace_llm_call
 
         pace_llm_call()
-        client = genai.Client(api_key=api_key)
+        client = _gemini_client(api_key)
         resp = client.models.generate_content(
             model="gemini-flash-lite-latest",
             contents=prompt,
