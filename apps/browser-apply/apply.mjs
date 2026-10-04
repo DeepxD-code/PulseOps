@@ -1864,7 +1864,7 @@ async function dismissConsentBanners(page) {
   return false;
 }
 
-async function tryUpload(page, selectors, filePath, ats = null, originUrl = null) {
+async function tryUpload(page, selectors, filePath, ats = null, originUrl = null, uploadHosts = null) {
   const currentUrl = typeof page?.url === "function" ? page.url() : "";
   const effectiveAts = ats || (isNavigationBoundary(originUrl) ? originUrl.ats : "generic");
   // A resume is PII.  Require the same HTTPS origin boundary in dry-run as
@@ -1888,6 +1888,24 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
       try {
         await el.setInputFiles(filePath, { timeout: 5000 });
         console.log(`    [upload] ${sel} ← ${path.basename(filePath)}`);
+          // The upload capability is only issued in RESPONSE to picking the
+          // file, so the first POST to object storage necessarily happens
+          // before the guard has learned the host - and is blocked. The ATS then
+          // receives an application with no CV attached. The harvest is
+          // asynchronous (it reads the ATS's response body), so poll briefly
+          // for the host rather than testing once and giving up.
+          if (uploadHosts && typeof uploadHosts.has === "function") {
+            const deadline = Date.now() + 4000;
+            while (!uploadHosts.size && Date.now() < deadline) {
+              await page.waitForTimeout(250);
+            }
+            if (uploadHosts.size) {
+              await el.setInputFiles(filePath, { timeout: 5000 }).catch(() => {});
+              console.log(`    [upload] retried against trusted host(s): ${[...uploadHosts].join(", ")}`);
+            } else {
+              console.log("    [upload] no upload host was advertised by the ATS; the CV may not have attached");
+            }
+          }
         return true;
       } catch (e) { console.log(`    [upload fail] ${sel}: ${e.message.slice(0,80)}`); }
     }
@@ -4188,7 +4206,16 @@ async function processJob(browser, job, profile, runtime = {}) {
   if (typeof page.on === "function") {
     page.on("response", (response) => {
       const href = (() => { try { return response.url(); } catch { return ""; } })();
-      if (!/presigned_fields|presigned_attributes/i.test(href)) return;
+      // Greenhouse names it presigned_fields/presigned_attributes. Ashby
+      // returns the same capability from a GraphQL operation instead:
+      //   POST /api/non-user-graphql?op=ApiCreateFileUploadHandle
+      // and then POSTs the file straight to
+      //   ashbyhq-infra-prd-main-app-uploaded-files-us-east-1.s3.amazonaws.com
+      // Because only the Greenhouse operation names were matched, that POST was
+      // blocked - so every Ashby application went out with NO CV attached.
+      // Both are the ATS naming its own upload target, so both are harvested
+      // from the ATS's own response. Nothing is guessed or wildcarded.
+      if (!/presigned_fields|presigned_attributes|ApiCreateFileUploadHandle/i.test(href)) return;
       response.text().then((body) => {
         try {
           const added = collectPresignedUploadHosts(JSON.parse(body), uploadHosts);
@@ -4611,7 +4638,7 @@ async function processJob(browser, job, profile, runtime = {}) {
         return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
       }
     }
-    const uploaded = await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary);
+    const uploaded = await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary, uploadHosts);
 
     // A resume upload usually triggers a server-side parse that reveals the
     // real form only minutes later (e.g. Shine "Reading Your Resume"). Fields
