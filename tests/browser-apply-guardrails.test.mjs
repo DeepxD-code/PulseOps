@@ -29,6 +29,7 @@ import {
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,
+  isFingerprintVendorHost,
   finalGuardAction,
   isEligibleJob,
   isSimulationJob,
@@ -496,7 +497,23 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
   assert.equal(isEligibleJob(eligible({ source: "sim:Mock" }), { explicit: true }), false);
 });
 
-  test("salary is answered in the unit the question asked for", () => {
+  test("the board's own fingerprint vendor is reachable, by hashed subdomain", () => {
+  // Enabled on the operator's instruction. A real browser loading an Ashby board
+  // runs SEON; we did not, so every session was anomalous on the one signal the
+  // board's classifier has. Fidelity, not evasion - nothing is spoofed.
+  const u = (s) => new URL(s);
+  // The host is a per-session hash, so this must match on suffix.
+  assert.equal(isFingerprintVendorHost(u("https://373091bdea75445784f25971a1532819.seondnsresolve.com/")), true);
+  assert.equal(isFingerprintVendorHost(u("https://be5c78e8bb794a1017b4d8dde08492f9.seondnsresolve.com/")), true);
+  assert.equal(isFingerprintVendorHost(u("https://seondnsresolve.com/")), true);
+  // Still only that vendor, and still HTTPS only.
+  assert.equal(isFingerprintVendorHost(u("https://evil.example/collect")), false);
+  assert.equal(isFingerprintVendorHost(u("http://x.seondnsresolve.com/")), false);
+  // A lookalike must not slip through on a substring.
+  assert.equal(isFingerprintVendorHost(u("https://seondnsresolve.com.evil.example/")), false);
+});
+
+test("salary is answered in the unit the question asked for", () => {
   const stated = {
   desired_salary_monthly: "INR 35,000 - 45,000 per month",
   desired_salary_annual: "INR 8,40,000 - 10,80,000 per annum",

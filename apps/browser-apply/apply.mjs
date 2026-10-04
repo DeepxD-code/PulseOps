@@ -1971,6 +1971,34 @@ const PORTAL_ASSET_HOSTS = Object.freeze({
   ],
 });
 
+/**
+ * Fraud-detection vendors a board loads for EVERY visitor.
+ *
+ * Enabled on the operator's instruction (2026-10-04) after two legitimate causes
+ * of Ashby's spam refusal were found and fixed - the captcha script and the CV
+ * upload, both of which our own guard had been breaking. What remained was
+ * SEON device fingerprinting, which the guard also blocked: a real browser
+ * loading jobs.ashbyhq.com runs it, we did not, so every session was
+ * anomalous on the one signal the board's classifier has.
+ *
+ * This is fidelity, not evasion, and the distinction matters: the page's own
+ * script is allowed to run exactly as it does for any human visitor. Nothing
+ * here spoofs, rotates or forges an identity, and no CAPTCHA is touched. What
+ * it does mean is that SEON receives a device fingerprint from this machine -
+ * which it already would from the candidate's own browser - so that is the
+ * operator's trade to make, not the guard's.
+ *
+ * The host is a per-session hash ("<hex>.seondnsresolve.com"), so this matches
+ * on the registrable suffix rather than an exact hostname.
+ */
+const FINGERPRINT_VENDOR_SUFFIXES = Object.freeze(["seondnsresolve.com"]);
+
+function isFingerprintVendorHost(url) {
+  if (!url || url.protocol !== "https:") return false;
+  const host = canonicalHost(url.hostname);
+  return FINGERPRINT_VENDOR_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+}
+
 function portalAssetHostAllowed(pageOrigin, url) {
   if (!pageOrigin || !url) return false;
   // canonicalHost takes a HOSTNAME. Handing it a full origin left the scheme
@@ -2195,9 +2223,13 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           requestUrl, requestType, requestMethod, uploadHosts
         );
         const trustedCaptchaToken = isAllowedCaptchaTokenRequest(requestUrl, requestType);
+        // A board's own fraud-detection vendor, allowed per the operator's
+        // instruction. See FINGERPRINT_VENDOR_SUFFIXES for why this is fidelity
+        // rather than evasion - and what it costs in privacy.
+        const trustedFingerprintVendor = isFingerprintVendorHost(requestParsed);
         const trustedAtsPost = isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, ats);
         if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
-            && !trustedCaptchaToken && !trustedAtsPost
+            && !trustedCaptchaToken && !trustedAtsPost && !trustedFingerprintVendor
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
           console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
@@ -6071,6 +6103,7 @@ export {
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,
+  isFingerprintVendorHost,
   finalGuardAction,
   isCurrentPageTrusted,
   isEligibleJob,
