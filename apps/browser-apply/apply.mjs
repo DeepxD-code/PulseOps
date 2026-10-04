@@ -2657,7 +2657,7 @@ async function answerCandidateQuestions(page, profile) {
       kind: "select",
       id: el.id || "",
       name: el.name || "",
-      label: (el.getAttribute("aria-label") || el.id || el.name || "").replace(/\s+/g, " ").trim().slice(0, 40),
+      label: (el.getAttribute("aria-label") || el.id || el.name || "").replace(/\s+/g, " ").trim().slice(0, 160),
       options: [...el.options].map((o) => String(o.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean),
     }));
   }).catch(() => []);
@@ -3200,7 +3200,12 @@ async function describeEmptyEntryFields(page) {
         // prompt, which is the only description such a field has.
         || (prompt ? prompt : type);
       out.push({
-        label: String(label).replace(/\s+/g, " ").trim().slice(0, 40),
+        // Wide enough to be answerable. At 40 characters a Scale AI label read
+    // "Are you currently bound by any agreement", which is not a question anyone
+    // can answer - the real one is ~430 characters. It also made two different
+    // long questions collide in the dedup below, hiding one of them entirely.
+    // Display only; nothing matches on this string.
+    label: String(label).replace(/\s+/g, " ").trim().slice(0, 160),
         required,
       });
     });
@@ -3307,7 +3312,7 @@ async function describeMissingRequiredFields(page) {
         || el.getAttribute("aria-required") === "true"
         || /\brequired\b/i.test(String(el.className || ""));
       if (required && !String(el.value || "").trim()) {
-        out.push(String(el.getAttribute("aria-label") || el.name || el.id || el.placeholder || type).slice(0, 40));
+        out.push(String(el.getAttribute("aria-label") || el.name || el.id || el.placeholder || type).slice(0, 160));
       }
     });
     return [...new Set(out)].slice(0, 8);
