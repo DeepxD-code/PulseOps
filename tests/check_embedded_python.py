@@ -24,6 +24,11 @@ Two more arrived in one session:
 
 Run by CI alongside the tests, because this is the class of defect that unit
 tests cannot reach.
+
+Paths resolve from this file's own location. A hardcoded absolute path made the
+guard check zero files on the Linux runner and fail the build - the guard was
+reporting success while inspecting nothing, which is the worst way for a guard
+to be wrong.
 """
 
 from pathlib import Path
@@ -31,16 +36,23 @@ import ast
 import re
 import sys
 
+ROOT = Path(__file__).resolve().parents[1]
+
 TARGETS = [
-    Path(r"E:\Potential-gold\PluseOPS\apps\browser-apply\apply.mjs"),
+    ROOT / "apps" / "browser-apply" / "apply.mjs",
 ]
 
 problems = []
 checked = 0
 
 for path in TARGETS:
+    if not path.is_file():
+        problems.append(f"{path}: not found - the guard would inspect nothing")
+        continue
     src = path.read_text(encoding="utf-8")
     blocks = re.findall(r"String\.raw`([^`]*)`\s*;", src, re.S)
+    if not blocks:
+        problems.append(f"{path}: no String.raw blocks found - the pattern is stale")
     for n, code in enumerate(blocks, 1):
         checked += 1
         if "`" in code:

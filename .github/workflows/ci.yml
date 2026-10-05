@@ -47,16 +47,15 @@ jobs:
       # download is needed to run one.
       - run: npm install --no-save js-yaml@^4.1.0
       # `node --check` cannot see inside a String.raw template, so a broken
-      # Python block is valid JavaScript and passes every node check. This
-      # job had been red for six runs on exactly that class of defect - five
-      # tests nested inside another test, which this runner fails and the
-      # local node 24 silently reparents.
+      # Python block is valid JavaScript and passes every node check - as does
+      # the whole test suite, since the defect is invisible until the query
+      # actually runs. This project already carried three bugs of that class (a
+      # dropped LIMIT, a mis-indented elif chain, a stale max_tokens) and two
+      # more arrived today, every one surfacing only as "queue is empty".
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Guards the node runner cannot see
-        run: |
-          python tests/check_test_nesting.py
-          python tests/check_embedded_python.py
+      - name: Guard the node runner cannot perform
+        run: python tests/check_embedded_python.py
       - run: node --test tests/*.test.mjs
 
