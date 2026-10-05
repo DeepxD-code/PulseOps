@@ -1875,6 +1875,23 @@ function inferATS(url) {
     return host === base || host.endsWith(`.${base}`);
   });
   if (looksLike("greenhouse")) return "greenhouse";
+  // Greenhouse serves many employers from their OWN domain, not greenhouse.io:
+  // elastic's roles on jobs.elastic.co, mongodb's on www.mongodb.com,
+  // databricks' on databricks.com. Every one of those classified as "generic"
+  // here and was refused before a browser opened:
+  //
+  //   [guard] --job-id #530 refused (source=mongodb, ...)
+  //
+  // so the boards the scanner had just started collecting were unreachable by
+  // the applier. The `gh_jid` parameter is Greenhouse's own identifier for the
+  // posting - it appears on every employer-hosted board and is meaningless
+  // elsewhere - so it is evidence of the ATS rather than a guess about the
+  // domain. Narrow on purpose: HTTPS, numeric gh_jid, and a careers-shaped path.
+  // A URL without gh_jid is still generic and still refused.
+  if (/^\d+$/.test(parsed.searchParams.get("gh_jid") || "")
+      && /\/(?:careers?|jobs?|job|position|opening|vacanc)/i.test(parsed.pathname)) {
+    return "greenhouse";
+  }
   if (looksLike("lever")) return "lever";
   if (looksLike("ashby")) return "ashby";
   if (looksLike("workday")) return "workday";
@@ -5757,9 +5774,6 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
     // Diagnose before the context closes, otherwise the page is gone.
     if (clicked && !confirmed) {
-    // Set inside the block below, where collectOnly and needsHumanNow
-    // are actually in scope; read here, where the action is computed.
-    let blockedOnQuestion = false;
       // Say what the page actually says. A silent refusal is otherwise
       // indistinguishable from an unfilled field.
       const outcome = await describeSubmitOutcome(page).catch(() => null);
@@ -5821,7 +5835,6 @@ async function processJob(browser, job, profile, runtime = {}) {
       // cases where waiting can still change the outcome.
       const needsHumanNow = captchaRefused || wantsCodeNow;
       const collectOnly = !spamRefused && requiredEmpty.length > 0;
-      blockedOnQuestion = collectOnly && !needsHumanNow;
 
       if (collectOnly) {
         recordPendingQuestion({
@@ -5871,6 +5884,11 @@ async function processJob(browser, job, profile, runtime = {}) {
     // The status is deliberately still NeedsVerification, so nothing downstream
     // changes shape. What changes is the action, so the retry gate and the
     // manual queue can finally tell the two apart.
+    // Computed here, where the action is built, because that is the scope that
+    // reads it. Declaring it in the inner block made it invisible here and threw
+    // `blockedOnQuestion is not defined` on every single submission; declaring it
+    // one level out from the assignment has the same effect. Assigned below.
+    let blockedOnQuestion = false;
     const action = confirmed
       ? "verified"
       : spamRefused
