@@ -1398,6 +1398,42 @@ function salaryAnswer(stated, signature) {
  * answer in the posting being applied to. Callers that do not have a job in hand
  * simply omit it, and that fact resolves to nothing rather than guessing.
  */
+/**
+ * The candidate's first name, from candidate.first_name or the name on file.
+ *
+ * Returns "" rather than a guess when there is nothing to work from, so the fact
+ * is dropped and the field is left for the human instead of being filled with
+ * something invented.
+ */
+function candidateFirstName(candidate) {
+  const explicit = String(candidate?.first_name || "").trim();
+  if (explicit) return explicit;
+  const parts = splitCandidateName(candidate?.name);
+  return parts.first || "";
+}
+
+/** The remainder of the name on file, or an explicit candidate.last_name. */
+function candidateLastName(candidate) {
+  const explicit = String(candidate?.last_name || "").trim();
+  if (explicit) return explicit;
+  const parts = splitCandidateName(candidate?.name);
+  return parts.last || "";
+}
+
+/**
+ * Split a full name into first and last.
+ *
+ * The last token is the last name, which holds for "AVRADEEP MAJUMDER" and for
+ * the common "First Middle Last" shape. Anything without at least two tokens
+ * yields no last name rather than treating the whole string as one, because
+ * filling "AVRADEEP MAJUMDER" into a surname field is worse than leaving it.
+ */
+function splitCandidateName(raw) {
+  const tokens = String(raw || "").trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return { first: tokens[0] || "", last: "" };
+  return { first: tokens[0], last: tokens[tokens.length - 1] };
+}
+
 function identityFacts(candidate, stated, job = null) {
   const spec = [
     {
@@ -1410,6 +1446,26 @@ function identityFacts(candidate, stated, job = null) {
       // hand the candidate's name to a "Company Name" field.
       hint: /^(?:name|_?systemfield_name)\b|legal\s*name|full\s*(?:legal\s*)?name|as\s*(?:per|stated\s*(?:in|on)\s*(?:your\s*)?(?:passport|aadhaar))|name\s*(?:as\s*)?(?:it\s*)?appears/i,
       value: candidate?.name,
+    },
+    {
+      // A first-name control with no fact behind it. Seen as a real blocker:
+      //   [blocked-by] required fields still empty: Preferred First Name
+      // Derived from candidate.name, which the legal-name fact already uses, so
+      // the two cannot disagree. An explicit candidate.first_name wins if set,
+      // for a name that does not split on whitespace.
+      tag: "preferred first name",
+      hint: /preferred\s+first\s+name|\bfirst\s+name\b|given\s+name|nickname|what\s+should\s+we\s+call\s+you|favorite\s+name/i,
+      value: candidateFirstName(candidate),
+    },
+    {
+      tag: "legal first name",
+      hint: /legal\s*first\s*name|applicant\s+first\s+name|given\s+name/i,
+      value: candidateFirstName(candidate),
+    },
+    {
+      tag: "legal last name",
+      hint: /legal\s*last\s*name|applicant\s+last\s+name|family\s+name|surname/i,
+      value: candidateLastName(candidate),
     },
     {
       tag: "phone number",
@@ -6682,6 +6738,8 @@ export {
   identityFacts,
   jobDescriptionFor,
   whyInterested,
+  candidateFirstName,
+  candidateLastName,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,

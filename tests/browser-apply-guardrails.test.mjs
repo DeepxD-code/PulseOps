@@ -28,6 +28,8 @@ import {
   identityFacts,
   jobDescriptionFor,
   whyInterested,
+  candidateFirstName,
+  candidateLastName,
   portalAssetHostAllowed,
   availabilityDate,
   salaryAnswer,
@@ -1186,6 +1188,42 @@ test("a control's question text is its own prompt, never the whole form", () => 
   const labelSig = signature(labelControl);
   assert.match(labelSig, /are you currently bound by any agreements/);
   assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
+
+test("a first-name control is answered from the name on file", () => {
+  // Seen as a real blocker on a live submission:
+  //   [blocked-by] required fields still empty: Preferred First Name
+  // candidate.name is already the source for the legal-name fact, so the parts
+  // are derived from it rather than from a second field that could disagree.
+  const c = { name: "AVRADEEP MAJUMDER" };
+  assert.equal(candidateFirstName(c), "AVRADEEP");
+  assert.equal(candidateLastName(c), "MAJUMDER");
+
+  const facts = identityFacts(c, {});
+  const first = facts.find((f) => f.tag === "preferred first name");
+  assert.ok(first, "a preferred-first-name fact must exist");
+  assert.equal(first.value, "AVRADEEP");
+  for (const q of ["Preferred First Name", "First Name", "Legal First Name"]) {
+    assert.ok(first.hint.test(q), `must match: ${q}`);
+  }
+  // A name field must not collect the candidate's name.
+  assert.equal(first.hint.test("Company Name"), false);
+  assert.equal(first.hint.test("Preferred Name"), false);
+
+  assert.equal(identityFacts(c, {}).find((f) => f.tag === "legal last name").value, "MAJUMDER");
+
+  // An explicit part wins, for a name that does not split on whitespace.
+  assert.equal(candidateFirstName({ name: "X Y Z", first_name: "Deep" }), "Deep");
+  assert.equal(candidateLastName({ name: "X Y Z", last_name: "D" }), "D");
+
+  // A single token yields NO surname. Writing the whole string into a surname
+  // field is worse than leaving it for the human.
+  assert.equal(candidateFirstName({ name: "Avradeep" }), "Avradeep");
+  assert.equal(candidateLastName({ name: "Avradeep" }), "");
+
+  // No name at all means no fact, rather than an invented one.
+  const none = identityFacts({}, {});
+  assert.equal(none.some((f) => f.tag === "preferred first name"), false);
+});
 
 test("why-interested is grounded in the posting, or left to the human", () => {
   // "Why are you interested in <company>?" is required free text on several Ashby
