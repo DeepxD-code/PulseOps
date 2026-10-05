@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$SkipLiveness,
     [switch]$SkipBrowserApply,
     [switch]$NoPush,
@@ -61,7 +61,15 @@ Write-Output "=== PulseOps weekly pipeline ==="
 Write-Output "=== log: $runLog ==="
 $weeklyArgs = @("apps/weekly-scan/src/pulseops_weekly/main_weekly.py")
 if ($SkipLiveness) { $weeklyArgs += "--skip-liveness" }
-& python -X utf8 @weeklyArgs
+# -u is not optional here. Python block-buffers stdout when it is not a
+# terminal, and this script's output is a pipe or a file, so every print in the
+# weekly pipeline sat in a buffer until the process exited. A run that takes
+# seven minutes in the liveness phase - which is expected, not a fault - showed
+# nothing at all for the whole of it, and was twice killed mid-flight on
+# 2026-10-05 by an operator who reasonably read the silence as a hang. The
+# transcript below cannot help either: it records what the process writes, and
+# the process had written nothing.
+& python -u -X utf8 @weeklyArgs
 $weeklyExit = $LASTEXITCODE
 Write-Output "weekly_exit=$weeklyExit"
 
@@ -93,7 +101,7 @@ if (-not $NoNotify) {
     # claims an application went out unless the run recorded one, and a mail
     # failure never changes the run's exit code.
     Write-Output "=== Notifying candidate of this run ==="
-    & python apps/browser-apply/tools/notify_run.py
+    & python -u apps/browser-apply/tools/notify_run.py
     Write-Output "notify_exit=$LASTEXITCODE"
 }
 
@@ -109,7 +117,7 @@ if ($OpenManualQueue) {
     # every blocked row looked identical, so the queue listed closed postings
     # from disabled portals with no form behind them.
     Write-Output "=== Opening the manual-apply queue ==="
-    & python apps/browser-apply/tools/manual_apply_queue.py --limit $ManualQueueLimit
+    & python -u apps/browser-apply/tools/manual_apply_queue.py --limit $ManualQueueLimit
     Write-Output "manual_queue_exit=$LASTEXITCODE"
 }
 

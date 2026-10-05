@@ -648,22 +648,34 @@ def _run_liveness_check() -> list[dict] | None:
         proc = subprocess.Popen(
             ["node", str(_portal_script("check_liveness.mjs")), "--json"],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # stderr is kept SEPARATE from stdout. check_liveness.mjs writes its
+            # per-portal progress to stderr and the JSON payload to stdout, so
+            # merging them would interleave progress lines into the buffer the
+            # JSON is parsed out of. Merging was what the previous version did.
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             cwd=str(ROOT),
         )
 
-        def _echo(stream, sink: list[str]) -> None:
+        def _echo(stream, sink: list[str] | None) -> None:
             for line in stream:
-                sink.append(line)
+                if sink is not None:
+                    sink.append(line)
                 sys.stdout.write("    " + line)
                 sys.stdout.flush()
             stream.close()
 
-        reader = threading.Thread(target=_echo, args=(proc.stdout, collected), daemon=True)
-        reader.start()
+        # stdout is collected for the parse; stderr is only echoed.
+        out_reader = threading.Thread(
+            target=_echo, args=(proc.stdout, collected), daemon=True,
+        )
+        err_reader = threading.Thread(
+            target=_echo, args=(proc.stderr, None), daemon=True,
+        )
+        out_reader.start()
+        err_reader.start()
         try:
             returncode = proc.wait(timeout=liveness_timeout)
         except subprocess.TimeoutExpired:
@@ -672,18 +684,14 @@ def _run_liveness_check() -> list[dict] | None:
             print(f"  [!] Liveness check timed out after {liveness_timeout}s")
             return None
         finally:
-            reader.join(timeout=5)
+            out_reader.join(timeout=5)
+            err_reader.join(timeout=5)
 
         print(f"  [~] Liveness phase finished in {int(time.time() - started)}s")
         if returncode != 0:
             print(f"  [!] Liveness check exited {returncode}")
             return None
-        # check_liveness.mjs may print human-readable lines around the JSON, so
-        # take the outermost JSON object rather than the whole stream.
-        raw = "".join(collected).strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        out = raw[start : end + 1] if start != -1 and end > start else ""
+        out = "".join(collected).strip()
         if not out:
             print("  [!] Liveness check returned no JSON")
             return None

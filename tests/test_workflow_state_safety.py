@@ -241,6 +241,10 @@ class _FakePopen:
 
     def __init__(self, *args, returncode: int = 0, stdout: str = "", **kwargs):
         self.stdout = io.StringIO(stdout)
+        # stderr is read on its own thread, because check_liveness.mjs writes its
+        # per-portal progress there and the JSON payload to stdout. Merging them
+        # would interleave progress into the buffer the JSON is parsed from.
+        self.stderr = io.StringIO("")
         self._returncode = returncode
 
     def wait(self, timeout=None):

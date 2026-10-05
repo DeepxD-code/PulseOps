@@ -118,14 +118,21 @@ async function main() {
   for (const portal of portals) {
     const r = await checkOne(portal);
     results.push(r);
-    if (!JSON_MODE) {
-      const flag = r.ok ? "OK " : "DOWN";
-      const note = r.requires_auth ? " (auth-required — liveness check ignores login wall)" : "";
-      console.log(
-        `[${flag}] ${r.name.padEnd(28)} ${String(r.status ?? "—").padEnd(5)} ${r.ms}ms${note}` +
-        (r.error ? `  — ${r.error}` : "")
-      );
-    }
+    // Progress goes to stderr in BOTH modes. It used to be suppressed whenever
+    // --json was passed, which is exactly the mode the weekly orchestrator uses,
+    // so the whole 7-minute probe looked like a hang: no output, no CPU on the
+    // python process, no sockets on that pid. Two healthy runs were killed
+    // mid-phase on 2026-10-05 because of it.
+    //
+    // stdout stays reserved for the JSON payload, so a caller can still pipe it
+    // straight into a parser.
+    const flag = r.ok ? "OK " : "DOWN";
+    const note = r.requires_auth ? " (auth-required — liveness check ignores login wall)" : "";
+    console.error(
+      `[${flag}] ${r.name.padEnd(28)} ${String(r.status ?? "—").padEnd(5)} ${r.ms}ms${note}` +
+      (r.error ? `  — ${r.error}` : "") +
+      `   [${results.length}/${portals.length}]`
+    );
   }
 
   const dead = results.filter((r) => !r.ok && r.enabled && !r.requires_auth);
