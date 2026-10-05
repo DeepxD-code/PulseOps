@@ -1,6 +1,7 @@
 """Focused, offline checks for workflow state and liveness safety."""
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
@@ -230,6 +231,25 @@ def test_weekly_live_env_explicitly_contains_smtp_and_existing_keys():
         assert f'echo "{key}=' in live
 
 
+class _FakePopen:
+    """Minimal stand-in for subprocess.Popen with a pipe-like stdout.
+
+    ``io.StringIO`` iterates line by line just as a real pipe does, so the tee's
+    read loop is genuinely exercised. A fake returning a plain string would skip
+    it and pass for the wrong reason.
+    """
+
+    def __init__(self, *args, returncode: int = 0, stdout: str = "", **kwargs):
+        self.stdout = io.StringIO(stdout)
+        self._returncode = returncode
+
+    def wait(self, timeout=None):
+        return self._returncode
+
+    def kill(self):
+        return None
+
+
 def test_liveness_dead_portals_are_data_not_tool_failure(monkeypatch):
     payload = {
         "results": [
@@ -266,12 +286,8 @@ def test_liveness_dead_portals_are_data_not_tool_failure(monkeypatch):
     }
     monkeypatch.setattr(
         weekly.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(payload),
-            stderr="",
-        ),
+        "Popen",
+        lambda *args, **kwargs: _FakePopen(stdout=json.dumps(payload)),
     )
 
     dead = weekly._run_liveness_check()
@@ -281,11 +297,10 @@ def test_liveness_dead_portals_are_data_not_tool_failure(monkeypatch):
 def test_liveness_tool_failure_is_not_interpreted_as_dead_portals(monkeypatch):
     monkeypatch.setattr(
         weekly.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
+        "Popen",
+        lambda *args, **kwargs: _FakePopen(
             returncode=2,
             stdout=json.dumps({"results": []}),
-            stderr="tool failed",
         ),
     )
 

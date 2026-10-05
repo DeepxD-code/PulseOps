@@ -617,17 +617,73 @@ def _run_liveness_check() -> list[dict] | None:
         liveness_timeout = int(os.environ.get("PULSEOPS_LIVENESS_TIMEOUT_S", "900"))
     except ValueError:
         liveness_timeout = 900
+    import threading
+
+    # Say how long this may take BEFORE starting it.
+    #
+    # This phase was twice mistaken for a hang on 2026-10-05 and killed while it
+    # was working - once at 4.6s CPU, once at 0.31s. The silence is structural:
+    # check_liveness.mjs prints nothing until it exits, `capture_output=True`
+    # holds even that back, and Python block-buffers its own prints when stdout
+    # is not a terminal. So a healthy run looked frozen - no output, ~0 CPU on
+    # this process because the browser child does the work, and no sockets here
+    # because they belong to the child.
+    #
+    # The same disease already cost one run elsewhere, per this file's own
+    # header comment: "a 16-minute run that completed successfully and moved
+    # five rows left a ten-line log and looked identical to a hang."
+    print(
+        f"  [~] Probing every enabled portal in a real browser. Observed at ~7 "
+        f"minutes, capped at {liveness_timeout}s. Progress is echoed below as "
+        f"the tool reports it."
+    )
+    started = time.time()
+    returncode = 1
+    out = ""
     try:
-        result = subprocess.run(
+        # Tee rather than capture: the JSON is still collected in full and
+        # parsed exactly as before, so the fail-closed handling of a tool
+        # failure is unchanged - only the waiting became visible.
+        collected: list[str] = []
+        proc = subprocess.Popen(
             ["node", str(_portal_script("check_liveness.mjs")), "--json"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(ROOT), timeout=liveness_timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(ROOT),
         )
-        returncode = getattr(result, "returncode", 0)
+
+        def _echo(stream, sink: list[str]) -> None:
+            for line in stream:
+                sink.append(line)
+                sys.stdout.write("    " + line)
+                sys.stdout.flush()
+            stream.close()
+
+        reader = threading.Thread(target=_echo, args=(proc.stdout, collected), daemon=True)
+        reader.start()
+        try:
+            returncode = proc.wait(timeout=liveness_timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            print(f"  [!] Liveness check timed out after {liveness_timeout}s")
+            return None
+        finally:
+            reader.join(timeout=5)
+
+        print(f"  [~] Liveness phase finished in {int(time.time() - started)}s")
         if returncode != 0:
             print(f"  [!] Liveness check exited {returncode}")
             return None
-        out = (getattr(result, "stdout", "") or "").strip()
+        # check_liveness.mjs may print human-readable lines around the JSON, so
+        # take the outermost JSON object rather than the whole stream.
+        raw = "".join(collected).strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        out = raw[start : end + 1] if start != -1 and end > start else ""
         if not out:
             print("  [!] Liveness check returned no JSON")
             return None
