@@ -6263,7 +6263,13 @@ if outreach_columns and "job_id" in outreach_columns and mode != "job":
 if mode == "email":
     sql = "SELECT j.* FROM jobs j JOIN send_queue q ON q.\"job_id\"=j.\"id\""
 else:
-    sql = "SELECT j.* FROM jobs j"
+    # Each row carries its job_description so the role filter can judge a posting
+    # whose title names no discipline. That text is stored clipped at 6000
+    # characters, which is well past what role scope needs - the decision comes
+    # from the title plus the opening of the posting - so selecting it in full
+    # for every row inflates the payload for nothing.
+    sql = ("SELECT j.*, substr(COALESCE(j.job_description,''), 1, 4000) AS job_description"
+    " FROM jobs j" if "job_description" in job_columns else "SELECT j.* FROM jobs j")
 if where:
     sql += " WHERE " + " AND ".join(where)
 # Prefer rows that are genuine ATS-hosted job listings. LinkedIn and aggregator
@@ -6304,7 +6310,48 @@ sql += """
    WHEN LOWER(COALESCE(j."link",'')) LIKE '%linkedin.com/%' THEN 2
    ELSE 1
  END, j."id" DESC
- LIMIT 100"""
+ -- The row cap MUST NOT decide which roles are reachable.
+ --
+ -- It used to sit here at a fixed LIMIT 100, applied before the role filter
+ -- runs, and a run reported:
+ --
+ --   [DB] 100 row(s) passed SQL -> 0 eligible; dropped by -
+ --        out-of-scope role: 100, score<45: 33
+ --   [DB] queue is empty - nothing eligible to apply to right now
+ --
+ -- while 41 in-scope Greenhouse roles sat in the table, unreachable. Measured
+ -- on what this query actually returned: 100 rows, score range 35-78, and only
+ -- THREE of them had a scope keyword in the title. The window was filled with
+ -- sales, BD, security and devrel roles from Ashby and YC boards, every one
+ -- scored 78, all correctly rejected by the role filter - and the LIMIT had
+ -- already spent itself before that filter ran.
+ --
+ -- Those high scores are an artefact, not a ranking signal. Scores of 74-88 were
+ -- written by the OLD evaluator, which rewarded tool-name density and rated
+ -- out-of-scope roles HIGHER than in-scope ones (in-scope median 52,
+ -- out-of-scope median 65). Ordering by score DESC therefore floats exactly the
+ -- rows the scope filter exists to remove.
+ --
+ -- rankByAcceptance runs after this cap, so it can only reorder rows already
+ -- fetched. With the window full of rejected rows it had almost nothing with a
+ -- record of accepting to promote, which is why it changed so little.
+ --
+ -- So the cap is far above the pool and overridable. Truncation must never be
+ -- what decides whether an in-scope role gets attempted.
+"""
+# The cap is a safety bound, not a selection mechanism - see the ORDER BY
+# comment. Read here, in the language that actually builds the SQL, because an
+# expression spliced into this String.raw block is Python and not JavaScript:
+# putting str(ROW_CAP) in the SQL text raised
+#   NameError: name 'ROW_CAP' is not defined
+# which node --check cannot see, and which surfaced only as an empty queue.
+try:
+    row_cap = int(os.environ.get("PULSEOPS_SQL_ROW_CAP") or "600")
+except Exception:
+    row_cap = 600
+if row_cap < 100:
+    row_cap = 600
+sql += " LIMIT " + str(row_cap)
 rows = conn.execute(sql, params).fetchall()
 result = []
 paused = send_paused()
@@ -6329,10 +6376,16 @@ for row in rows:
     result.append(item)
 print(json.dumps(result))
 `;
-    const out = execFileSync("python", ["-c", pythonCode, dbPath, mode, String(id), includeIndeed ? "1" : "0"], {
-      encoding: "utf-8",
-      timeout: 10000,
+  const out = execFileSync("python", ["-c", pythonCode, dbPath, mode, String(id), includeIndeed ? "1" : "0"], {
+  encoding: "utf-8",
+      timeout: 30000,
       windowsHide: true,
+      // Sized for the row cap, not left at the 1MB default. With 600 rows each
+      // carrying a job_description this child was killed with ENOBUFS and the
+      // run reported "queue is empty", which is indistinguishable from there
+      // being no work - the third time this session a query failure has been
+      // reported as an empty queue.
+      maxBuffer: 64 * 1024 * 1024,
     });
     const line = out.trim().split(/\r?\n/).pop();
     return line ? JSON.parse(line) : [];
