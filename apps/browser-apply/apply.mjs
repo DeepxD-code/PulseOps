@@ -3304,6 +3304,101 @@ function readLineFromStdin(timeoutMs = 180000) {
  * mark requiredness with a CSS asterisk rather than the required attribute.
  */
 /**
+ * Per-ATS acceptance counts, measured from recorded outcomes.
+ *
+ * The project has 19+ confirmed submissions from Greenhouse boards and 0 from
+ * Ashby, which accepts the form and then refuses it as spam. Nothing in the queue
+ * showed that, because the queue ranked on score alone - so Ashby rows at score 78
+ * took the first slots and six batches produced two verifications.
+ *
+ * Returns family -> {accepted, attempted}. A family with no history reads as
+ * {0, 0}, which ranks as UNPROVEN, so a newly added board is still attempted -
+ * just after the ones with a record.
+ */
+function readAcceptanceByAts(dbPath) {
+  const table = new Map();
+  try {
+    const code = String.raw`
+import json, sqlite3, sys
+out = {}
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    has_outcomes = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='outcomes'").fetchone()
+    if has_outcomes:
+        cur = conn.execute("""
+            SELECT CASE WHEN j.link LIKE '%greenhouse.io%' THEN 'greenhouse'
+                        WHEN j.link LIKE '%lever.co%'     THEN 'lever'
+                        WHEN j.link LIKE '%ashbyhq.com%'   THEN 'ashby'
+                        ELSE 'other' END AS family,
+                   o.stage, COUNT(*)
+              FROM outcomes o JOIN jobs j ON j.id = o.job_id
+             WHERE j.link LIKE '%greenhouse.io%' OR j.link LIKE '%lever.co%'
+                OR j.link LIKE '%ashbyhq.com%'
+             GROUP BY 1, 2
+        """)
+        for family, stage, n in cur.fetchall():
+            slot = out.setdefault(family, {"verified": 0, "attempted": 0})
+            if stage == "verified":
+                slot["verified"] += n
+            slot["attempted"] += n
+        conn.close()
+except Exception:
+    pass
+print(json.dumps(out))
+`;
+    const parsed = runSqliteJson(dbPath, code, [dbPath]);
+    for (const [family, counts] of Object.entries(parsed || {})) {
+      const f = String(family).trim().toLowerCase();
+      if (!f) continue;
+      table.set(f, {
+        accepted: Number(counts?.verified) || 0,
+        attempted: Number(counts?.attempted) || 0,
+      });
+    }
+  } catch {
+    // No outcomes table yet, or the DB is unreadable. Everything reads as
+    // unproven, which is the conservative ordering.
+  }
+  return table;
+}
+
+/**
+ * Order eligible rows so boards with a record of accepting come first.
+ *
+ * Groups: 0 confirmed a submission, 1 attempted without one, 2 no history.
+ * Within a group the original order is kept - score DESC, then ATS class, then
+ * recency - so this changes WHICH board is tried first, not which role within it.
+ * The sort is stable by index, so equal candidates never reshuffle.
+ */
+function rankByAcceptance(rows, acceptance) {
+  if (!Array.isArray(rows) || rows.length < 2) return rows;
+  if (!acceptance || acceptance.size === 0) return rows;
+  const groupOf = (row) => {
+    const link = String(row?.link || "").toLowerCase();
+    // Key the family on the ATS that SERVES the posting, not on the hostname.
+    // Greenhouse serves many employers from their own domain - elastic on
+    // jobs.elastic.co, mongodb on www.mongodb.com, databricks on
+    // databricks.com - so keying on the hostname left those boards with no
+    // acceptance record and ranked them BELOW Ashby, which has 34 attempts and
+    // zero acceptances. The board that accepts everything sorted behind the
+    // board that refuses everything, purely because of how the URL is spelled.
+    const hosted = inferATS(link);
+    const family = hosted === "greenhouse" || hosted === "lever" ? hosted
+      : link.includes("ashbyhq.com") ? "ashby"
+        : "other";
+    const rec = acceptance.get(family);
+    if (!rec) return 2;
+    if (rec.accepted > 0) return 0;
+    return rec.attempted > 0 ? 1 : 2;
+  };
+  return rows
+    .map((row, index) => ({ row, index, group: groupOf(row) }))
+    .sort((a, b) => (a.group - b.group) || (a.index - b.index))
+    .map((entry) => entry.row);
+}
+
+/**
  * Build a searchable signature for a form control: its own attributes plus the
  * text of the surrounding wrapper. Many widgets carry no aria-label or name
  * (id="question_123…"), so the human-readable prompt only exists in an
@@ -6241,8 +6336,11 @@ print(json.dumps(result))
   // rows. JS repeats the policy after the query so blacklist/contact files and
   // unusual schemas still fail closed.
   try {
-    const queried = queryRows("default");
-    const rows = queried.filter((row) => isEligibleJob(row));
+    // Rank by proven acceptance before score. Ashby refuses every submission and
+  // ranking on score alone let it take the first slots.
+  const acceptance = readAcceptanceByAts(dbPath);
+  const queried = queryRows("default");
+    const rows = rankByAcceptance(queried.filter((row) => isEligibleJob(row)), acceptance);
     // Report both counts. "No eligible jobs" is indistinguishable from "the
     // query matched nothing" without this, which hides the real blocker.
     if (queried.length !== rows.length) {
@@ -6738,6 +6836,8 @@ export {
   identityFacts,
   jobDescriptionFor,
   whyInterested,
+  rankByAcceptance,
+  readAcceptanceByAts,
   candidateFirstName,
   candidateLastName,
   portalAssetHostAllowed,
