@@ -208,7 +208,39 @@ const STRICT_ROLE_EXCLUDES = [
   "graphic design", "product design", "web design", "figma",
   "interaction design", "visual design", "brand design",
 ];
-const STRICT_ROLE_ALLOWED = /\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+/i;
+// A bare "ai" is NOT a discipline. It appears as a PRODUCT qualifier on
+// commercial roles, and four such applications went out today:
+//
+//   #717  Business Development Representative, Partnerships (Physical AI)
+//   #714  AI Product Manager (Coding/Multimodal)
+//   #713  AI Advisory Principal
+//   #655  AI Deployment Specialist, Beneficial Deployments
+//
+// Each passed on the TITLE ALONE, because the allow list carried a bare `|ai|`
+// alternative and matched the "AI" in "Physical AI". So "ai" now counts only
+// beside an engineering noun - "AI Engineer", "ML Engineer", "Engineer, AI".
+//
+// "specialist", "advisor" and "manager" are deliberately NOT nouns here:
+// "AI Deployment Specialist" and "AI Advisory Principal" are delivery and
+// advisory roles, not engineering ones. Every genuine target role carries the
+// engineering noun - "AI Engineer, FDE", "Agentic AI Engineer", "Applied AI
+// Architect", "AI Operations Engineer".
+// The gap is `.` and NOT `[^a-z0-9]`. That character class matches only
+// punctuation and whitespace, so it could bridge "AI Engineer" but never "AI
+// Infrastructure Engineer" - the intervening word is made of letters, and the
+// same mistake hid "located" from "country in which you are located".
+const AI_WITH_ENGINEERING_NOUN = new RegExp(
+  String.raw`\bai\b.{0,30}?\b(?:engineer|engineering|scientist|researcher|architect|developer|programmer)\b`
+  + String.raw`|\b(?:engineer|engineering|scientist|researcher|architect|developer|programmer)\b.{0,30}?\bai\b`,
+  "i",
+);
+
+const STRICT_ROLE_ALLOWED = new RegExp(
+  String.raw`\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b`
+  + String.raw`|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+`
+  + `|(?:${AI_WITH_ENGINEERING_NOUN.source})`,
+  "i",
+);
 
 // Titles that name no backend/ML discipline. These are not evidence of being
 // out of scope — "Founding Engineer" at a robotics startup is usually a backend
@@ -343,11 +375,15 @@ function isStrictTargetRole(title, description = "") {
   const value = raw.toLowerCase();
   if (!value) return false;
   if (STRICT_ROLE_EXCLUDES.some((marker) => value.includes(marker))) return false;
-  if (STRICT_ROLE_ALLOWED.test(value)) return true;
 
-  // A non-engineering discipline named in the title is disqualifying even when
-  // a generic noun is also present ("Solutions Architect", "Security Engineer").
+  // A non-engineering discipline named in the title is disqualifying even when an
+  // in-scope keyword is also present ("Solutions Architect, AI", "Security
+  // Engineer, ML"). This must run BEFORE the allow list: it used to run after,
+  // where STRICT_ROLE_ALLOWED.test(value) had already returned true, so a deny
+  // could never fire for any title the allow list matched.
   if (STRICT_ROLE_GENERIC_DENY.test(roleBasis(raw) || value)) return false;
+
+  if (STRICT_ROLE_ALLOWED.test(value)) return true;
 
   // Generic title: judge on the body rather than discarding the role.
   if (!isGenericRoleTitle(raw)) return false;

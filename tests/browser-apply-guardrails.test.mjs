@@ -1190,6 +1190,66 @@ test("a control's question text is its own prompt, never the whole form", () => 
   assert.match(labelSig, /are you currently bound by any agreements/);
   assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
 
+test("an AI product qualifier is not an engineering discipline", () => {
+  // Four applications went out that the scope rule forbids, each passing on the
+  // TITLE ALONE - no description involved:
+  //
+  //   #717  Business Development Representative, Partnerships (Physical AI)
+  //   #714  AI Product Manager (Coding/Multimodal)
+  //   #713  AI Advisory Principal
+  //   #655  AI Deployment Specialist, Beneficial Deployments
+  //
+  // The allow list carried a bare `|ai|` alternative, which matched the "AI" in
+  // "Physical AI". An AI *product* qualifier was being read as an AI
+  // *engineering* discipline.
+  for (const title of [
+    "Business Development Representative, Partnerships (Physical AI)",
+    "AI Product Manager (Coding/Multimodal)",
+    "AI Advisory Principal",
+    "AI Deployment Specialist, Beneficial Deployments",
+  ]) {
+    assert.equal(isStrictTargetRole(title, ""), false, `must reject: ${title}`);
+    assert.equal(
+      isStrictTargetRole(title, "We build frontier models. Python, PyTorch, CUDA."),
+      false,
+      `must reject even with an AI-heavy body: ${title}`,
+    );
+  }
+
+  // "ai" still counts when an engineering noun sits beside it, which is the
+  // shape every genuine target role has.
+  for (const title of [
+    "AI Engineer, FDE (Forward Deployed Engineer)",
+    "Agentic AI Engineer",
+    "Applied AI Architect, Commercial",
+    "AI Infrastructure Engineer",
+    "Engineer, AI Platform",
+  ]) {
+    assert.equal(isStrictTargetRole(title, ""), true, `must accept: ${title}`);
+  }
+
+  // "specialist", "advisor" and "manager" are deliberately NOT engineering
+  // nouns. "AI Deployment Specialist" is delivery work, not engineering.
+  assert.equal(isStrictTargetRole("AI Deployment Specialist", ""), false);
+  assert.equal(isStrictTargetRole("AI Solutions Specialist", ""), false);
+
+  // The deny list must be able to fire on a title the allow list also matches.
+  // It used to run AFTER the allow list returned true, so it could never fire:
+  //
+  //   "Solutions Architect, AI"  -> true   (allow list)
+  //   "Security Engineer, ML"    -> true   (allow list)
+  //
+  // A title naming a disqualifying discipline is out whatever else it contains.
+  for (const title of [
+    "Solutions Architect, AI",
+    "Security Engineer, ML",
+    "Sales Engineer, Backend",
+    "Solutions Engineer, Python",
+  ]) {
+    assert.equal(isStrictTargetRole(title, ""), false, `deny must win: ${title}`);
+  }
+});
+
 test("the location country is answered, and a phone dialling code is not", () => {
   // Two live defects, both visible only in a run log:
   //
