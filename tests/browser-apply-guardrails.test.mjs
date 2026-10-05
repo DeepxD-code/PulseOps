@@ -1190,6 +1190,72 @@ test("a control's question text is its own prompt, never the whole form", () => 
   assert.match(labelSig, /are you currently bound by any agreements/);
   assert.ok(labelSig.length < longLabel.length, "a long label must be reduced");
 
+test("the location country is answered, and a phone dialling code is not", () => {
+  // Two live defects, both visible only in a run log:
+  //
+  //   [fill] country -> "+91"
+  //   [combo] country: already answered "+91" - not overwriting
+  //   [blocked-by] required fields still empty:
+  //     Please choose the country in which you are located.*
+  //
+  // The single country call matched any control whose signature contained
+  // "country". A phone country-code combobox signs as "country code", so it was
+  // re-selected or found already set, and the location question was never
+  // reached. That question is a plain input, so combo() could not see it either,
+  // and identityFacts() had a `city` fact but no `country` fact.
+  const c = {
+    name: "AVRADEEP MAJUMDER",
+    country: "India",
+    phone: "+91 98765 43210",
+    current_location: "Greater Noida, Uttar Pradesh",
+  };
+  const facts = identityFacts(c, {});
+  const country = facts.find((f) => f.tag === "country");
+  assert.ok(country, "a country fact must exist");
+  assert.equal(country.value, "India");
+
+  for (const q of [
+    "Please choose the country in which you are located.",
+    "What country are you located in?",
+    "Country of residence",
+    "Your country of citizenship",
+    "Country",
+  ]) {
+    assert.ok(country.hint.test(q), `must match: ${q}`);
+  }
+
+  // A dialling code must never be filled with "India" - that is what wrote "+91"
+  // into the log. Excluded on words, so a control mentioning both still refuses.
+  for (const q of [
+    "Country code",
+    "Country Code (phone)",
+    "Phone country code",
+    "Dialing country",
+    "Country calling code",
+    "Mobile country code",
+    "Country of dialling code",
+  ]) {
+    assert.equal(country.hint.test(q), false, `must not match: ${q}`);
+  }
+
+  // The prefixes matter: `\blocat\b` can never match "located", because the
+  // trailing boundary needs a non-word character and `e` is a word character.
+  // The same defect hid `citizen` from "citizenship" and `reside` from
+  // "residing". Each of these reads as a match only with `\w*` on the prefix.
+  const gap = /\b(?:country|nation)\b.{0,40}?\b(?:locat\w*)/i;
+  assert.ok(gap.test("country in which you are located"), "prefixed gap must match");
+  assert.ok(!/\b(?:country|nation)\b.{0,40}?\b(?:locat)\b/i
+    .test("country in which you are located"),
+    "an unprefixed boundary cannot match - this is the bug that shipped");
+
+  // No country on file means no fact, rather than a default that gets written
+  // into forms the candidate did not ask us to complete.
+  assert.equal(
+    identityFacts({ name: "X Y" }, {}).some((f) => f.tag === "country"),
+    false,
+  );
+});
+
 test("boards that accept submissions are attempted before boards that refuse", () => {
   // Measured: Ashby 0 accepted / 34 attempted, Greenhouse 6 accepted / 24
   // attempted. The queue ranked on score alone, so Ashby rows at score 78 took

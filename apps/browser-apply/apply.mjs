@@ -1486,6 +1486,23 @@ function identityFacts(candidate, stated, job = null) {
       value: candidate?.current_location,
     },
     {
+      // The location country. Observed as a live blocker:
+      //
+      //   [blocked-by] required fields still empty:
+      //     Please choose the country in which you are located.*
+      //
+      // That question is a plain input, so combo() never sees it, and there was
+      // a `city` fact but no `country` fact - nothing on the text side matched
+      // it. The profile has held `candidate.country` all along.
+      //
+      // Deliberately requires a LOCATION word. A bare /country/ also matches a
+      // phone country code or a "Country of dialling code" control, and writing
+      // "India" into a dialling-code box is worse than leaving it.
+      tag: "country",
+      hint: /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)\s*[:*\-]?\s*$/i,
+      value: candidate?.country,
+    },
+    {
       tag: "years of experience",
       hint: /how\s+many\s+years\s+of\s+(?:industry\s+|relevant\s+|professional\s+)?experience|years\s+of\s+experience|total\s+experience/i,
       value: yearsOfExperience(candidate),
@@ -4365,7 +4382,20 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
-  await combo(/country/, ["India"]);
+  // The location country, NOT a phone's dialling code. The hint requires a
+  // location word beside "country" because a phone country-code combobox signs
+  // as "country code" and matched the bare /country/ this used to use:
+  //
+  //   [fill] country -> "+91"
+  //   [combo] country: already answered "+91" - not overwriting
+  //
+  // That selected the phone prefix and left the actual location question empty.
+  // A dialling-code control is now excluded outright, so the phone fact owns it
+  // and this owns "where are you located".
+  await combo(
+    /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)\s*[:*\-]?\s*$/i,
+    [String(candidate?.country || profile?.candidate?.country || "India").trim() || "India"],
+  );
   if (ACCEPT_TERMS) {
     // A stated willingness to work in-person is a commitment about the
     // candidate, so it is only ever given when explicitly instructed.
