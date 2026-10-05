@@ -4361,11 +4361,25 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           // dropdown. Only tried after the plain fill fails, so an ordinary text
           // input never pays for a click and a keystroke.
           const chosen = await pickFromAutocomplete(field, text);
-          if (chosen) landed = chosen;
+          if (chosen) {
+            landed = chosen;
+            // The option was found and clicked, which pickFromAutocomplete only
+            // does on an exact or prefix match - so it is accepted on that
+            // evidence rather than re-checked against the text we typed. A
+            // react-select that accepts a pick clears its own input and stores
+            // the OPTION's label, so "India +91" was being reported as a failed
+            // fill for "India", left uncounted, and re-listed as blocking the
+            // submit. Re-testing the label against the request is what produced
+            //   [answer] country: value did not stick (got "India +91")
+          }
         }
-        if (landed !== text && !String(await field.inputValue().catch(() => "")).trim()) {
-          console.log(`    [answer] ${tag}: value did not stick (got "${landed.slice(0, 40)}")`);
+        const stillEmpty = !String(await field.inputValue().catch(() => "")).trim();
+        if (!landed && stillEmpty) {
+          console.log(`    [answer] ${tag}: value did not stick (nothing was accepted)`);
           continue;
+        }
+        if (landed && landed !== text) {
+          console.log(`    [answer] ${tag}: option "${landed.slice(0, 40)}" selected for "${text.slice(0, 40)}"`);
         }
         console.log(`    [fill] ${tag} -> "${text.slice(0, 40)}"`);
         filled += 1;
