@@ -229,6 +229,34 @@ const STRICT_ROLE_EXCLUDES = [
 // punctuation and whitespace, so it could bridge "AI Engineer" but never "AI
 // Infrastructure Engineer" - the intervening word is made of letters, and the
 // same mistake hid "located" from "country in which you are located".
+/**
+ * A "software <engineering noun>" compound names an unambiguous engineering role.
+ *
+ * It belongs in the ALLOW list rather than the generic list, and the distinction
+ * matters. The generic list exists because a bare title like "Platform Engineer"
+ * or "Technical Engineer" says nothing about the discipline, so the posting body
+ * is consulted instead. "Software Developer" is not that: it names the discipline
+ * outright, exactly as "Backend Engineer" does.
+ *
+ * Routing these through the body check instead was tried first and cannot work
+ * where the scraper captured only company boilerplate:
+
+ *   #843  "Blinkit is a grocery and e-commerce platform that follows an instant
+ *          delivery model offering grocery staples..."   276 chars, no
+ *          requirements at all
+ *
+ * A body-confirmation rule then rejects a legitimate software role for the
+ * permanent reason that the posting text was never captured. Twelve applications
+ * were refused this way.
+ *
+ * The compound is matched as a rule, not enumerated, so unfamiliar phrasings are
+ * not silently excluded either. It stays NARROW: the noun must be an engineering
+ * one. "Software Sales", "Software Recruiter" and "Software Marketing" do not
+ * match, and the commercial deny list still runs first.
+ */
+const SOFTWARE_ENGINEERING_TITLE =
+  /\bsoftware\b[^a-z0-9]{0,20}\b(?:developer|development|programmer)\b|\b(?:developer|development|programmer)\b[^a-z0-9]{0,20}\bsoftware\b/i;
+
 const AI_WITH_ENGINEERING_NOUN = new RegExp(
   String.raw`\bai\b.{0,30}?\b(?:engineer|engineering|scientist|researcher|architect|developer|programmer)\b`
   + String.raw`|\b(?:engineer|engineering|scientist|researcher|architect|developer|programmer)\b.{0,30}?\bai\b`,
@@ -238,6 +266,14 @@ const AI_WITH_ENGINEERING_NOUN = new RegExp(
 const STRICT_ROLE_ALLOWED = new RegExp(
   String.raw`\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b`
   + String.raw`|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+`
+  // Blockchain and web3 are admitted as disciplines rather than excluded: the
+  // candidate has shipped a blockchain platform, so the work is transferable
+  // engineering and the rubric grades on that.
+  + String.raw`|blockchain|web3`
+  // "Software Developer", "Software Development Engineer", "Custom Software
+  // Engineer" - see SOFTWARE_ENGINEERING_TITLE. Kept narrow: the noun must be an
+  // engineering one, so "Software Sales" does not match.
+  + `|(?:${SOFTWARE_ENGINEERING_TITLE.source})`
   + `|(?:${AI_WITH_ENGINEERING_NOUN.source})`,
   "i",
 );
@@ -261,6 +297,10 @@ const STRICT_ROLE_GENERIC = [
   "field engineer", "agent engineer", "agents engineer", "agent strategist",
   "frontier agents engineer", "sales engineer", "technical engineer",
   "software development engineer in test", "quality engineer",
+    // QA automation is software engineering. These were refused on vocabulary
+    // alone while the candidate was actively seeking engineering roles.
+    "sdet", "software test engineer", "software qa engineer",
+    "qa automation engineer", "automation test engineer", "test engineer",
   "data engineer", "data platform engineer", "analytics engineer",
   // ML/AI engineering titles that name no language. Their discipline is in the
   // body: "Researcher, Training", "Post-Training Research Scientist",
@@ -303,6 +343,27 @@ function roleBasis(value) {
 const STRICT_ROLE_GENERIC_DENY =
   /\b(?:solutions?\s+(?:engineer|architect)|solution\s+specialist|security\s+engineer|customer\s+success|partner\s+success|product\s+support|technical\s+sourcer|technical\s+copywriter|gtm\s+strategist|sales\s+engineer|developer\s+relations|developer\s+advocate|devrel|electrical\s+engineer|operations\s+engineer)\b/;
 
+/**
+ * A "software <engineering noun>" compound is a generic engineering title.
+ *
+ * STRICT_ROLE_GENERIC enumerates "software engineer" and "software development
+ * engineer" but not "software developer", "custom software engineer" or
+ * "software development intern". Those titles are neither explicitly allowed nor
+ * recognised as generic, so they fall through to a third case that rejects them,
+ * producing "out-of-scope role" for titles that are plainly in scope. Twelve
+ * applications were refused on exactly this:
+ *
+ *   #843 Software Development Engineer   role=false
+ *   #828 Custom Software Engineer       role=false
+ *   #829 Software Developer             role=false
+ *
+ * Matched as a rule rather than enumerating more strings, because the whole point
+ * is that the next unfamiliar phrasing is not silently excluded either. A gap in
+ * a whitelist reads exactly like a blacklist, which is why nothing looked wrong.
+ */
+const SOFTWARE_ENGINEERING_COMPOUND =
+  /\bsoftware\b[^a-z0-9]{0,20}\b(?:engineer|developer|development|programmer)\b|\b(?:engineer|developer|programmer)\b[^a-z0-9]{0,20}\bsoftware\b/i;
+
 function isGenericRoleTitle(rawTitle) {
   const basis = roleBasis(rawTitle);
   if (!basis) return false;
@@ -321,7 +382,10 @@ function isGenericRoleTitle(rawTitle) {
     .sort((a, b) => b.length - a.length)
     .join("|");
   const asPhrase = new RegExp(`\\b(?:${escaped})(?:\\s+[i1](?:v|\\b)?|\\s+[23]|\\s+iii)?\\b`);
-  return asPhrase.test(basis);
+  // The compound rule is checked against the normalised FULL title as well as
+  // the basis, because the basis truncates at the first comma or location and
+  // would drop the noun it depends on.
+  return asPhrase.test(basis) || SOFTWARE_ENGINEERING_COMPOUND.test(norm);
 }
 
 // Body signals that make a generic-titled role genuinely in scope.
