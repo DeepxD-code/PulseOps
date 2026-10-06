@@ -145,11 +145,22 @@ def probe_gemini() -> dict:
 
 
 def probe_groq() -> dict:
-    """Is Groq's daily token budget able to serve ONE evaluation?
+    """Can Groq ADMIT one real evaluation prompt?
 
-    That is the only question worth asking, because the free tier's limit is
-    smaller than a single prompt on the models configured. A trivial call
-    succeeding does not mean an evaluation can run.
+    Not "is the API reachable" - that is the wrong question, and answering it made
+    this probe useless. The free tier's caps are per DAY and count PROMPT tokens:
+
+        openai/gpt-oss-20b    2,000 TPD
+        openai/gpt-oss-120b     200 TPD
+
+    and one evaluation prompt is ~2,400 tokens. A five-token probe is admitted on
+    an account that cannot run a single evaluation, so the loop kept starting full
+    runs that could only produce 60 identical quota failures.
+
+    So this sends the genuine prompt the evaluator would send, with max_tokens=5.
+    The prompt tokens are what the daily cap counts, so the request is admitted
+    only if there is genuinely room for an evaluation, and the completion costs
+    almost nothing either way.
     """
     try:
         from dotenv import load_dotenv
@@ -159,19 +170,66 @@ def probe_groq() -> dict:
         key = os.environ.get("GROQ_API_KEY", "")
         if not key:
             return {"ok": False, "why": "no GROQ_API_KEY"}
+
+        prompt = _representative_prompt()
+        if not prompt:
+            return {"ok": False, "why": "could not build a prompt"}
+
         client = Groq(api_key=key)
-        client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": "ok"}],
-            timeout=30,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=60,
             max_tokens=5,
         )
-        return {"ok": True}
+        # An HTTP 200 here means the request was admitted against the daily cap,
+        # which is the thing being tested.
+        _ = getattr(resp, "usage", None)
+        return {"ok": True, "prompt_chars": len(prompt)}
     except Exception as e:
         text = str(e)
         if "429" in text or "Rate limit" in text or "tokens per day" in text:
             return {"ok": False, "why": "429 daily token budget"}
-        return {"ok": False, "why": text[:120]}
+        return {"ok": False, "why": text[:140]}
+
+
+def _representative_prompt() -> str:
+    """A prompt the size of a real one, built by the evaluator's own code."""
+    try:
+        import yaml
+        sys.path.insert(0, str(ROOT / "packages" / "pulse-eval" / "src"))
+        from pulseops_eval.analyzer import _build_prompt
+
+        profile_path = ROOT / "config" / "profile.yml"
+        profile = yaml.safe_load(profile_path.read_text(encoding="utf-8-sig")) or {}
+        settings_path = ROOT / "config" / "settings.yml"
+        settings = (
+            yaml.safe_load(settings_path.read_text(encoding="utf-8-sig"))
+            if settings_path.exists() else {}
+        )
+        cv_data = None
+        try:
+            sys.path.insert(0, str(ROOT / "packages" / "pulse-core" / "src"))
+            from pulseops_core.cv_parser import parse_cv
+            if (ROOT / "cv.md").exists():
+                cv_data = parse_cv(str(ROOT / "cv.md"))
+        except Exception:
+            cv_data = None
+
+        return _build_prompt(
+            job={
+                "title": "Backend Engineer, Platform",
+                "company": "probe",
+                "description": "Python and Java backend services, REST APIs, "
+                               "PostgreSQL, Kafka, Kubernetes.",
+            },
+            cv_data=cv_data,
+            memory_context=None,
+            profile=profile,
+            settings=settings,
+        )
+    except Exception:
+        return ""
 
 
 def run(cmd: list[str], log_path: Path, timeout: int) -> int:
