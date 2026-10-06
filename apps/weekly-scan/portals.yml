@@ -289,14 +289,16 @@ ats_portals:
 
   - name: "Sprinto"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "sprinto"
     url: "https://jobs.ashbyhq.com/sprinto"
 
   - name: "Vercel"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "vercel"
     url: "https://jobs.ashbyhq.com/vercel"
@@ -383,21 +385,24 @@ ats_portals:
 
   - name: "PostHog"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "posthog"
     url: "https://jobs.ashbyhq.com/posthog"
 
   - name: "Replit"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "replit"
     url: "https://jobs.ashbyhq.com/replit"
 
   - name: "Vapi"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "vapi"
     url: "https://jobs.ashbyhq.com/vapi"
@@ -453,7 +458,8 @@ ats_portals:
 
   - name: "OpenAI"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "openai"
     url: "https://jobs.ashbyhq.com/openai"
@@ -461,7 +467,8 @@ ats_portals:
 
   - name: "Sierra"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "sierra"
     url: "https://jobs.ashbyhq.com/sierra"
@@ -469,7 +476,8 @@ ats_portals:
 
   - name: "Ramp"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "ramp"
     url: "https://jobs.ashbyhq.com/ramp"
@@ -477,7 +485,8 @@ ats_portals:
 
   - name: "Baseten"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "baseten"
     url: "https://jobs.ashbyhq.com/baseten"
@@ -485,7 +494,8 @@ ats_portals:
 
   - name: "Deepgram"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "deepgram"
     url: "https://jobs.ashbyhq.com/deepgram"
@@ -493,7 +503,8 @@ ats_portals:
 
   - name: "Fireworks AI"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "fireworks"
     url: "https://jobs.ashbyhq.com/fireworks"
@@ -501,7 +512,8 @@ ats_portals:
 
   - name: "Sarvam AI"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "sarvam"
     url: "https://jobs.ashbyhq.com/sarvam"
@@ -509,7 +521,8 @@ ats_portals:
 
   - name: "Modal"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "modal"
     url: "https://jobs.ashbyhq.com/modal"
@@ -517,7 +530,8 @@ ats_portals:
 
   - name: "Cartesia"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "cartesia"
     url: "https://jobs.ashbyhq.com/cartesia"
@@ -525,7 +539,8 @@ ats_portals:
 
   - name: "E2B"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "e2b"
     url: "https://jobs.ashbyhq.com/e2b"
@@ -533,7 +548,8 @@ ats_portals:
 
   - name: "Moonshot AI"
     engine: ashby
-    enabled: true
+    enabled: false
+    # DISABLED 2026-10-06: measured 0 accepted / 55 attempted, 33 refused as anti-automation. Scoring these spends the daily LLM budget on listings that cannot be submitted to. Re-enable if that changes.
     requires_auth: false
     company: "moonshot"
     url: "https://jobs.ashbyhq.com/moonshot"
