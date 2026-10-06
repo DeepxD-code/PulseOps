@@ -95,7 +95,13 @@ def _build_prompt(job: dict, cv_data, memory_context: str,
     template = _load_prompt_template()
 
     # Resume text
-    resume_text = cv_data.raw_text[:3000] if cv_data and cv_data.raw_text else ""
+    # 1200, not 3000. This is the same CV the bullets below were parsed out of,
+    # so the original sent every experience and project across the wire twice on
+    # every evaluation. Kept as a shortened fallback for anything the bullet
+    # extraction missed - the rubric asks for grounding, so it is trimmed rather
+    # than dropped. See the note on max_tokens: the binding constraint is the
+    # daily token budget, not this slice.
+    resume_text = cv_data.raw_text[:1200] if cv_data and cv_data.raw_text else ""
 
     # Extract bullets from cv_data for grounding
     all_bullets: list[str] = []
@@ -113,7 +119,7 @@ def _build_prompt(job: dict, cv_data, memory_context: str,
         prev_bullets = get_successful_bullets()
         if prev_bullets:
             seen, uniq = set(), []
-            for b in prev_bullets[:10]:
+            for b in prev_bullets[:5]:
                 key = (b.get("original", ""), b.get("tailored", ""))
                 if key not in seen:
                     seen.add(key)
@@ -136,7 +142,9 @@ def _build_prompt(job: dict, cv_data, memory_context: str,
         .replace("{resume_text}", resume_text)
         .replace("{bullets_text}", bullets_text)
         .replace("{feedback_context}", feedback_context)
-        .replace("{job_description}", (job.get("description") or "")[:2000])
+        # 1200, not 2000. Role fit is decided from the opening of a posting;
+    # the tail is boilerplate about the company and rarely changes the score.
+    .replace("{job_description}", (job.get("description") or "")[:1200])
     )
 
 
@@ -416,10 +424,15 @@ def _query_groq(prompt: str) -> dict:
                     # 3500 characters of JSON; at 2000 tokens the completion is
                     # cut off mid-object and Groq reports that as
                     # `400 Failed to validate JSON`, which is indistinguishable
-                    # from the model returning prose. Verified directly: the same
-                    # prompt on the same client returns valid JSON with
-                    # finish_reason=stop once the budget allows it. Truncation is a
-                    # budget problem, so the fix is budget.
+                    # from the model returning prose.
+                    #
+                    # What this does NOT explain is the failure seen on
+                    # 2026-10-05: `Expecting ',' delimiter: line 1 column 6150`
+                    # across most of a batch. 6150 characters is ~1500 tokens, well
+                    # inside this budget, and the cause was the account's DAILY
+                    # token limit - 2000 TPD on gpt-oss-20b - which a ~2900-token
+                    # prompt exceeds on its own. That needs quota, not a bigger
+                    # max_tokens, and no value here can raise a daily cap.
                 )
                 content = (resp.choices[0].message.content or "").strip()
                 # An empty completion is not a success. gpt-oss-120b answers

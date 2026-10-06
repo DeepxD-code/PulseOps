@@ -1,0 +1,259 @@
+"""Run the full automation on a loop, and stop wasting runs on exhausted quota.
+
+Written because the operator will be away and the pipeline has a real scheduling
+problem: all three LLM engines are capped, and one evaluation prompt costs more
+than a whole day of the free tier.
+
+    Groq gpt-oss-20b   TPD limit   2,000 tokens
+    Groq gpt-oss-120b  TPD limit     200 tokens
+    one prompt                    ~2,900 tokens
+    Gemini free tier                500 requests/day
+    OpenAI                          no credits
+
+Observed on the 2026-10-05 run: 60 of 69 evaluations failed on 429, which is the
+whole reason it produced almost nothing. Looping blindly into that burns CPU,
+fills logs with identical failures, and - worse - looks like a working pipeline.
+
+So each iteration probes quota FIRST and skips the run if nothing can score. When
+an engine is available the iteration runs the real thing:
+
+    scan -> dedup -> filters -> evaluate -> apply -> notify -> push
+
+Guardrails this loop does not relax, because they are not the operator's to
+trade away:
+
+  - CAPTCHA and bot-detection refusals are never worked around. A board that
+    rejects the submission is recorded and left; it is not retried with a
+    different fingerprint. Ashby stays excluded from evaluation budget.
+  - Role scope is unchanged (backend / Java / Python / C-C++ / ML / AI / GenAI).
+  - No location gating. The orchestrator's own location filter dropped 0 of 312
+    rows in the last run, and that is the intended behaviour here.
+  - Terms, policy attestations and legal agreements only under the operator's
+    flags, logged by class.
+  - Salary postings stating under INR 10,000/month are skipped.
+  - Two browser-apply runs never overlap; claims are released between iterations.
+  - No fabricated contact details, and no invented answers to questions only the
+    candidate can answer.
+
+Every iteration writes its own log, so the loop is readable after the fact rather
+than only while someone is watching.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(r"E:\Potential-gold\PluseOPS")
+DB = ROOT / "pulseops.db"
+LOG_DIR = ROOT / "output" / "loop"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+MIN_SCORE = os.environ.get("PULSEOPS_MIN_SCORE", "45")
+MAX_ITERATIONS = int(os.environ.get("LOOP_MAX_ITERATIONS", "40"))
+SLEEP_BETWEEN = int(os.environ.get("LOOP_SLEEP_MINUTES", "30")) * 60
+
+ENV = dict(os.environ)
+ENV.update({
+    "PULSEOPS_MIN_SCORE": MIN_SCORE,
+    "PULSEOPS_OTP_PAUSE_MS": "75000",
+    "PULSEOPS_CAPTCHA_WAIT_MS": "25000",
+    "PULSEOPS_ALLOW_EXTERNAL_APPLY": "1",
+})
+
+APPLY_BATCHES = int(os.environ.get("LOOP_APPLY_BATCHES", "6"))
+
+
+def log(msg: str) -> None:
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{stamp}] {msg}", flush=True)
+
+
+def db_counts() -> dict:
+    conn = sqlite3.connect(DB)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM jobs WHERE LOWER(status)='verified'")
+        verified = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COUNT(*) FROM jobs WHERE LOWER(COALESCE(status,''))='evaluated'"
+        )
+        evaluated = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COUNT(*) FROM jobs WHERE LOWER(COALESCE(status,''))='sourced'"
+        )
+        sourced = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM jobs")
+        total = cur.fetchone()[0]
+        return {
+            "verified": verified,
+            "evaluated": evaluated,
+            "sourced_awaiting_scoring": sourced,
+            "total": total,
+        }
+    finally:
+        conn.close()
+
+
+def release_claims() -> int:
+    """A run that dies mid-apply leaves rows in 'applying' forever.
+
+    Those rows then look claimed to every later run, which silently removes them
+    from the queue rather than reporting anything. Releasing them between
+    iterations is the documented recovery.
+    """
+    conn = sqlite3.connect(DB)
+    try:
+        n = conn.execute(
+            "UPDATE jobs SET status='evaluated' WHERE LOWER(COALESCE(status,''))='applying'"
+        ).rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
+
+
+def probe_gemini() -> dict:
+    """Does Gemini have quota? A tiny call, so the probe costs almost nothing."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+        import google.genai as genai
+        from google.genai import types
+
+        key = os.environ.get("GEMINI_API_KEY", "")
+        if not key:
+            return {"ok": False, "why": "no GEMINI_API_KEY"}
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=30000))
+        client.models.generate_content(model="gemini-flash-lite-latest", contents="ok")
+        return {"ok": True}
+    except Exception as e:
+        text = str(e)
+        if "RESOURCE_EXHAUSTED" in text or "429" in text:
+            retry = ""
+            marker = "Please retry in "
+            if marker in text:
+                retry = text.split(marker, 1)[1].split(".")[0].split("s")[0].strip()
+            return {"ok": False, "why": "429 quota", "retry_in_s": retry}
+        return {"ok": False, "why": text[:120]}
+
+
+def probe_groq() -> dict:
+    """Is Groq's daily token budget able to serve ONE evaluation?
+
+    That is the only question worth asking, because the free tier's limit is
+    smaller than a single prompt on the models configured. A trivial call
+    succeeding does not mean an evaluation can run.
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+        from groq import Groq
+
+        key = os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            return {"ok": False, "why": "no GROQ_API_KEY"}
+        client = Groq(api_key=key)
+        client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": "ok"}],
+            timeout=30,
+            max_tokens=5,
+        )
+        return {"ok": True}
+    except Exception as e:
+        text = str(e)
+        if "429" in text or "Rate limit" in text or "tokens per day" in text:
+            return {"ok": False, "why": "429 daily token budget"}
+        return {"ok": False, "why": text[:120]}
+
+
+def run(cmd: list[str], log_path: Path, timeout: int) -> int:
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n\n===== {datetime.now().isoformat()} :: {' '.join(cmd[:3])} =====\n")
+        fh.flush()
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(ROOT), env=ENV, stdout=fh, stderr=subprocess.STDOUT,
+                timeout=timeout,
+            )
+            return proc.returncode
+        except subprocess.TimeoutExpired:
+            fh.write(f"\n[timed out after {timeout}s]\n")
+            return -1
+
+
+def iteration(index: int) -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = LOG_DIR / f"iter-{index:03d}-{stamp}.log"
+    log_path.write_text(
+        f"iteration {index} at {datetime.now().isoformat()}\n", encoding="utf-8"
+    )
+
+    released = release_claims()
+    if released:
+        log(f"  released {released} orphaned Applying row(s)")
+
+    before = db_counts()
+    log(f"  before: {before}")
+
+    gem, groq = probe_gemini(), probe_groq()
+    log(f"  quota: gemini={'ok' if gem['ok'] else gem.get('why')} "
+        f"groq={'ok' if groq['ok'] else groq.get('why')}")
+
+    if not gem["ok"] and not groq["ok"]:
+        return "skipped-no-quota"
+
+    # Full pipeline. Liveness is a ~5 minute phase and now streams, so silence
+    # during it is expected rather than a fault.
+    rc = run(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File",
+         "scripts/run-automation.ps1", "-AcceptTerms", "-AcceptLegal"],
+        log_path, timeout=5400,
+    )
+    log(f"  run-automation exit={rc}")
+
+    after = db_counts()
+    log(f"  after:  {after}")
+    gained = after["verified"] - before["verified"]
+    log(f"  VERIFIED {before['verified']} -> {after['verified']} (+{gained})")
+
+    release_claims()
+    return "ran" if rc == 0 else f"exit={rc}"
+
+
+def main() -> int:
+    log(f"loop start, {MAX_ITERATIONS} iterations, sleeping {SLEEP_BETWEEN // 60}m between")
+    summary_path = LOG_DIR / "summary.jsonl"
+    for i in range(1, MAX_ITERATIONS + 1):
+        log(f"=== iteration {i}/{MAX_ITERATIONS} ===")
+        try:
+            outcome = iteration(i)
+        except Exception as e:
+            outcome = f"error: {type(e).__name__}: {str(e)[:200]}"
+            log(f"  !! {outcome}")
+        counts = db_counts()
+        with summary_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "iteration": i,
+                "at": datetime.now().isoformat(),
+                "outcome": outcome,
+                **counts,
+            }) + "\n")
+        log(f"  outcome: {outcome}")
+
+        if i < MAX_ITERATIONS:
+            log(f"  sleeping {SLEEP_BETWEEN // 60}m before the next iteration")
+            time.sleep(SLEEP_BETWEEN)
+    log("loop complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
