@@ -57,7 +57,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_SCORE = os.environ.get("PULSEOPS_MIN_SCORE", "45")
 MAX_ITERATIONS = int(os.environ.get("LOOP_MAX_ITERATIONS", "40"))
-SLEEP_BETWEEN = int(os.environ.get("LOOP_SLEEP_MINUTES", "30")) * 60
+SLEEP_BETWEEN = int(os.environ.get("LOOP_SLEEP_MINUTES", "15")) * 60
 
 ENV = dict(os.environ)
 ENV.update({
@@ -359,8 +359,24 @@ def main() -> int:
         log(f"  outcome: {outcome}")
 
         if i < MAX_ITERATIONS:
+            # Heartbeat on both sides of the sleep. Without this the loop can die
+            # between iterations and leave no trace: the iteration log records what
+            # the PIPELINE did, and the pipeline was not what stopped. That is how
+            # the 2026-10-06 loop completed iteration 1 successfully and then
+            # vanished with every log looking healthy.
+            beat = LOG_DIR / "heartbeat.txt"
+            beat.write_text(
+                f"iteration {i} done at {datetime.now().isoformat()}; "
+                f"outcome={outcome}; sleeping {SLEEP_BETWEEN // 60}m\n",
+                encoding="utf-8",
+            )
             log(f"  sleeping {SLEEP_BETWEEN // 60}m before the next iteration")
             time.sleep(SLEEP_BETWEEN)
+            beat.write_text(
+                f"woke at {datetime.now().isoformat()}; starting iteration {i + 1}\n",
+                encoding="utf-8",
+            )
+            log("  woke")
     log("loop complete")
     return 0
 
