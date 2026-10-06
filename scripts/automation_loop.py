@@ -232,6 +232,54 @@ def _representative_prompt() -> str:
         return ""
 
 
+def export_score_queue(tag: str) -> int:
+    """Write rows that still need a score, for me to pick up.
+
+    Kept out of the pipeline's own DB writes: this only reads, and appends to a
+    JSONL file, so it cannot interfere with a run in progress.
+    """
+    import json as _json
+
+    conn = sqlite3.connect(DB)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, company, title, link, source,"
+            " COALESCE(job_description, '') AS description"
+            " FROM jobs"
+            " WHERE LOWER(COALESCE(status,''))='sourced'"
+            " ORDER BY id"
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    if not rows:
+        return 0
+
+    path = LOG_DIR / "score-queue.jsonl"
+    already = set()
+    if path.exists():
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    already.add(_json.loads(line).get("id"))
+                except Exception:
+                    continue
+
+    fresh = [r for r in rows if r["id"] not in already]
+    if not fresh:
+        return 0
+
+    with path.open("a", encoding="utf-8") as fh:
+        for r in fresh:
+            r["queued_at"] = datetime.now().isoformat()
+            r["queued_by"] = tag
+            fh.write(_json.dumps(r, ensure_ascii=False) + "\n")
+    return len(fresh)
+
+
 def run(cmd: list[str], log_path: Path, timeout: int) -> int:
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(f"\n\n===== {datetime.now().isoformat()} :: {' '.join(cmd[:3])} =====\n")
@@ -276,6 +324,10 @@ def iteration(index: int) -> str:
         log_path, timeout=5400,
     )
     log(f"  run-automation exit={rc}")
+
+    queued = export_score_queue(f"iteration-{index}")
+    if queued:
+        log(f"  {queued} row(s) queued for scoring in output/loop/score-queue.jsonl")
 
     after = db_counts()
     log(f"  after:  {after}")
