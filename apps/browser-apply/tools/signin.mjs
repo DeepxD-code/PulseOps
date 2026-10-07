@@ -78,38 +78,70 @@ await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(()
 
 // Wait for the operator to finish, then close so the profile is flushed.
 await new Promise((resolve) => {
-  const done = async () => {
+  let settled = false;
+const done = async () => {
+    if (settled) return;
+    settled = true;
     console.log("\n  window closed - checking whether the session persisted...\n");
+
+    // Explicitly no verdict until a page has actually been read. This script
+    // exists to answer one question, and answering it from an empty body after a
+    // crash is how it previously reported success on its one unverifiable run.
+    let body = "";
+    let landed = null;
     try {
       const check = await chromium.launchPersistentContext(PROFILE, {
         channel: "msedge",
         headless: true,
       });
-      const p = check.pages()[0] || (await check.newPage());
-      await p.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-      await p.waitForTimeout(4000);
-      const body = (await p.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-      await check.close();
-
-      const stillAskingToRegister = /sign ?up|candidate sign ?up|create an account/i.test(
-        body.slice(0, 600),
-      );
-      console.log(`  landed: ${p.url().slice(0, 110)}`);
-      if (stillAskingToRegister) {
-        console.log("  session: NOT persisted - still being asked to register.");
-        console.log("  The pipeline will hit the same wall on the next run.");
-      } else {
-        console.log("  session: persisted. The pipeline will inherit it.");
+      try {
+        const p = check.pages()[0] || (await check.newPage());
+        await p.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await p.waitForTimeout(5000);
+        landed = p.url();
+        body = (await p.locator("body").innerText()).replace(/\s+/g, " ").trim();
+      } finally {
+        await check.close().catch(() => {});
       }
     } catch (e) {
-      console.log(`  could not verify: ${String(e).slice(0, 160)}`);
+      console.log(`  COULD NOT VERIFY: ${String(e.message || e).slice(0, 150)}`);
+      console.log("  No verdict is possible. Treat the session as NOT confirmed and");
+      console.log("  re-run this script, signing in before closing the window.");
+      resolve();
+      return;
+    }
+
+    if (landed) console.log(`  landed: ${String(landed).slice(0, 110)}`);
+    if (!body) {
+      console.log("  COULD NOT VERIFY: the page rendered no text.");
+      console.log("  No verdict is possible - re-run and check the window yourself.");
+      resolve();
+      return;
+    }
+
+    // Report what was observed, not a single optimistic boolean.
+    const askingToRegister = /sign ?up|candidate sign ?up|create an account|log ?in/i.test(
+      body.slice(0, 600),
+    );
+    const signedIn = /sign out/i.test(body);
+    console.log(`  shows a sign-up/log-in prompt: ${askingToRegister}`);
+    console.log(`  shows a signed-in marker (SIGN OUT): ${signedIn}`);
+    if (askingToRegister) {
+      console.log("  session: NOT persisted - still being asked to register.");
+      console.log("  The pipeline will hit the same auth wall on the next run.");
+    } else if (signedIn) {
+      console.log("  session: persisted. The pipeline will inherit it.");
+    } else {
+      console.log("  session: UNKNOWN - neither a wall nor a signed-in marker.");
+      console.log("  Re-run apps/browser-apply/tools/check_profile_session.mjs for detail.");
     }
     resolve();
   };
 
   ctx.on("close", done);
   // Also exit if the operator just closes the last tab.
-  setInterval(() => {
+  const iv = setInterval(() => {
+    if (settled) { clearInterval(iv); return; }
     try {
       if (ctx.pages().length === 0) done();
     } catch { /* context already closing */ }
