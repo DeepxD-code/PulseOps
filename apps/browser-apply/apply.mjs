@@ -1578,6 +1578,14 @@ function identityFacts(candidate, stated, job = null) {
       value: stated?.current_company,
     },
     {
+      // "How would you characterize your technical skills?" - blocked #333.
+      // Drafted from cv.md: it restates the stack and the shipped systems and
+      // claims nothing the CV does not already support.
+      tag: "technical skills",
+      hint: /characteri[sz]e your technical skills|describe your technical skills|how would you describe your (?:technical )?skills|your technical strengths|how do you describe your skills|what are your (?:technical )?skills/i,
+      value: stated?.technical_skills_self,
+    },
+    {
       tag: "city",
       // "Location (City)" on ScaleAI/Mixpanel is the candidate's city, which the
       // profile already holds. Not a work-authorisation question and not a
@@ -4297,6 +4305,60 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   };
 
   /**
+   * Answer a Yes/No or multi-select question expressed as radios or checkboxes.
+   *
+   * combo() handles a react-select and answerQuestion() handles a text control,
+   * which left a real gap: "Are you fluent or proficient in Arabic?" is very
+   * often a pair of radios, and neither could see it. That question blocked #716
+   * indefinitely.
+   *
+   * Scoped to the control's OWN question text rather than surrounding form text,
+   * so a hint can never match an unrelated radio on the same page - the same
+   * rule the rest of the file follows.
+   */
+  const radio = async (hintRe, values, tag) => {
+    const wanted = (values || []).filter(Boolean).map((v) => String(v).toLowerCase());
+    if (!wanted.length) return null;
+    const inputs = page.locator(
+      'input[type="radio"], input[type="checkbox"]',
+    );
+    const total = await inputs.count().catch(() => 0);
+    for (let i = 0; i < Math.min(total, 60); i++) {
+      const input = inputs.nth(i);
+      if (!(await input.isVisible().catch(() => false))) continue;
+      // Group by name so only one answer per question can be chosen.
+      const name = await input.getAttribute("name").catch(() => "");
+      if (!name) continue;
+      const group = page.locator(`input[type="radio"][name="${name}"], input[type="checkbox"][name="${name}"]`);
+      const size = await group.count().catch(() => 0);
+      const labels = [];
+      for (let k = 0; k < size; k++) {
+        const el = group.nth(k);
+        const text = (
+          (await el.evaluate((e) => (e.closest("label")?.innerText || e.value || "")).catch(() => ""))
+          || ""
+        ).trim();
+        labels.push({ el, text });
+      }
+      const signature = labels.map((l) => l.text).join(" ");
+      if (!hintRe.test(signature)) continue;
+      for (const l of labels) {
+        if (!wanted.some((w) => l.text.toLowerCase() === w)) continue;
+        if (await l.el.isChecked().catch(() => false)) {
+          console.log(`    [answer] ${tag}: already "${l.text.slice(0, 30)}"`);
+          return l.text;
+        }
+        await l.el.check({ timeout: 4000 }).catch(async () => {
+          await l.el.click({ timeout: 4000, force: true }).catch(() => {});
+        });
+        console.log(`    [commitment] ${tag} → "${l.text.slice(0, 40)}" recorded under operator authorisation`);
+        return l.text;
+      }
+    }
+    return null;
+  };
+
+  /**
    * Complete a react-select style autocomplete by picking an option.
    *
    * Greenhouse renders `Location (City)*` and the work-authorisation question as
@@ -4606,6 +4668,32 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
       { key: "future_us_residence", hint: /(?:reside|work|live|located?|relocate) (?:now or )?(?:in|to) the (?:us|usa|united states)|future.*(?:united states)|\bthe us\b/i, tag: "future US residence" },
       { key: "requires_visa_sponsorship", hint: /sponsorship|require a visa|need a visa|visa support|work authorization|right to work/, tag: "visa sponsorship" },
+      // Language proficiency. Keyed per language so any one of them can be
+      // answered, and matched on the language name because that is how the form
+      // words it: "Are you fluent or proficient in Arabic?". This blocked #716.
+      //
+      // Defaulting to "No" is the truthful answer for every language the operator
+      // has not confirmed he speaks - he stated directly that he does not speak
+      // Arabic. A blank required field blocks the submit outright, so leaving
+      // these unanswered guaranteed a blocked form; "No" costs only the roles
+      // that genuinely need that language.
+      { key: "language_arabic", hint: /\barabic\b/i, tag: "Arabic proficiency" },
+      { key: "language_french", hint: /\bfrench\b/i, tag: "French proficiency" },
+      { key: "language_spanish", hint: /\bspanish\b|castilian/i, tag: "Spanish proficiency" },
+      { key: "language_german", hint: /\bgerman\b/i, tag: "German proficiency" },
+      { key: "language_chinese", hint: /\b(?:chinese|mandarin|cantonese)\b/i, tag: "Chinese proficiency" },
+      { key: "language_hindi", hint: /\bhindi\b/i, tag: "Hindi proficiency" },
+      { key: "language_english", hint: /\benglish\b/i, tag: "English proficiency" },
+      // Frontend is excluded from the role scope, so a form claiming it would
+      // contradict the pipeline's own filter. The operator confirms he has none.
+      { key: "frontend_experience", hint: /frontend|front[- ]end|react|angular|vue\.?js/i, tag: "frontend experience" },
+      { key: "react_experience", hint: /\breact(?:\.js|js)?\b/i, tag: "React experience" },
+      { key: "angular_experience", hint: /\bangular(?:js)?\b/i, tag: "Angular experience" },
+      { key: "nodejs_experience", hint: /node(?:\.js|js)|npm packages/i, tag: "Node.js experience" },
+      // Self-described technical skills. Drafted from cv.md - it restates the
+      // stack and the shipped systems, and adds nothing the CV does not support.
+      // This blocked #333 ("How would you characterize your technical skills?").
+      { key: "technical_skills_self", hint: /characteri[sz]e your technical skills|describe your technical skills|how would you describe your (?:technical )?skills|your technical strengths|how do you describe your skills/i, tag: "technical skills" },
     ];
     for (const item of commitments) {
       const value = String(stated[item.key] ?? "").trim();
@@ -4614,6 +4702,38 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       if (picked) {
         console.log(`    [commitment] ${item.tag} → "${picked}" recorded under operator authorisation`);
       }
+    }
+
+    // Language proficiency. Answered from the operator's own statements: he
+    // speaks English and Hindi, and explicitly does not speak Arabic. Routed
+    // through radio() because these are usually Yes/No controls, and through the
+    // commitment list below so a select is covered too.
+    for (const [key, label] of [
+      ["language_arabic", "Arabic"], ["language_french", "French"],
+      ["language_spanish", "Spanish"], ["language_german", "German"],
+      ["language_chinese", "Chinese"],
+    ]) {
+      const answer = String(stated[key] ?? "").trim();
+      if (!answer) continue;
+      const picked = await radio(
+        new RegExp(`\\b${label}\\b`, "i"), [answer], `${label} proficiency`,
+      );
+      if (picked) continue;
+      await combo(new RegExp(`\\b${label}\\b`, "i"), [answer]);
+    }
+
+    // Frontend and Node are excluded from the role scope, so a form claiming
+    // them would contradict the pipeline's own filter. The operator confirms he
+    // has none. These are commonly Yes/No radios too.
+    for (const [key, label, re] of [
+      ["frontend_experience", "frontend", /frontend|front[- ]end/i],
+      ["react_experience", "React", /\\breact/i],
+      ["angular_experience", "Angular", /\\bangular/i],
+      ["nodejs_experience", "Node\.js", /node(?:\\.js|js)/i],
+    ]) {
+      const answer = String(stated[key] ?? "").trim();
+      if (!answer) continue;
+      await radio(re, [answer], `${label} experience`);
     }
 
     // Legal agreements are gated separately and logged as [legal]. The answer
