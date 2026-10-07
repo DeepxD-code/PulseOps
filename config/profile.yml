@@ -1,0 +1,187 @@
+# PulseOps Profile — Auto-generated from cv.md
+# DO NOT EDIT MANUALLY — run: python doctor.py --sync-profile
+# This file is gitignored. profile.yml.example is committed.
+
+candidate:
+  name: AVRADEEP MAJUMDER
+  email: trex2004avradeep@gmail.com
+  phone: '6289050278'
+  linkedin: https://linkedin.com/in/avradeep-majumder-4664b532a
+  github: https://github.com/DeepxD-code
+  portfolio: ''
+  experience_years: 0.2
+  current_location: Greater Noida, Uttar Pradesh
+  country: India
+  notice_period: 30 days
+  # Answers to questions that are commitments or facts about the candidate.
+  # These are stated only under --accept-terms and every use is logged as
+  # [commitment]. An absent key means the question is left unanswered rather
+  # than guessed. See profile.yml.example for the schema.
+  application_answers:
+    # Ashby and Greenhouse ask "Current Company" as a required field. This is a
+    # factual claim on a legal form, so it is stated here by the operator and
+    # never inferred from the CV: the CV lists AKS Intelligent Systems LLP,
+    # which ended 01 July 2026 and is therefore not a current employer.
+    current_company: 'Not currently employed'
+    # Transcribed from cv.md, the candidate's own document: the Experience
+    # section reads "Software Trainee Intern | AKS Intelligent Systems LLP |
+    # 01 May 2026 - 01 July 2026". Never inferred from a job posting.
+    current_job_title: 'Software Trainee Intern'
+    # Answered by the operator 2026-10-01: No. "Are you currently bound by any non-compete /
+    # confidentiality agreement?" is a legal representation and nothing in
+    # cv.md, the profile or the database answers it. It is left blank so the
+    # question reaches a human instead of the automation asserting a legal
+    # status it cannot know. To answer it once:
+    #   current_non_compete: 'No'
+    current_non_compete: 'No'
+    # Operator-answered 2026-10-04. Ashby/OpenAI ask this as a required free-text
+    # field on every backend role; it is a preference, not a fact, so it lives
+    # here rather than being inferred.
+    coding_time_percentage: '60-70%'
+    # Compensation floor stated by the operator: >= 35000 INR per month.
+    # Two renderings because boards ask per month and per annum; both sit at or
+    # above the floor. expected_salary (4-5 LPA) was BELOW it per month, which is
+    # why the answers are stated explicitly rather than derived from it.
+    desired_salary_monthly: 'INR 35,000 - 45,000 per month'
+    desired_salary_annual: 'INR 8,40,000 - 10,80,000 per annum'
+
+    # --- 2026-10-07: answers for questions that were blocking live
+    # submissions. The language and frontend entries are the operator's own
+    # statements, not inferences. technical_skills_self summarises cv.md and
+    # claims nothing the CV does not already support.
+    # business_travel_6_8_weeks is deliberately EMPTY: a yes is a commitment
+    # only the candidate can make, so the question stays open rather than
+    # being answered wrongly. Set it to Yes or No to unblock those forms.
+    language_arabic: 'No'
+    language_french: 'No'
+    language_spanish: 'No'
+    language_german: 'No'
+    language_chinese: 'No'
+    language_hindi: 'Yes'
+    language_english: 'Yes'
+    frontend_experience: 'No'
+    fullstack_frontend_experience: 'No'
+    react_experience: 'No'
+    angular_experience: 'No'
+    nodejs_experience: 'No'
+    technical_skills_self: 'Backend and AI/ML engineer. Strongest in Python and Java, with C++ and backend engineering; also ML and generative AI. I have shipped three production systems rather than only coursework - a 16-signal fraud intelligence platform, an offline-first logistics platform, and a multi-classifier ML code profiler - and I have a completed backend engineering internship maintaining production software. I am honest about the edge of what I know rather than guessing.'
+
+
+    # --- 2026-10-07: Scale AI asks "How would you characterize your
+    # technical skills?" as a five-option EXPERIENCE-LEVEL select, not a
+    # text box. Read off the live form; no prose is accepted there, so this
+    # must be one of its options. This one is true of cv.md: a completed
+    # backend engineering internship (AKS Intelligent Systems LLP, May-Jul
+    # 2026), and the option itself reads "either full time or internship".
+    # Spelled exactly as rendered, because the comparison is against the
+    # rendered option text.
+    technical_skills_experience: 'I worked as a Software Engineer (either full time or internship)'
+    ever_interviewed_here: 'No'
+    open_to_relocation: 'Yes'
+    future_us_residence: 'Yes'
+    requires_visa_sponsorship: 'Yes'
+    # Legal agreements are a separate class of act: accepting one changes what
+    # the candidate can legally do later. These are only ever used when the run
+    # also passes --accept-legal, and every acceptance is logged as [legal].
+    arbitration_agreement: 'I agree'
+    # Used ONLY to answer "why are you interested in <company>?" with something
+    # grounded rather than invented. These are the candidate's own shipped
+    # projects, transcribed from cv.md, and each one is a statement of work
+    # actually done. Nothing here is a claim about enthusiasm, fit or intent -
+    # those are the candidate's to write, not the automation's.
+    #
+    # The answer picks whichever of these shares the most engineering vocabulary
+    # with what the posting says the company does, and requires at least two
+    # shared terms so a single coincidental word cannot pick one. With no
+    # overlapping project, or with no posting text, the question is left for the
+    # candidate instead of being filled with something plausible.
+    cv_projects:
+      - 'AnnaSuraksha, a PDS fraud-detection platform in Java and Spring Boot with a 16-signal scoring engine and a Groq LLM explanation layer'
+      - 'IntelliX, an ML code-performance profiler in Python and scikit-learn using four classifiers and AST-based multi-language analysis'
+      - 'Sangam, an offline-first military logistics platform with sync and conflict resolution'
+  expected_salary: 4-5 LPA
+  education: B.Tech — CSE (AI/ML), 2027
+domain:
+  title: Backend Engineer
+  core_skills:
+  - Python
+  - C++
+  - Docker
+  - PostgreSQL
+  adjacent_skills:
+  - AWS
+  - Linux
+  - MongoDB
+  - RabbitMQ
+  - System Design
+  - Microservices
+  - CI/CD
+  - Node.js
+  hard_exclude:
+  - React
+  - Angular
+  - Vue
+  - Figma
+  - CSS
+  - Flutter
+  - Swift
+  - Android
+  - iOS
+  soft_exclude:
+  - TypeScript
+  - JavaScript
+  - Node.js
+  - Next.js
+  seniority:
+    target:
+    - intern
+    - junior
+    - associate
+    - entry-level
+    - new grad
+    exclude:
+    - senior
+    - lead
+    - principal
+    - staff
+    - director
+    - manager
+    - head of
+    - vp
+  role_types:
+    include:
+    - backend
+    - software engineer
+    - systems engineer
+    - infrastructure
+    - platform engineer
+    - site reliability
+    - devops
+    - api engineer
+    exclude:
+    - frontend
+    - designer
+    - product manager
+    - data scientist
+    - ml engineer
+    - recruiter
+    - sales
+    - marketing
+    - android
+    - ios
+    - mobile
+past_employers:
+- AKS Intelligent Systems LLP
+- West Bengal, India
+search:
+  queries:
+  - machine learning engineer intern
+  - AI engineer internship
+  - Java backend developer
+  - C++ software engineer
+  - backend engineer intern Java
+  - generative AI engineer
+  - deep learning engineer intern
+  - backend developer intern new grad
+  location: India
+  max_age_days: 7

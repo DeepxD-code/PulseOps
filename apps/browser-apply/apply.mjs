@@ -1578,12 +1578,101 @@ function identityFacts(candidate, stated, job = null) {
       value: stated?.current_company,
     },
     {
-      // "How would you characterize your technical skills?" - blocked #333.
-      // Drafted from cv.md: it restates the stack and the shipped systems and
-      // claims nothing the CV does not already support.
+      // The free-text form of the same question, for forms that really do ask
+      // it in a textarea. Drafted from cv.md only.
+      //
+      // `once` so it cannot fight the select below for the same prompt: this is
+      // Scale AI's wording, and there the control is a five-option
+      // experience-level dropdown that rejects prose outright. Without `once`,
+      // answerQuestion would fill the react-select, have the value rejected, and
+      // report "value did not stick" - which is exactly the misleading log that
+      // made #333 look like a routing bug instead of a wrong-shaped value.
       tag: "technical skills",
-      hint: /characteri[sz]e your technical skills|describe your technical skills|how would you describe your (?:technical )?skills|your technical strengths|how do you describe your skills|what are your (?:technical )?skills/i,
+      hint: /describe your technical skills|how would you describe your (?:technical )?skills|your technical strengths|how do you describe your skills|what are your (?:technical )?skills/i,
       value: stated?.technical_skills_self,
+      once: true,
+    },
+    // Language proficiency, as TEXT questions. Measured on Scale AI's live
+    // form: "Are you fluent or proficient in Arabic?" is a plain
+    // input[type=text] carrying the question in its aria-label. It is not a
+    // dropdown and not a radio pair, so the radio/combo attempts alone could
+    // never reach it - which is exactly how it blocked #716. These facts are
+    // the primary route; radio() and combo() below still cover the other
+    // control types a form might use for the same question.
+    //
+    // once: true is load-bearing. A page can carry several language
+    // questions, and without it Arabic's "No" would be written into the
+    // French field - the exact fabrication this mechanism exists to prevent.
+    //
+    // Values come only from application_answers, supplied by the operator.
+    {
+      tag: "Arabic proficiency",
+      hint: new RegExp("\\bArabic\\b", "i"),
+      value: stated?.language_arabic,
+      once: true,
+    },
+    {
+      tag: "French proficiency",
+      hint: new RegExp("\\bFrench\\b", "i"),
+      value: stated?.language_french,
+      once: true,
+    },
+    {
+      tag: "Spanish proficiency",
+      hint: new RegExp("\\bSpanish\\b", "i"),
+      value: stated?.language_spanish,
+      once: true,
+    },
+    {
+      tag: "German proficiency",
+      hint: new RegExp("\\bGerman\\b", "i"),
+      value: stated?.language_german,
+      once: true,
+    },
+    {
+      tag: "Chinese proficiency",
+      hint: new RegExp("\\bChinese\\b", "i"),
+      value: stated?.language_chinese,
+      once: true,
+    },
+    {
+      tag: "Hindi proficiency",
+      hint: new RegExp("\\bHindi\\b", "i"),
+      value: stated?.language_hindi,
+      once: true,
+    },
+    {
+      tag: "English proficiency",
+      hint: new RegExp("\\bEnglish\\b", "i"),
+      value: stated?.language_english,
+      once: true,
+    },
+    // Frontend and Node are outside the pipeline's role scope, so a form
+    // claiming them would contradict the filter the rest of the system
+    // enforces. The operator confirms he has none of them.
+    {
+      tag: "frontend experience",
+      hint: /frontend|front[- ]end/i,
+      value: stated?.frontend_experience,
+      once: true,
+    },
+    {
+      tag: "React experience",
+      hint: /\\breact(?:\\.js|js)?\\b/i,
+      value: stated?.react_experience,
+      once: true,
+    },
+    {
+      tag: "Angular experience",
+      hint: /\\bangular(?:js)?\\b/i,
+      value: stated?.angular_experience,
+      once: true,
+    },
+    {
+      tag: "Node.js experience",
+      hint: /node(?:\\.js|js)/i,
+      value: stated?.nodejs_experience,
+      once: true,
     },
     {
       tag: "city",
@@ -4206,6 +4295,11 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // its option nodes in the DOM, and matching those made a Yes/No question
     // read the previous dropdown's country list.
     const OPTION = '[role="option"]:visible';
+    // Tracked so "the control matched but no option did" can be reported
+    // separately from "no control matched at all". See the tail of this function.
+    let sawControl = false;
+    let matchedCount = 0;
+    const sawOptions = [];
     for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
@@ -4216,6 +4310,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         return "";
       });
       if (!hintRe.test(String(signature))) continue;
+      matchedCount++;
       // Never overwrite a question that is already answered. A broad hint can
       // match a different question entirely, and re-selecting here would
       // silently write the wrong answer into the wrong field.
@@ -4232,6 +4327,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       }).catch(() => "");
       if (already) {
         console.log(`    [combo] ${hintRe.source}: already answered "${already.slice(0, 30)}" — not overwriting`);
+        // Counts as a match. Without this, a control that is matched and already
+        // answered is reported as "no control matched" on the next pass, which is
+        // the same conflation this branch exists to remove.
+        sawControl = true;
         continue;
       }
       const wanted = values[0] || "";
@@ -4239,17 +4338,25 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       // unfiltered list. Typing a prefix of the answer is wrong for Yes/No-style
       // widgets whose real option reads "Yes" or "I have read and agree" — the
       // filter then matches nothing and the field is silently left empty.
+      // The value is compared as plain text, NOT interpolated into a RegExp.
+      // It was, and any answer containing a metacharacter threw a SyntaxError -
+      // parentheses being the common case, since real option text is full of
+      // them: "(either full time or internship)". A crash here would abort the
+      // whole run, and the very answer this change introduces contains one.
+      const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const pickOption = async (texts) => {
-        const hit = texts.find((t) => new RegExp(`^${wanted}\\b`, "i").test(t))
-          || texts.find((t) => new RegExp(`^${wanted}`, "i").test(t))
-          || texts.find((t) => new RegExp(`\\b${wanted}\\b`, "i").test(t))
+        const lower = (t) => String(t).toLowerCase();
+        const w = lower(wanted);
+        const hit = texts.find((t) => lower(t) === w)
+          || texts.find((t) => lower(t).startsWith(w))
+          || texts.find((t) => new RegExp(`\\b${reEsc(wanted)}\\b`, "i").test(t))
           // A dropdown offering exactly one option has no choice to make, so the
           // configured wording cannot be a mismatch worth failing on. This is
           // how the legal acknowledgements are written: one long option, not
           // Yes/No. Selecting it is the only way to complete the field.
           || (texts.length === 1 ? texts[0] : null);
         if (!hit) return null;
-        if (texts.length === 1 && !new RegExp(`\\b${wanted}\\b`, "i").test(hit)) {
+        if (texts.length === 1 && !new RegExp(`\\b${reEsc(wanted)}\\b`, "i").test(hit)) {
           console.log(`    [combo] ${hintRe.source}: only one option offered, selecting it`);
         }
         await page.locator(OPTION).filter({ hasText: hit }).first()
@@ -4298,6 +4405,18 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       }
       if (chosen) return chosen;
       await pressEscape();
+      // The control DID match; only the option list refused the value. That is a
+      // different fault from "no control matched" and needs a different fix, so
+      // it is reported separately. Conflating them made #333 look like a
+      // matching bug twice, when the value was simply the wrong shape for a
+      // five-option experience-level select.
+      sawControl = true;
+      sawOptions.push(texts.length);
+    }
+    if (sawControl) {
+      console.log(`    [combo] ${hintRe.source}: control matched but no option accepted the value `
+        + `(saw ${sawOptions.join("/")} option(s) across ${matchedCount} attempt(s))`);
+      return null;
     }
     // Never fail silently: a hint that matches no control is a bug worth seeing.
     console.log(`    [combo] ${hintRe.source}: no control matched (${total} combobox checked)`);
@@ -4693,7 +4812,21 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       // Self-described technical skills. Drafted from cv.md - it restates the
       // stack and the shipped systems, and adds nothing the CV does not support.
       // This blocked #333 ("How would you characterize your technical skills?").
-      { key: "technical_skills_self", hint: /characteri[sz]e your technical skills|describe your technical skills|how would you describe your (?:technical )?skills|your technical strengths|how do you describe your skills/i, tag: "technical skills" },
+      // Scale AI asks "How would you characterize your technical skills?"
+      // as a five-option EXPERIENCE-LEVEL select, not a text box. Measured on
+      // the live form: options are "I worked as a Software Engineer (either
+      // full time or internship)" / "I studied Computer Science ... but
+      // didn't do industry SWE" / "I studied a technical degree ..." /
+      // "I taught myself SQL, Python, etc." / "I don't have enough technical
+      // experience for the role". No prose can ever be accepted, so this must
+      // be answered with one of them and must go through combo().
+      //
+      // The chosen option is drawn from cv.md: a completed backend engineering
+      // internship at AKS Intelligent Systems LLP, May-July 2026. The option
+      // reads "either full time or internship", so it is true - and more
+      // accurate than the alternative defensible option, since he did do
+      // industry SWE.
+      { key: "technical_skills_experience", hint: /characteri[sz]e your technical skills/i, tag: "technical skills" },
     ];
     for (const item of commitments) {
       const value = String(stated[item.key] ?? "").trim();
