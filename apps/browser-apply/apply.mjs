@@ -5101,6 +5101,86 @@ function missingContactFields(profile) {
   return REQUIRED_CONTACT_FIELDS.filter((field) => !String(candidate[field] || "").trim());
 }
 
+/**
+ * Use a portal's own federated sign-in when no Submit is on the page.
+ *
+ * A portal that hides its application form behind a login is not a form
+ * problem, and it is indistinguishable from a multi-step flow if all you check
+ * is whether a Submit exists. Both produce "no Submit button detected - site
+ * may use multi-step flow", which is exactly how ten Instahyre applications
+ * and two Wellfound ones ended in NeedsReview without anyone noticing the
+ * real cause.
+ *
+ * Google is preferred over LinkedIn, and both over a password form, because a
+ * session already in the persistent profile (.edge-profile, the one --edge
+ * uses) reduces the whole exchange to one click with no credential involved.
+ *
+ * Returns what actually happened rather than assuming success:
+ *   { signedIn: true,  via }
+ *   { signedIn: false, reason } - one of not-an-auth-wall,
+ *     no-federated-option, credentials-required
+ */
+async function tryFederatedSignIn(page) {
+  const PROVIDERS = [
+    { via: "Google", re: /(?:sign\s*in|sign\s*up|log\s*in|continue)\s+with\s+google/i },
+    { via: "LinkedIn", re: /(?:sign\s*in|sign\s*up|log\s*in|continue)\s+with\s+linkedin/i },
+  ];
+  const wall = await page.evaluate(() => {
+    const body = String(document.body?.innerText || "");
+    const head = body.replace(/\s+/g, " ").slice(0, 700);
+    return {
+      url: location.href,
+      // A wall is either signalled by the URL or by the page asking to sign in.
+      looksLikeWall: /\/(login|register|signup|signin|sign-in|auth|onboarding)\b/i.test(location.href)
+        || /\b(sign up|sign in|log in|create (?:an )?account|register)\b/i.test(head),
+      labels: [...document.querySelectorAll("button, a, [role=button], input[type=submit], div[role=button]")]
+        .map((el) => String(el.innerText || el.value || el.getAttribute("aria-label") || "")
+          .replace(/\s+/g, " ").trim())
+        .filter((t) => t && t.length <= 60),
+    };
+  }).catch(() => null);
+  if (!wall || !wall.looksLikeWall) return { signedIn: false, reason: "not-an-auth-wall" };
+
+  for (const provider of PROVIDERS) {
+    const label = wall.labels.find((l) => provider.re.test(l));
+    if (!label) continue;
+    const control = page.locator(`button:has-text("${label}"), a:has-text("${label}"), [role=button]:has-text("${label}")`).first();
+    if (!(await control.count().catch(() => 0))) continue;
+    console.log(`  [sso] auth wall at ${String(page.url()).slice(0, 90)} — pressing "${label}"`);
+    await control.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await control.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(6000);
+
+    const state = await page.evaluate(() => {
+      const body = String(document.body?.innerText || "");
+      return {
+        url: location.href,
+        // A credential prompt. Deliberately includes the provider's own hosts,
+        // because that is what it looks like the moment a session is absent.
+        needsCredential: /accounts\.google\.com|linkedin\.com\/(login|checkpoint)|linkedin\.com\/uas\/login|enter your password|choose an account/i.test(
+          location.href + " " + body.replace(/\s+/g, " ").slice(0, 400),
+        ),
+        stillWall: /\/(login|register|signup)\b/i.test(location.href),
+      };
+    }).catch(() => ({}));
+
+    if (state.needsCredential) {
+      // The line this whole feature stops at. A federated button is safe to
+      // press only when the profile is already authenticated; the moment a
+      // human is needed, hand over and name the one command that fixes it.
+      console.log(`  [sso] ${provider.via} is asking for credentials — stopping without entering anything`);
+      console.log(`         sign in once with:  node apps/browser-apply/tools/signin.mjs <board>`);
+      return { signedIn: false, via: provider.via, reason: "credentials-required" };
+    }
+    if (!state.stillWall) {
+      console.log(`  [sso] signed in via ${provider.via}`);
+      return { signedIn: true, via: provider.via };
+    }
+    console.log(`  [sso] ${provider.via} returned to a wall (${String(state.url).slice(0, 70)})`);
+  }
+  return { signedIn: false, reason: "no-federated-option" };
+};
+
 async function processJob(browser, job, profile, runtime = {}) {
   const url = String(job.link || job.url || "");
   const ats = inferATS(url);
@@ -5405,11 +5485,51 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "needs-verification", pdf: resumePdf };
       }
-      const confirmed = await hasVisibleAppliedBadge(page) || await page.evaluate(() =>
-        /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received/i.test(document.body?.innerText || "")
-      ).catch(() => false);
-      if (!sharedCtx) await context.close();
-      return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : "needs-verification", pdf: resumePdf };
+      // A click that succeeded can still have landed on a registration wall
+      // rather than a form. Instahyre does exactly this - "Apply now" navigates
+      // the tab to /candidates/register/ - and because the check below ran first,
+      // every one of its runs ended right here as needs-verification with the log
+      // saying only "clicked final Apply now" and never mentioning a login. Ten
+      // postings and 21 attempts looked like one unexplained failure instead of
+      // one missing account.
+      const landedOnWall = await page.evaluate(() => {
+        const body = String(document.body?.innerText || "");
+        return /\/(login|register|signup|signin)\b/i.test(location.href)
+          || /\b(sign up|sign in|log in|create (?:an )?account)\b/i.test(body.replace(/\s+/g, " ").slice(0, 700));
+      }).catch(() => false);
+
+      let signedInNow = false;
+      if (landedOnWall) {
+        const sso = await tryFederatedSignIn(page);
+        signedInNow = Boolean(sso.signedIn);
+        if (signedInNow) {
+          // Registration drops the candidate back on the job page rather than a
+          // form, so the Apply control has to be pressed a second time.
+          const applyAgain = page.locator('button:has-text("Apply now"), a:has-text("Apply now")').first();
+          if (await applyAgain.count().catch(() => 0)) {
+            const againLabel = ((await applyAgain.innerText().catch(() => "")) || "").trim().slice(0, 40);
+            if (againLabel && isSubmissionControlLabel(againLabel)) {
+              console.log(`  [sso] pressing "${againLabel}" again after sign-in`);
+              await applyAgain.click({ timeout: 8000 }).catch(() => {});
+              await page.waitForTimeout(5000);
+            }
+          }
+        }
+      }
+
+      if (signedInNow) {
+        // Deliberately no return. The form does not exist yet, so reporting an
+        // outcome here would describe a page that has nothing on it. Fall through
+        // into the normal fill-and-submit flow; the trust and captcha checks
+        // immediately below this block both run again on the way down.
+        console.log(`  [sso] authenticated — continuing into the application form`);
+      } else {
+        const confirmed = await hasVisibleAppliedBadge(page) || await page.evaluate(() =>
+          /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received/i.test(document.body?.innerText || "")
+        ).catch(() => false);
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: confirmed ? "verified" : "needs-verification", pdf: resumePdf };
+      }
     }
     await page.waitForTimeout(1500);
     if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
@@ -6221,7 +6341,45 @@ async function processJob(browser, job, profile, runtime = {}) {
         break;
       }
     }
-    if (!submitFound) console.log(`  [warn] no Submit button detected — site may use multi-step flow`);
+    if (!submitFound) {
+      // "No Submit" has three very different causes and one message covered all
+      // three: a multi-step flow, a portal that needs an account, and a portal
+      // whose apply button opens an app behind SSO. Try the account case before
+      // concluding anything, because it is recoverable and the others are not.
+      const sso = await tryFederatedSignIn(page);
+      if (sso.signedIn) {
+        // Registration usually drops the candidate back on the job page rather
+        // than a form, so the Apply control has to be pressed a second time.
+        const applyAgain = page.locator('button:has-text("Apply now"), a:has-text("Apply now"), button:has-text("Apply"), a:has-text("Apply")').first();
+        if (await applyAgain.count().catch(() => 0)) {
+          const applyLabel = ((await applyAgain.innerText().catch(() => "")) || "").trim().slice(0, 40);
+          if (applyLabel && isSubmissionControlLabel(applyLabel)) {
+            console.log(`  [sso] pressing "${applyLabel}" again after sign-in`);
+            await applyAgain.click({ timeout: 8000 }).catch(() => {});
+            await page.waitForTimeout(5000);
+          }
+        }
+        for (const sel of submitSels) {
+          const probe = await pickVisible(page.locator(sel));
+          if ((await probe.count()) > 0) {
+            const l = ((await probe.innerText().catch(() => "")) || "").trim().slice(0, 60);
+            if (isSubmissionControlLabel(l)) {
+              console.log(`  [found] Submit → ${sel} ("${l}") — after sign-in`);
+              submitFound = true;
+              break;
+            }
+          }
+        }
+        if (!submitFound) {
+          console.log(`  [sso] signed in via ${sso.via}, but still no Submit — treating as a multi-step flow`);
+        }
+      } else if (sso.reason === "credentials-required") {
+        // Already logged precisely above. Do not also claim the site is
+        // multi-step; that is the misdiagnosis this whole change removes.
+      } else {
+        console.log(`  [warn] no Submit button detected (${sso.reason}) — site may use multi-step flow`);
+      }
+    }
 
     if (DRY_RUN) {
       console.log(`  [DRY-RUN] would WAIT for approval, then click Submit — skipping (use --live to enable)`);
