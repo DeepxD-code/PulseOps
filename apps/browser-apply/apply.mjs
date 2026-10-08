@@ -4162,6 +4162,25 @@ async function hasCaptcha(page) {
     for (const selector of CAPTCHA_SELECTORS) {
       const loc = page.locator(selector);
       const count = await loc.count().catch(() => 0);
+      // Guarded because a locator without nth() is a real possibility: the unit
+      // tests pass a minimal stub exposing count() only, and combo() already
+      // makes the same check. Unguarded, the probe threw
+      // "loc.nth is not a function" on node 20 and took five sibling subtests
+      // down with it - one missing method on a stub, reported as five unrelated
+      // failures.
+      //
+      // It fails CLOSED rather than skipping. A captcha-selector matched an
+      // element but the element cannot be inspected, and the safe reading of
+      // that is "there may be a challenge here". Skipping would let the probe
+      // fall through to no-challenge on the strength of a missing method, which
+      // is the exact inversion this whole helper exists to prevent.
+      if (typeof loc.nth !== "function") {
+        if (count > 0) {
+          console.log(`    [captcha] ${selector} matched ${count} element(s) but the locator cannot be inspected; treating as a challenge`);
+          return true;
+        }
+        continue;
+      }
       for (let i = 0; i < count && i < 8; i++) {
         const el = loc.nth(i);
         // A widget element only counts when it is actually on screen. Matching
