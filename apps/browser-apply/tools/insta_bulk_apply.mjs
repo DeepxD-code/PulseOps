@@ -224,8 +224,21 @@ if (toRecord.length) {
     ["-X", "utf8", path.join(ROOT, "apps", "browser-apply", "tools", "record_instahyre_submit.py"), "--bulk", args],
     { encoding: "utf8" },
   );
+  // The exit code is checked. It was not, and the recorder exited 2 on every one
+  // of 83 postings - "--job-id is required" - so the run printed
+  // "recorded 83 confirmed submission(s)" and wrote NOTHING. A wrapper that
+  // reports its own count instead of the child's result will happily claim work
+  // that never landed, and the database is the only place that disagrees.
+  if (rec.status !== 0) {
+    console.error(`\n  RECORDER FAILED (exit ${rec.status}) - ${toRecord.length} confirmed submission(s) NOT written:`);
+    console.error(`  ${String(rec.stderr || "").slice(0, 400)}`);
+    console.error("  Re-run with --recheck to collect and record them; no clicks needed.");
+    await ctx.close();
+    process.exit(1);
+  }
   console.log(`\n  recorded ${toRecord.length} confirmed submission(s)`);
-  if (String(rec.stdout || "").trim()) console.log(String(rec.stdout).trim().split("\n").slice(0, 6).map((l) => "    " + l).join("\n"));
+  if (String(rec.stdout || "").trim())
+    console.log(String(rec.stdout).trim().split("\n").slice(0, 6).map((l) => "    " + l).join("\n"));
 } else {
   console.log("\n  nothing new to record");
 }

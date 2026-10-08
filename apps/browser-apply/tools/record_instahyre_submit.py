@@ -41,7 +41,7 @@ CONFIRMED_RE = re.compile(r"application sent!\s*(?:on)?\s*([A-Za-z]+\s+\d{1,2},?
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--job-id", type=int, required=True)
+    ap.add_argument("--job-id", type=int, help="required for a single job; omit when using --bulk")
     ap.add_argument("--evidence", default="", help="text read off the job page after clicking Apply")
     # Bulk form used by insta_bulk_apply.mjs: id1:evidence1|id2:evidence2.
     # Every entry still has to match the dated acknowledgement, so batching buys
