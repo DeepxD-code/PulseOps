@@ -100,9 +100,20 @@ if (-not $NoNotify) {
     # without watching a browser. Reports recorded outcomes only; it never
     # claims an application went out unless the run recorded one, and a mail
     # failure never changes the run's exit code.
-    Write-Output "=== Notifying candidate of this run ==="
-    & python -u apps/browser-apply/tools/notify_run.py
-    Write-Output "notify_exit=$LASTEXITCODE"
+    # 2026-10-08: opt-in. The operator asked to stop receiving these. A
+    # "PulseOps: N application(s) attempted" mail after every browser-apply
+    # stage lands in the same inbox he needs to read for employer replies,
+    # and every 15 minutes of summaries is what buries a real rejection.
+    #
+    # Off unless PULSEOPS_NOTIFY=1 is set, so it cannot return by accident.
+    # By hand: python apps/browser-apply/tools/notify_run.py
+    if ($env:PULSEOPS_NOTIFY -eq '1') {
+        Write-Output "=== Notifying candidate of this run ==="
+        & python -u apps/browser-apply/tools/notify_run.py
+        Write-Output "notify_exit=$LASTEXITCODE"
+    } else {
+        Write-Output "=== Run summary mail suppressed (PULSEOPS_NOTIFY=1 enables) ==="
+    }
 }
 
 if ($OpenManualQueue) {
