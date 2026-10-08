@@ -1578,6 +1578,24 @@ function identityFacts(candidate, stated, job = null) {
       value: stated?.current_company,
     },
     {
+      // "Are you ready to go on business trips every 6-8 weeks?" - the last
+      // blocker on #716. Measured, not guessed: the control is a plain
+      // input[type=text] carrying the question in its aria-label, exactly the
+      // same shape as the Arabic question on the same form. So it needs the
+      // TEXT path.
+      //
+      // Registering it only as a commitment was not enough. Commitments go
+      // through combo() (dropdowns) and radio() (Yes/No pairs); neither can see
+      // a text input, so the log read "no control matched (7 combobox checked)"
+      // and the field stayed empty with the answer sitting in the profile the
+      // whole time. Three wrong guesses about this form's control types is what
+      // led to measuring it instead - see tools/probe_travel_control.mjs.
+      tag: "business travel",
+      hint: /business trips?|travel (?:every|\d+\s*-\s*\d+\s*weeks?)|ready to (?:go on )?travel|willing to travel/i,
+      value: stated?.business_travel_6_8_weeks,
+      once: true,
+    },
+    {
       // The free-text form of the same question, for forms that really do ask
       // it in a textarea. Drafted from cv.md only.
       //
