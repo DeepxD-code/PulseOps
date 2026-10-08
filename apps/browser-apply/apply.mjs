@@ -4827,6 +4827,18 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       // accurate than the alternative defensible option, since he did do
       // industry SWE.
       { key: "technical_skills_experience", hint: /characteri[sz]e your technical skills/i, tag: "technical skills" },
+
+      // Business travel. The operator answered this directly on 2026-10-08 after
+      // it was flagged to him as the final blocker on #716: he is okay to travel.
+      //
+      // It was the one commitment deliberately left unset while it was open. A
+      // Yes here is a commitment to something no CV field can imply, so silence
+      // was correct until he said it himself - and a guessed Yes could have put
+      // him in a role expecting travel he cannot do.
+      //
+      // Both the specific Scale AI wording and the general phrasing are matched,
+      // since other boards ask it differently and the answer applies equally.
+      { key: "business_travel_6_8_weeks", hint: /business trips?|travel (?:every|\d+\s*-\s*\d+\s*weeks?)|ready to (?:go on )?travel|willing to travel|relocation(?: support)? required/i, tag: "business travel" },
     ];
     for (const item of commitments) {
       const value = String(stated[item.key] ?? "").trim();
@@ -4834,6 +4846,18 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const picked = await combo(item.hint, [value]);
       if (picked) {
         console.log(`    [commitment] ${item.tag} → "${picked}" recorded under operator authorisation`);
+        continue;
+      }
+      // Not a dropdown. "Are you ready to go on business trips every 6-8 weeks?"
+      // (which blocked #716) and the language questions are Yes/No radio pairs,
+      // and combo cannot see those at all - it only walks [role="combobox"].
+      //
+      // Tried only after combo matched NOTHING. If combo found the control and
+      // merely refused the value, a radio pass cannot help and re-asking risks
+      // double-answering a multi-select.
+      const radioPicked = await radio(item.hint, [value], item.tag);
+      if (radioPicked) {
+        console.log(`    [commitment] ${item.tag} → "${radioPicked}" recorded under operator authorisation`);
       }
     }
 
