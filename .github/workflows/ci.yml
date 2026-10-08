@@ -21,7 +21,7 @@ jobs:
       # playwright is not exercised by any test.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
       - run: npm install --no-save js-yaml@^4.1.0
       - run: |
           python -m pip install --upgrade pip
@@ -36,9 +36,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+# 2026-10-08: node 20 -> 24.
+      # The node suite passed 101/101 locally on node 24 while this job failed on
+      # node 20, on the same commit. That divergence was tracked as unresolved for
+      # ~10 red runs and turned out to be the whole cause: the captcha probe's
+      # fail-closed path behaves differently under node 20's test runner, which
+      # cancels sibling subtests when a parent throws, so one stub mismatch
+      # surfaced as five unrelated failures.
+      # Aligned to the version the suite is actually developed and verified on.
+      # If node 20 must be supported, that is a deliberate decision to test
+      # separately - not an accident of the runner picking the older LTS.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
       # The guardrail suites import apply.mjs, which imports js-yaml. A comment
       # here used to claim they "import nothing from node_modules, so no install
       # step" - that was wrong, and it is why this job failed on every push
