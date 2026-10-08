@@ -157,10 +157,10 @@ for (const job of queue) {
     // nothing on 7 consecutive postings - it is a dead node. Both is what works.
     let ack = null;
     for (let pass = 0; pass < 3 && !ack; pass++) {
-      const snap = await page.accessibility.snapshot({ interestingOnly: false }).catch(() => null);
-      const refs = await page.locator('[role="button"]').all().catch(() => []);
-      void snap; void refs;
-      // Locate through the DOM-backed ref path used successfully before.
+      // Click EVERY node that resolves to the control. The accessibility snapshot
+      // exposes two identical refs at the same coordinates and the first is a
+      // dead node; clicking only it produced "clicked, no ack" on seven
+      // consecutive postings. Both is what works.
       const handle = await page.evaluateHandle(() => {
         const vis = (el) => {
           const r = el.getBoundingClientRect();
@@ -174,17 +174,24 @@ for (const job of queue) {
       const el = handle.asElement();
       if (!el) { await page.waitForTimeout(2000); continue; }
       await el.click({ timeout: 10000 }).catch(() => {});
-      // The second node: the anchor behind the button, if distinct.
-      const twin = await page.evaluate(() => {
+
+      // The other node behind the same control. It has to come back as an
+      // ElementHandle, not as the result of page.evaluate - that returns a plain
+      // serialised value, and calling .click() on one throws
+      // "twin.click is not a function", which is what killed the whole first
+      // bulk run on 73 postings.
+      const twinHandle = await page.evaluateHandle(() => {
         const vis = (el) => {
           const r = el.getBoundingClientRect();
           const s = getComputedStyle(el);
           return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
         };
-        const all = [...document.querySelectorAll("button, a")].filter(vis)
+        const all = [...document.querySelectorAll("button, a")]
+          .filter(vis)
           .filter((b) => /^apply now$/i.test(((b.innerText || "") + "").trim()));
         return all.length > 1 ? all[all.length - 1] : null;
       });
+      const twin = twinHandle.asElement();
       if (twin) await twin.click({ timeout: 8000 }).catch(() => {});
       for (let i = 0; i < 8 && !ack; i++) {
         await page.waitForTimeout(3000);
