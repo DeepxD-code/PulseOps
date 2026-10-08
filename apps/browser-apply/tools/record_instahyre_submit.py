@@ -42,7 +42,46 @@ CONFIRMED_RE = re.compile(r"application sent!\s*(?:on)?\s*([A-Za-z]+\s+\d{1,2},?
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--job-id", type=int, required=True)
-    ap.add_argument("--evidence", required=True, help="text read off the job page after clicking Apply")
+    ap.add_argument("--evidence", default="", help="text read off the job page after clicking Apply")
+    # Bulk form used by insta_bulk_apply.mjs: id1:evidence1|id2:evidence2.
+    # Every entry still has to match the dated acknowledgement, so batching buys
+    # speed without loosening what counts as proof of a send.
+    ap.add_argument("--bulk", default="", help="id:evidence|id:evidence from a bulk run")
+    args = ap.parse_args()
+
+    if args.bulk:
+        import sqlite3 as _s
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc).isoformat()
+        conn = _s.connect(DB); cur = conn.cursor()
+        wrote = skipped = 0
+        for part in args.bulk.split("|"):
+            if ":" not in part:
+                continue
+            jid, _, ev = part.partition(":")
+            jid = jid.strip(); ev = ev.strip()
+            m = CONFIRMED_RE.search(ev)
+            if not (jid.isdigit() and m):
+                skipped += 1; continue
+            cur.execute("SELECT company, title, status FROM jobs WHERE id = ?", (int(jid),))
+            row = cur.fetchone()
+            if not row:
+                skipped += 1; continue
+            company, title, _prev = row
+            cur.execute("UPDATE jobs SET status = ?, processed_at = ? WHERE id = ?", ("verified", now, int(jid)))
+            cur.execute("DELETE FROM outcomes WHERE job_id = ? AND stage = ?", (int(jid), "verified"))
+            cur.execute(
+                "INSERT INTO outcomes (job_id, company, title, stage, notes, recorded_at, prep_sent)"
+                " VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (int(jid), company, title, "verified", f"Instahyre one-click apply; page confirmed: {m.group(0)}", now),
+            )
+            wrote += 1
+            print(f"  #{jid} {company} - {title[:44]}")
+        conn.commit()
+        cur.execute("SELECT COUNT(*) FROM outcomes WHERE stage = ?", ("verified",))
+        print(f"  recorded {wrote}, skipped {skipped}; verified outcomes total {cur.fetchone()[0]}")
+        conn.close()
+        return 0
     args = ap.parse_args()
 
     m = CONFIRMED_RE.search(args.evidence)
