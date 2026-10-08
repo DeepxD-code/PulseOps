@@ -136,9 +136,19 @@ test("multi-step flow walks Continue then stops when no navigation remains", asy
   let step = 0;
   const page = {
     url: () => "https://jobs.ashbyhq.com/acme/9f1c",
-    locator: () => ({
+    locator: (sel = "") => ({
       first() { return this; },
-      async count() { return step === 0 ? 1 : 0; },
+      // Truthful about captchas. Returning 1 for EVERY selector claimed a
+      // captcha iframe existed on a page that has none, and hasCaptcha() fails
+      // closed on an uninspectable match - correctly. The flow then stopped as
+      // captcha-blocked before reaching the navigation assertion these tests
+      // exist to make. Count 0 for captcha selectors so the stub describes the
+      // page it is pretending to be, while keeping the step===0 sequencing the
+      // "no-navigation" outcome depends on.
+      async count() {
+        if (/captcha|hcaptcha|recaptcha/i.test(sel)) return 0;
+        return step === 0 ? 1 : 0;
+      },
       async innerText() { return "Continue"; },
       async getAttribute() { return null; },
       async isDisabled() { return false; },
@@ -160,9 +170,10 @@ test("multi-step flow refuses to click a non-navigation control", async () => {
   const clicked = [];
   const page = {
     url: () => "https://jobs.ashbyhq.com/acme/9f1c",
-    locator: () => ({
+    locator: (sel = "") => ({
       first() { return this; },
-      async count() { return 1; },
+      // See the note in the stub above: this page has no captcha, so say so.
+      async count() { return /captcha|hcaptcha|recaptcha/i.test(sel) ? 0 : 1; },
       async innerText() { return "Search Jobs"; },
       async getAttribute() { return null; },
       async isDisabled() { return false; },
