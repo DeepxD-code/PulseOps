@@ -20,8 +20,10 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Collection
 from datetime import datetime, timedelta
@@ -461,8 +463,13 @@ class PulseOpsScraper:
         launched_at = time.time()
 
         try:
+            import shutil
+            node_bin = shutil.which("node") or (
+                r"C:\Program Files\nodejs\node.exe"
+                if sys.platform.startswith("win") else "node"
+            )
             result = subprocess.run(
-                ["node", str(bridge)],
+                [node_bin, str(bridge)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

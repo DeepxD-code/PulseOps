@@ -488,11 +488,17 @@ test("scraped titles with the company joined to the role still match", () => {
 
 test("job selection refuses terminal, review, paused, low-score, and Indeed rows", () => {
   for (const status of [
-    "Applied", "Sent", "FollowupSent", "Expired", "Skipped", "Verified",
+    "Applied", "Sent", "FollowupSent", "Expired", "Skipped",
     "Applying", "NeedsReview", "NeedsVerification", "Simulated", "SendPaused", "EmailQueued",
   ]) {
     assert.equal(isEligibleJob(eligible({ status }), { explicit: true }), false, status);
   }
+  // Explicit --job-id runs admit the email-channel Verified state: Verified
+  // means an email contact was found, which says nothing about whether the job
+  // page still accepts a browser application, and the operator chose this row.
+  // Queue mode still refuses it.
+  assert.equal(isEligibleJob(eligible({ status: "Verified" }), { explicit: true }), true, "explicit Verified");
+  assert.equal(isEligibleJob(eligible({ status: "Verified" })), false, "queue-mode Verified");
   // A low score no longer makes a row ineligible. Measured: in-scope roles
   // median 52, out-of-scope median 65, so a floor here removed the wanted
   // roles and kept the ones the role filter rejects anyway. The score must

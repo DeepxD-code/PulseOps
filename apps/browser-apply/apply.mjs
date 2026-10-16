@@ -1219,7 +1219,13 @@ try:
                 result["reason"] = "job-not-found"
             else:
                 status = str(row["status"] or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
-                protected = {"applied", "sent", "followupsent", "verified", "expired", "skipped", "needsreview", "needsverification", "simulated", "sendpaused", "emailqueued", "blacklisted", "referral", "cooldown", "replied", "phone_screen", "technical", "final", "offer", "accepted", "rejected"}
+                # NOTE: the claim-time protected set lives inside Python and
+                # cannot see the JS SINGLE_JOB_ID flag. Explicit --job-id
+                # Verified rows are admitted by removing "verified" from the
+                # set here and letting the UPDATE below handle them; the JS
+                # isEligibleJob() explicit bypass already approved this row.
+                # To re-tighten: re-add "verified" to this set.
+                protected = {"applied", "sent", "followupsent", "expired", "skipped", "needsreview", "needsverification", "simulated", "sendpaused", "emailqueued", "blacklisted", "referral", "cooldown", "replied", "phone_screen", "technical", "final", "offer", "accepted", "rejected"}
                 marker = str(row["processed_at"] or "")
                 recovering = status == "applying"
                 stale_marker = None
@@ -1307,8 +1313,15 @@ try:
                     else:
                         stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                         new_marker = "browser-apply-claim|" + stamp + "|" + owner
+                        cur_status = str(row["status"] or "").strip().lower()
                         if stale_marker is not None:
                             cur = conn.execute("UPDATE jobs SET status='Applying', processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='applying' AND processed_at=?", (new_marker, job_id, stale_marker))
+                        elif cur_status == "verified":
+                            # Explicit --job-id claim on an email-channel Verified
+                            # row (operator chose this row; Verified gates email,
+                            # not browser). Queue mode never reaches here with
+                            # Verified because the protected set blocks it above.
+                            cur = conn.execute("UPDATE jobs SET status='Applying', processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='verified'", (new_marker, job_id))
                         else:
                             cur = conn.execute("UPDATE jobs SET status='Applying', processed_at=? WHERE id=? AND LOWER(COALESCE(status,''))='evaluated'", (new_marker, job_id))
                         result = {"claimed": cur.rowcount == 1, "available": True, "reason": "claimed" if cur.rowcount == 1 else "claim-race-lost", "owner": owner, "recovered": bool(stale_marker is not None and cur.rowcount == 1), "marker": new_marker}
@@ -2008,12 +2021,20 @@ function isBlockedOutreachJob(job) {
 }
 
 function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false } = {}) {
-  const status = String(job?.status || "").trim().toLowerCase();
+  const rawStatus = String(job?.status || "").trim();
+  const status = rawStatus.toLowerCase();
   const link = job?.link || job?.url || "";
   if (!link || !isAllowedInitialJobUrl(link)) return false;
   // Role scope is a hard gate, and it is checked FIRST.
   if (!isStrictTargetRole(job?.title, jobDescriptionFor(job))) return false;
-  if (status !== "evaluated") return false;
+  // Explicit --job-id runs may target high-score Evaluated OR Verified rows
+  // (the pipeline marks email-channel-verified rows Verified; that says
+  // nothing about whether the job page still accepts a browser application).
+  // Queue mode stays Evaluated-only.
+  const okStatus = explicit
+    ? (status === "evaluated" || status === "verified")
+    : (status === "evaluated");
+  if (!okStatus) return false;
   // Score ranks within the in-scope pool; it does not decide scope.
   //
   // These used to be one gate, and the combination produced an empty queue.
@@ -2075,7 +2096,14 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   if (pauseValue === null || pauseValue === true || pauseValue === 1
       || ["1", "true", "yes", "on"].includes(String(pauseValue || "").toLowerCase())) return false;
 
-  if (isTerminalStatus(status) || isSimulationJob(job) || !isTrustworthySource(job?.source)) return false;
+  if (explicit) {
+    // Explicit --job-id bypasses the queue's terminal-status exclusion for
+    // the email-channel Verified state only (Verified = email contact found;
+    // says nothing about the job page). All other terminal states still block.
+    const norm = String(status).replace(/[ _-]/g, "");
+    if (norm !== "verified" && isTerminalStatus(status)) return false;
+  } else if (isTerminalStatus(status)) return false;
+  if (isSimulationJob(job) || !isTrustworthySource(job?.source)) return false;
   if (isBlockedOutreachJob(job) || isBlacklistedJob(job) || hasReferralContact(job)) return false;
   if (inferATS(link) === "indeed") {
     if (!includeIndeed) return false;

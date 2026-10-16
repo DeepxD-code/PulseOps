@@ -76,6 +76,13 @@ candidate:
     # Spelled exactly as rendered, because the comparison is against the
     # rendered option text.
     technical_skills_experience: 'I worked as a Software Engineer (either full time or internship)'
+
+    # --- 2026-10-08: the operator's own answer, given directly after this
+    # was flagged to him as the last blocker on #716. He is okay to travel.
+    # Left unanswered until then on purpose: unlike every other answer here,
+    # nothing in the CV can imply it, and a wrong "yes" commits him to
+    # travel he may not be able to do.
+    business_travel_6_8_weeks: 'Yes'
     ever_interviewed_here: 'No'
     open_to_relocation: 'Yes'
     future_us_residence: 'Yes'
