@@ -52,6 +52,12 @@ KEEP_PATTERNS = re.compile(
     r"\boffer\b|"
     r"thank you for applying|we(?:'ve| have) received your application|"
     r"your application (?:has been|was) (?:received|submitted)|"
+    # Wellfound mails no per-application receipt except this one: "Application to
+    # CredX successfully submitted". Caught on the dry run slated for deletion
+    # via team@hi.wellfound.com - these are the only submission confirmations
+    # Wellfound sends, and deleting them would destroy the evidence the
+    # crosscheck tool looks for.
+    r"successfully submitted|"
     r"security (?:code|alert|verification)|"
     # A sign-in notification from a bulk sender is still a security notification.
     # update@logs.autter.dev is on the delete list because its routine "found the
@@ -123,21 +129,41 @@ def main() -> int:
     ids = data[0].split()[-args.limit:]
     deleted, kept_unknown, kept_important = [], [], []
 
-    for num in ids:
-        status, chunk = client.fetch(num, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
-        if not chunk or not chunk[0]:
-            continue
+    # Batched. One fetch per message over hundreds of ids blew the command
+    # timeout on a 5,000+ inbox. IMAP takes a comma-joined sequence set, so this
+    # is ~4 requests instead of ~400.
+    def _parse(chunk):
+        if not chunk or not isinstance(chunk[0], tuple):
+            return None
         msg = email.message_from_bytes(chunk[0][1])
-        frm = header(msg.get("From"))
-        subj = header(msg.get("Subject"))
+        return header(msg.get("From")), header(msg.get("Subject"))
 
-        if KEEP_PATTERNS.search(subj):
-            kept_important.append((num.decode(), frm, subj))
+    for i in range(0, len(ids), 100):
+        batch = b",".join(ids[i:i + 100])
+        try:
+            status, chunks = client.fetch(batch, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+        except imaplib.IMAP4.error:
             continue
-        if DELETE_SENDERS_RE.search(frm):
-            deleted.append((num.decode(), frm, subj))
-            continue
-        kept_unknown.append((num.decode(), frm, subj))
+        for part in chunks or []:
+            if not isinstance(part, tuple) or not part[1]:
+                continue
+            # part[0] looks like b'421 (BODY[HEADER...] {123}' - first token is
+            # the sequence number, which the delete step needs.
+            try:
+                seq = part[0].split()[0].decode()
+            except Exception:
+                continue
+            parsed = _parse((part,))
+            if not parsed:
+                continue
+            frm, subj = parsed
+            if KEEP_PATTERNS.search(subj):
+                kept_important.append((seq, frm, subj))
+                continue
+            if DELETE_SENDERS_RE.search(frm):
+                deleted.append((seq, frm, subj))
+                continue
+            kept_unknown.append((seq, frm, subj))
 
     mode = "DELETE" if args.apply else "would delete"
     print(f"  inbox scanned : {len(ids)}")
