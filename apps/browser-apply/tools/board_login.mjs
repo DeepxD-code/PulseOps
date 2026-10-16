@@ -57,6 +57,11 @@ const BOARDS = {
     match: "jobhai",
     id: "Job Hai",
   },
+  coursera: {
+    login: "https://www.coursera.org/login?authMode=login",
+    match: "coursera",
+    id: "Coursera",
+  },
 };
 
 const which = String(process.argv[2] || "").toLowerCase();
