@@ -32,11 +32,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
+import { cleanTitle, selectRelevantJobs } from "./lib/relevance.mjs";
+import { obscuraAvailable, obscuraEval } from "./lib/obscura.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
 const PORTALS_PATH = path.join(__dirname, "portals.yml");
-const OUTPUT_PATH = path.join(ROOT, "temp_portal_jobs.json");
+const OUTPUT_PATH = process.env.PULSEOPS_SCAN_OUTPUT
+  ? path.resolve(process.env.PULSEOPS_SCAN_OUTPUT)
+  : path.join(ROOT, "temp_portal_jobs.json");
 
 const MOCK = process.argv.includes("--mock");
 const ALLOW_KNOWN_DEAD = process.argv.includes("--allow-known-dead");
@@ -51,6 +55,14 @@ const SKIP_PORTAL_VALUES = new Set(
   process.argv
     .filter((arg) => arg.startsWith("--skip-portal="))
     .map((arg) => arg.slice("--skip-portal=".length).trim().toLowerCase())
+    .filter(Boolean),
+);
+// Debug/verification aid: scan only the named portal(s), matched against name or
+// engine. Used to re-check a single board without paying for the whole run.
+const ONLY_PORTAL_VALUES = new Set(
+  process.argv
+    .filter((arg) => arg.startsWith("--only-portal="))
+    .map((arg) => arg.slice("--only-portal=".length).trim().toLowerCase())
     .filter(Boolean),
 );
 
@@ -133,6 +145,15 @@ function portalMatchesSkip(portal) {
   return values.some((value) =>
     SKIP_PORTAL_VALUES.has(value) || SKIP_PORTAL_VALUES.has(canonicalUrl(value)),
   );
+}
+
+/** True when an `--only-portal=` filter is active but does not name this portal. */
+function portalFilteredOut(portal) {
+  if (!ONLY_PORTAL_VALUES.size) return false;
+  const values = [portal.name, portal.engine, portal.company]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+  return !values.some((value) => ONLY_PORTAL_VALUES.has(value));
 }
 
 function isKnownDead(portal) {
@@ -490,7 +511,16 @@ function appendUniqueJobs(target, jobs, portal, rejected = []) {
     }
     // Replace the raw value with the validated absolute URL.  This makes the
     // invariant explicit to every downstream persistence boundary.
-    const job = attachSource({ ...raw, link: validation.url }, portal, MOCK);
+    //
+    // The title is cleaned here, once, at ingestion. Boards decorate titles with
+    // their own chrome — "Backend Engineer Bangalore Founded in 2021 50-200
+    // employees View job »", "HiveMarketing ... Senior Software Engineer,
+    // Data SystemsFull-time · Remote (US)" — and the evaluator used to receive
+    // that whole string, then reject the posting because the *company blurb*
+    // mentioned marketing. Cleaning at this boundary means the database, the
+    // domain filter and the apply-queue role gate all read the same value.
+    const cleanedTitle = cleanTitle(raw.title) || String(raw.title || "").trim();
+    const job = attachSource({ ...raw, title: cleanedTitle, link: validation.url }, portal, MOCK);
     const key = jobKey(job);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -507,6 +537,14 @@ function loadPortals() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One-line error text — a portal's stack trace should not fill the scan log. */
+function shortError(err) {
+  return String((err && err.message) || err || "unknown error")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
 }
 
 // ── Mock mode (zero network, mirrors --simulate philosophy) ───────────────
@@ -708,14 +746,24 @@ const PORTAL_SESSION_FILES = {
 };
 
 async function scrapeNaukri(page, portal) {
-  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page
-    .waitForSelector(".jobTuple, article.jobTuple, .srp-jobtuple-wrapper, body", { timeout: 12000 })
-    .catch(() => {});
+  await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  // The listing cards are client-rendered. Waiting on `body` — as this used to —
+  // matched the first paint and read the DOM before hydration, so a page that
+  // holds 20 cards reported 0. Wait for a real card, then let the rest settle.
+  const hydrated = await page
+    .waitForSelector(".srp-jobtuple-wrapper, .cust-job-tuple", { timeout: 25000 })
+    .catch(() => null);
+  if (!hydrated) await page.waitForTimeout(6000);
+  await page.waitForTimeout(1500);
   return page.$$eval(
-    ".jobTuple, article.jobTuple, .srp-jobtuple-wrapper",
-    (nodes, sourceName) =>
-      nodes.map((el) => {
+    // The wrappers nest (`.srp-jobtuple-wrapper > .cust-job-tuple`), so both are
+    // matched here and de-duplicated by link inside the page. Preferring one via
+    // a count would need a second round-trip to the page for no benefit.
+    ".srp-jobtuple-wrapper, .cust-job-tuple",
+    (nodes, sourceName) => {
+      const out = [];
+      const seen = new Set();
+      for (const el of nodes) {
         const titleEl = el.querySelector("a.title, .title a, a[title]");
         const compEl = el.querySelector(".comp-name, .companyInfo .comp-name, a.comp-name");
         const locEl = el.querySelector(".locWdth, .loc span, .location");
@@ -726,13 +774,19 @@ async function scrapeNaukri(page, portal) {
             if (url.protocol === "http:" || url.protocol === "https:") link = url.href;
           } catch {}
         }
-        return {
-          title: (titleEl?.textContent || titleEl?.getAttribute("title") || "").trim(),
+        const title = (titleEl?.textContent || titleEl?.getAttribute("title") || "").trim();
+        if (!title || !link || seen.has(link)) continue;
+        seen.add(link);
+        out.push({
+          title,
           company: (compEl?.textContent || "").trim() || "Unknown",
           link,
+          location_raw: (locEl?.textContent || "").trim(),
           description: `Location: ${(locEl?.textContent || "").trim()}. Source: ${sourceName}.`,
-        };
-      }).filter((j) => j.title && j.link),
+        });
+      }
+      return out;
+    },
     portal.name
   );
 }
@@ -791,13 +845,32 @@ async function scrapeWellfound(page, portal) {
         // salary band lives, and a stated salary under the floor is a skip
         // reason rather than something to re-derive from the slug.
         const card = (a.textContent || "").replace(/\s+/g, " ").trim();
+        // The employer is not in the title anchor and not in the card body — it
+        // is the logo link in the row above. Every Wellfound row used to be
+        // stored as company "Unknown", and identity matching on (title, company)
+        // then blocked every later role that shared a title. Climb to the first
+        // ancestor that actually holds a /company/ link.
+        let ownerEl = a;
+        let company = "";
+        for (let i = 0; i < 8 && ownerEl.parentElement; i += 1) {
+          ownerEl = ownerEl.parentElement;
+          const anchor = ownerEl.querySelector("a[href^='/company/']");
+          if (!anchor) continue;
+          const alt = anchor.querySelector("img[alt]")?.getAttribute("alt") || "";
+          company = (alt || anchor.textContent || "")
+            .replace(/\s*company\s+logo\s*$/i, "")
+            .trim();
+          break;
+        }
+        const cardText = (ownerEl?.innerText || "").replace(/\r/g, "").trim().slice(0, 400);
         const salary = card.match(/[₹$€£]\s?[\d,.]+\s*(?:[kK]|[Ll])?\s*(?:[-–—]\s?[₹$€£]?\s?[\d,.]+\s*(?:[kK]|[Ll])?)?/);
         const workMode = /\b(remote only|remote|in office|hybrid|onsite)\b/i.exec(card);
 
         seen.add(url.href);
         out.push({
           title: title.slice(0, 118),
-          company: "Unknown",
+          company,
+          card_text: cardText,
           link: url.href,
           description: [
             salary ? `Salary shown: ${salary[0]}` : "Salary: not stated",
@@ -811,6 +884,36 @@ async function scrapeWellfound(page, portal) {
     },
     portal.name,
   );
+}
+
+/**
+ * Last-resort employer recovery from Wellfound card text.
+ *
+ * The card renders as
+ *   Backend Engineer
+ *   Full-time
+ *   $125k – $160k
+ *   Remote only • United States
+ * so the company is *not* reliably in the text — it is read from the logo link
+ * in scrapeWellfound. This helper only runs when that link was missing, and
+ * deliberately refuses the work-mode/salary chips rather than storing them as an
+ * employer (which is how "Full-time Remote only" became a company name).
+ */
+function wellfoundCompany(cardText, title) {
+  const lines = String(cardText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (!line.includes("•")) continue;
+    const segment = line.split("•")[0].trim();
+    if (!segment) continue;
+    if (/^(remote only|remote|in office|hybrid|onsite)$/i.test(segment)) continue;
+    if (/^[₹$€£]/.test(segment)) continue;
+    if (/^\d+\s*years?/i.test(segment)) continue;
+    return segment.slice(0, 80);
+  }
+  return "";
 }
 
 async function scrapeIndeed(page, portal) {
@@ -1327,6 +1430,65 @@ const ENGINES = {
   company: scrapeCompany,
 };
 
+// ── Obscura-first extraction ────────────────────────────────────────────
+//
+// Obscura renders these boards faster and more reliably than headless Chromium,
+// and it presents a consistent TLS/JS fingerprint instead of a Playwright
+// automation one. It is used FIRST for the engines listed below; if it returns
+// nothing (or the binary is missing) the Playwright engine runs as a fallback, so
+// a broken Obscura install degrades to the previous behaviour instead of a dead
+// source.
+//
+// Each extractor runs inside the rendered page and returns JSON. Nothing here
+// logs in, clicks an apply button, or touches a form — submission stays on Edge.
+
+const INSTAHYRE_EVAL = `(() => {
+  const out = []; const seen = new Set();
+  for (const a of document.querySelectorAll("a[href*='/job-']")) {
+    const href = a.href || "";
+    if (!/\\/job-\\d+-/.test(href) || seen.has(href)) continue;
+    const text = (a.textContent || "").replace(/\\s+/g, " ").trim();
+    if (text.length < 6) continue;
+    seen.add(href);
+    out.push({ href, text: text.slice(0, 200) });
+  }
+  return JSON.stringify(out.slice(0, 60));
+})()`;
+
+const OBSCURA_EXTRACTORS = {
+  instahyre: async (portal) => {
+    const rows = await obscuraEval(portal.url, INSTAHYRE_EVAL, { engine: "instahyre", wait: 7, timeout: 50 });
+    return (Array.isArray(rows) ? rows : [])
+      .map((row) => {
+        // Anchor text renders as
+        //   "EPAM Systems - Sr. / Lead Software Engineer Gurgaon Founded in 1993
+        //    1000+ employees View job » ..."
+        // so the employer is the first segment and the rest is the role plus the
+        // board's own chrome, which cleanTitle strips.
+        const text = String(row.text || "");
+        const cut = text.indexOf(" - ");
+        const company = cut > 0 ? text.slice(0, cut).trim() : "";
+        const rest = cut > 0 ? text.slice(cut + 3) : text;
+        return {
+          title: cleanTitle(rest),
+          company: company || "Unknown",
+          link: String(row.href || ""),
+          description: `Source: ${portal.name}. Card text: ${text.slice(0, 200)}`,
+        };
+      })
+      .filter((job) => job.title && job.link);
+  },
+};
+
+/** True when this engine should try Obscura before Playwright. */
+function usesObscuraFirst(portal, settings) {
+  if (settings.obscura_primary === false) return false;
+  if (!OBSCURA_EXTRACTORS[portal.engine]) return false;
+  const only = settings.obscura_primary_engines;
+  if (Array.isArray(only) && only.length) return only.includes(portal.engine);
+  return true;
+}
+
 // ── Main ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1353,6 +1515,7 @@ async function main() {
     console.log("[*] MOCK mode — zero network calls, zero browser launch.");
     for (const portal of allPortals) {
       if (!portal.enabled) continue;
+      if (portalFilteredOut(portal)) continue;
       const portalCheck = validatePortalUrl(portal);
       if (!portalCheck.ok) {
         console.error(`  [!] Rejected portal ${portal.name}: ${portalCheck.reason}`);
@@ -1387,6 +1550,7 @@ async function main() {
 
   for (const portal of allPortals) {
     if (!portal.enabled) continue;
+    if (portalFilteredOut(portal)) continue;
 
     const portalCheck = validatePortalUrl(portal);
     if (!portalCheck.ok) {
@@ -1434,12 +1598,38 @@ async function main() {
     // which is how the server refuses a connection carrying another portal's
     // history, not a protocol flag problem. --disable-http2 and --disable-quic
     // were both tested and changed nothing.
-    let portalContext = await browser.newContext({
-      userAgent: pickUserAgent(),
-      viewport: { width: 1366, height: 900 },
-      ...(useSession ? { storageState: sessionFile } : {}),
-    });
-    let portalPage = await portalContext.newPage();
+    // Naukri is the one engine that cannot run in a shared or headless context:
+    // Akamai serves "Access Denied" to headless Chromium and to Obscura alike,
+    // and only the real Edge session kept in .edge-profile-naukri passes. That
+    // profile is launched directly, instead of a fresh browser.newContext().
+    const usesEdgeProfile = portal.engine === "naukri" && settings.naukri_edge_profile !== false;
+    let portalContext;
+    let portalPage;
+    if (usesEdgeProfile) {
+      const profileDir = path.join(ROOT, String(settings.naukri_edge_profile_dir || ".edge-profile-naukri"));
+      try {
+        portalContext = await chromium.launchPersistentContext(profileDir, {
+          channel: settings.naukri_edge_channel || "msedge",
+          headless: settings.naukri_headless === true,
+          viewport: { width: 1366, height: 900 },
+          args: ["--disable-blink-features=AutomationControlled"],
+        });
+        portalPage = portalContext.pages()[0] || (await portalContext.newPage());
+      } catch (e) {
+        const reason = String(e?.message || e).split("\n")[0].slice(0, 90);
+        console.log(`  [!] ${portal.name}: Edge profile unavailable (${reason})`);
+        results.skipped.push({ name: portal.name, url: portal.url, reason: "edge_profile_unavailable" });
+        await sleep(delayMs);
+        continue;
+      }
+    } else {
+      portalContext = await browser.newContext({
+        userAgent: pickUserAgent(),
+        viewport: { width: 1366, height: 900 },
+        ...(useSession ? { storageState: sessionFile } : {}),
+      });
+      portalPage = await portalContext.newPage();
+    }
     portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
     if (sessionFile && !useSession) {
       console.log(`  [!] ${portal.name}: no saved session at ${path.basename(sessionFile)} — run portal/save_naukri_session.mjs`);
@@ -1449,34 +1639,60 @@ async function main() {
       continue;
     }
     try {
-      let jobs;
-      // One retry on a transport failure. These boards drop connections often
-      // enough that a single attempt turns a working portal into a "failed"
-      // line in the summary.
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let jobs = [];
+      let via = "";
+      // Obscura first where it measurably renders the board (see lib/obscura.mjs).
+      // A failure here is not a portal failure: it falls through to Playwright.
+      if (usesObscuraFirst(portal, settings) && (await obscuraAvailable())) {
         try {
-          if (portal.engine === "ashby") {
-            jobs = await engineFn(portalPage, portal, portalContext.request);
-          } else {
-            jobs = await engineFn(portalPage, portal);
-          }
-          break;
+          jobs = await OBSCURA_EXTRACTORS[portal.engine](portal);
+          if (jobs.length) via = "obscura";
         } catch (e) {
-          const transient = /ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_EMPTY_RESPONSE|ERR_TIMED_OUT|Protocol error/i.test(String(e?.message || ""));
-          if (!transient || attempt === 2) throw e;
-          console.log(`  [retry] ${portal.name}: ${/ERR_[A-Z_]+/.exec(String(e.message))?.[1] || "transport error"} — new page, one more try`);
-          await portalPage.close().catch(() => {});
-          portalPage = await portalContext.newPage();
-          portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
-          await sleep(1200);
+          console.log(`  [~] ${portal.name}: obscura ${shortError(e)} — trying playwright`);
+          jobs = [];
         }
       }
-      jobs = Array.isArray(jobs) ? jobs.slice(0, maxJobs) : [];
+      if (!jobs.length) {
+        // One retry on a transport failure. These boards drop connections often
+        // enough that a single attempt turns a working portal into a "failed"
+        // line in the summary.
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          try {
+            if (portal.engine === "ashby") {
+              jobs = await engineFn(portalPage, portal, portalContext.request);
+            } else {
+              jobs = await engineFn(portalPage, portal);
+            }
+            break;
+          } catch (e) {
+            const transient = /ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED|ERR_EMPTY_RESPONSE|ERR_TIMED_OUT|Protocol error/i.test(String(e?.message || ""));
+            if (!transient || attempt === 2) throw e;
+            console.log(`  [retry] ${portal.name}: ${/ERR_[A-Z_]+/.exec(String(e.message))?.[1] || "transport error"} — new page, one more try`);
+            await portalPage.close().catch(() => {});
+            portalPage = await portalContext.newPage();
+            portalPage.setDefaultTimeout(settings.page_timeout_ms ?? 30000);
+            await sleep(1200);
+          }
+        }
+        if (jobs.length) via = usesEdgeProfile ? "edge" : "playwright";
+      }
+      // Wellfound renders the employer outside the title anchor, so it is
+      // recovered from the card here rather than stored as "Unknown".
+      if (portal.engine === "wellfound" && Array.isArray(jobs)) {
+        jobs = jobs.map((job) => ({
+          ...job,
+          company: job?.company || wellfoundCompany(job?.card_text, job?.title) || "Unknown",
+        }));
+      }
+      // Rank before the cap. The cap is a throughput bound and must not be spent
+      // on postings this candidate cannot be hired for — taking the first 40 of
+      // Anthropic's 683 postings returned 40 US senior roles every week.
+      jobs = selectRelevantJobs(Array.isArray(jobs) ? jobs : [], maxJobs);
       const accepted = appendUniqueJobs(results.jobs, jobs, portal, results.skipped);
-      console.log(`  [+] ${portal.name}: ${accepted} job(s)${useSession ? " (authenticated)" : ""}`);
+      console.log(`  [+] ${portal.name}: ${accepted} job(s)${via ? ` via ${via}` : ""}`);
     } catch (e) {
-      console.error(`  [X] ${portal.name} failed: ${e.message}`);
-      results.failed.push({ name: portal.name, url: portal.url, error: e.message });
+      console.log(`  [x] ${portal.name}: ${shortError(e)}`);
+      results.failed.push({ name: portal.name, url: portal.url, error: String(e?.message || e) });
     } finally {
       await portalContext.close().catch(() => {});
     }

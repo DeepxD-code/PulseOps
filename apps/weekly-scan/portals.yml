@@ -36,17 +36,17 @@ search_portals:
     requires_auth: false
     url: "https://www.naukri.com/java-spring-boot-jobs-in-bangalore-hyderabad-pune-chennai?experience=0"
 
-  - name: "Wellfound India"
+  - name: "Wellfound India (Backend)"
     engine: wellfound
     enabled: true
     requires_auth: false
-    url: "https://wellfound.com/jobs?locations=India"
+    url: "https://wellfound.com/role/r/backend-engineer?locations=India"
 
-  - name: "Wellfound India (Internships)"
+  - name: "Wellfound India (ML/AI)"
     engine: wellfound
     enabled: true
     requires_auth: false
-    url: "https://wellfound.com/jobs?job_types=internship&locations=India"
+    url: "https://wellfound.com/role/r/machine-learning-engineer?locations=India"
 
   # DISABLED 2026-09-25 by user: Cloudflare/auth wall makes unattended Indeed
   # applications unreliable. Existing rows remain available for manual review.
@@ -592,5 +592,20 @@ ats_portals:
 settings:
   delay_between_portals_seconds: 2
   page_timeout_ms: 30000
+  # Throughput bound per portal. Applied AFTER relevance ranking (see
+  # lib/relevance.mjs), so it keeps the most hireable postings rather than
+  # whichever happen to be first in the board's own feed.
   max_jobs_per_portal: 40
   headless: true
+  # Obscura (stealth headless fetch) is tried before Playwright for the engines
+  # it renders reliably — instahyre, yc. Playwright still runs as the fallback,
+  # so a missing binary degrades instead of killing the source.
+  obscura_primary: true
+  obscura_primary_engines:
+    - instahyre
+  # Naukri cannot run headless: Akamai serves "Access Denied" to both headless
+  # Chromium and Obscura, and only the real Edge profile session passes.
+  naukri_edge_profile: true
+  naukri_edge_profile_dir: .edge-profile-naukri
+  naukri_edge_channel: msedge
+  naukri_headless: false
