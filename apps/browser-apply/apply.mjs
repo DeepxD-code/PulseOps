@@ -5708,6 +5708,14 @@ async function processJob(browser, job, profile, runtime = {}) {
         // into the normal fill-and-submit flow; the trust and captcha checks
         // immediately below this block both run again on the way down.
         console.log(`  [sso] authenticated — continuing into the application form`);
+      } else if (ats === "yc" || ats === "wellfound") {
+        // "Apply Now" on these boards OPENS the outreach modal; it does not
+        // submit anything. Returning needs-verification here is what made every
+        // Wellfound submission look attempted while landing nowhere: measured
+        // 2026-11-03, two jobs logged "clicked final Apply Now", no receipt mail
+        // arrived, and both pages still offered "Apply Now" afterwards. Fall
+        // through to the modal handler below, where the real Send lives.
+        console.log("  [apply] opener clicked - falling through to the YC/Wellfound modal handler");
       } else {
         const confirmed = await hasVisibleAppliedBadge(page) || await page.evaluate(() =>
           /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received/i.test(document.body?.innerText || "")
@@ -5800,10 +5808,34 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "needs-review", pdf: resumePdf };
       }
-      const nAreas = await page.locator("textarea").count().catch(() => 0);
-      const modalOpen = nAreas > 0 || await page.evaluate(() =>
+      // Wellfound does not render its outreach modal until the apply control is
+      // clicked, so a check made here sees no textarea and the flow falls
+      // through to the generic submit path. That path clicks "Apply Now" - which
+      // merely OPENS the modal - and then records needs-verification. Measured
+      // 2026-11-03 on two Wellfound jobs: both logged "clicked final Apply Now",
+      // no receipt mail ever arrived, and both pages still offered "Apply Now"
+      // afterwards. Nothing was submitted. So click the opener, then look again.
+      let nAreas = await page.locator("textarea").count().catch(() => 0);
+      let modalOpen = nAreas > 0 || await page.evaluate(() =>
         /reach out to the team|start a conversation with the team/i.test(document.body?.innerText || "")
       ).catch(() => false);
+      if (!modalOpen || nAreas === 0) {
+        const opener = page
+          .locator('button:has-text("Apply Now"), button:has-text("Apply to job"), a:has-text("Apply Now")')
+          .first();
+        if ((await opener.count()) > 0) {
+          console.log("  [yc] no modal yet - clicking the apply control to open it");
+          await opener.click({ timeout: 8000 }).catch((e) => {
+            console.log(`  [yc] opener click failed: ${String(e).slice(0, 80)}`);
+          });
+          await page.waitForTimeout(3000);
+          nAreas = await page.locator("textarea").count().catch(() => 0);
+          modalOpen = nAreas > 0 || await page.evaluate(() =>
+            /reach out to the team|start a conversation with the team|send application/i.test(document.body?.innerText || "")
+          ).catch(() => false);
+          console.log(`  [yc] after opener: textarea=${nAreas} modal=${modalOpen}`);
+        }
+      }
       if (modalOpen && nAreas > 0) {
         // Wellfound location gate: "This job does not support the locations on
         // your profile" disables the answer box until you pick a location
@@ -5898,7 +5930,13 @@ async function processJob(browser, job, profile, runtime = {}) {
             console.log(`  [yc] textarea ${i + 1}: target ${text.length} chars, actual ${gotLen}`);
           }
           await page.waitForTimeout(1500);
-          const sendBtn = page.locator('button:has-text("Send application"), button:has-text("Send")').first();
+          // Wellfound labels this "Submit application" and renders it as
+          // button[type=submit]; YC says "Send application". Looking only for
+          // "Send application"/"Send" found nothing, so every drafted answer
+          // stopped one click short of submission and was recorded needs-review.
+          const sendBtn = page
+            .locator('button:has-text("Submit application"), button[type="submit"]:has-text("Submit"), button:has-text("Send application"), button:has-text("Send")')
+            .first();
           let sent = false;
           let clickError = false;
           if (DRY_RUN) {
@@ -5937,7 +5975,16 @@ async function processJob(browser, job, profile, runtime = {}) {
               }
             }
           } else {
-            console.log("  [yc] Send button not found — refusing an unverified submission");
+            console.log("  [yc] Send button not found - refusing an unverified submission");
+            // Name the controls that ARE present, so the next failure of this
+            // kind is one log line instead of another round of DOM probing.
+            const seen = await page.evaluate(() =>
+              [...document.querySelectorAll("button, [role='button'], input[type='submit']")]
+                .map((el) => ((el.innerText || el.value || "").replace(/\s+/g, " ").trim()))
+                .filter((t) => t && t.length < 40)
+                .slice(0, 12)
+            ).catch(() => []);
+            console.log(`  [yc] visible controls: ${JSON.stringify(seen)}`);
           }
           if (DRY_RUN) {
             await page.screenshot({ path: screenshotPath.replace("preview", "yc-final"), fullPage: false }).catch(() => {});
