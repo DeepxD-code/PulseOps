@@ -132,7 +132,19 @@ _OFF_DOMAIN_ROLE = re.compile(
     r"data\s+analyst|finance|accounting|legal|counsel|operations|consultant|"
     r"specialist|strategist|solutions?\s+architect|solutions?\s+engineer|"
     r"security\s+engineer|devrel|developer\s+advocate|technical\s+writer|"
-    r"copywriter|pre[\s-]?sales|post[\s-]?sales)\b",
+    r"copywriter|pre[\s-]?sales|post[\s-]?sales)\b"
+    # Engineering that is not software. A hardware req mentions plenty of
+    # tooling, so the Stage 2 model graded "Supply Chain Engineer" and
+    # "Mechanical Engineer" above 85 and they entered the apply queue.
+    # No leading \b on this group: YC's glued titles weld the company name to
+    # the role ("EdgerunMilitary exoskeletonsSupply Chain Engineer"), so the
+    # discipline word can start mid-token. The trailing \s+engineer\b still
+    # anchors the match.
+    r"|(?:mechanical|civil|structural|electrical|electronic|electronics|"
+    r"chemical|aerospace|biomedical|industrial|manufacturing|materials?|"
+    r"metallurg\w*|environmental|mining|agricultural|marine|naval|automotive|"
+    r"hvac|instrumentation|process|plant|maintenance|field|supply[\s-]+chain|"
+    r"logistics)\s+engineer\b",
     re.IGNORECASE,
 )
 

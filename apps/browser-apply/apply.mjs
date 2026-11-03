@@ -351,8 +351,16 @@ function roleBasis(value) {
 // somewhere in them. "Solutions Architect" and "Customer Success Engineer" are
 // not software roles, and "Sales Engineer" is not a backend role, so they must
 // not be rescued by the generic pass below.
-const STRICT_ROLE_GENERIC_DENY =
-  /\b(?:solutions?\s+(?:engineer|architect)|solution\s+specialist|security\s+engineer|customer\s+success|partner\s+success|product\s+support|technical\s+sourcer|technical\s+copywriter|gtm\s+strategist|sales\s+engineer|developer\s+relations|developer\s+advocate|devrel|electrical\s+engineer|operations\s+engineer)\b/;
+const STRICT_ROLE_GENERIC_DENY = new RegExp(
+  String.raw`\b(?:solutions?\s+(?:engineer|architect)|solution\s+specialist|security\s+engineer|customer\s+success|partner\s+success|product\s+support|technical\s+sourcer|technical\s+copywriter|gtm\s+strategist|sales\s+engineer|developer\s+relations|developer\s+advocate|devrel|electrical\s+engineer|operations\s+engineer)\b`
+  // Engineering disciplines that are not software. "Supply Chain Engineer" and
+  // "Mechanical Engineer" reached the queue at score 92 and 88 because the
+  // generic path admits any title containing "engineer" once the posting body
+  // mentions tooling - and a hardware posting mentions a lot of tooling. The
+  // score cannot help here: it graded the body, which really did match.
+  + String.raw`|(?:mechanical|civil|structural|electrical|electronic|electronics|chemical|aerospace|biomedical|industrial|manufacturing|materials?|metallurg\w*|environmental|mining|agricultural|marine|naval|automotive|hvac|instrumentation|process|plant|maintenance|field|supply[\s-]+chain|logistics)\s+engineer\b`,
+  "i",
+);
 
 /**
  * A "software <engineering noun>" compound is a generic engineering title.
@@ -449,6 +457,16 @@ const ENTRY_LEVEL_MARKER =
 const ENGINEERING_NOUN =
   /\b(?:engineer|engineering|developer|development|programmer|sde|software|backend|back[\s-]end)\b/;
 
+// Seniority the candidate cannot claim (0.2 years, profile.seniority.exclude).
+// Stage 1 drops these before they are ever stored, so this only catches rows
+// written before that rule existed - which is how "Engineering Manager,
+// Infrastructure" reached the queue at score 12 and "Sr Backend Engineer" at 42.
+// The intern/junior modifier wins, exactly as in hard_filter().
+const SENIORITY_DENY =
+  /\b(?:senior|sr|staff|lead|principal|director|head\s+of|vp|vice\s+president|manager|chief|cto|founder)\b/;
+const INTERN_MODIFIER =
+  /\b(?:intern|internship|trainee|fresher|graduate|new\s+grad|entry[\s-]?level|junior|jr)\b/;
+
 // Whole-token patterns for the exclude list. The previous test was
 // `value.includes(marker)`, which rejected "Salesforce Developer" (contains
 // "sales"), "Adios Engineer" (contains "ios") and "Reactive Systems Developer"
@@ -474,6 +492,12 @@ function isStrictTargetRole(title, description = "") {
   const value = raw.toLowerCase();
   if (!value) return false;
   if (STRICT_ROLE_EXCLUDE_RES.some((pattern) => pattern.test(value))) return false;
+
+  // Seniority the candidate cannot claim. Checked after the stack excludes (so
+  // "Senior Ruby Developer" is still a stack problem) and before the allow list,
+  // because "Senior Backend Engineer" otherwise matches "backend" and is applied
+  // to. The intern/junior modifier wins, as in hard_filter().
+  if (SENIORITY_DENY.test(value) && !INTERN_MODIFIER.test(value)) return false;
 
   // A non-engineering discipline named in the title is disqualifying even when an
   // in-scope keyword is also present ("Solutions Architect, AI", "Security
@@ -3668,17 +3692,29 @@ print(json.dumps(out))
 }
 
 /**
- * Order eligible rows so boards with a record of accepting come first.
+ * Order eligible rows so the best applications are spent first.
  *
- * Groups: 0 confirmed a submission, 1 attempted without one, 2 no history.
- * Within a group the original order is kept - score DESC, then ATS class, then
- * recency - so this changes WHICH board is tried first, not which role within it.
- * The sort is stable by index, so equal candidates never reshuffle.
+ * The previous order was board-acceptance first, then whatever the SQL returned.
+ * That put a 12-score "Engineering Manager, Infrastructure" ahead of a 65-score
+ * India backend role purely because Greenhouse has a better acceptance record
+ * than the India boards - the batch was spent on rows the role gate should never
+ * have admitted, while the roles the candidate can actually win never ran.
+ *
+ * Order now: India-native boards first (the candidate is in Greater Noida and
+ * cannot take a US on-site role), then fit score, and only then the board's
+ * acceptance record, which is a tiebreak rather than a priority. The sort is
+ * stable on the original index, so equal rows never reshuffle between runs.
  */
+const INDIA_BOARD = /naukri|instahyre|hirist|wellfound|cutshort|foundit|naukri\.com/i;
+
+function isIndiaBoardRow(row) {
+  return INDIA_BOARD.test(String(row?.source || "")) || INDIA_BOARD.test(String(row?.link || ""));
+}
+
 function rankByAcceptance(rows, acceptance) {
   if (!Array.isArray(rows) || rows.length < 2) return rows;
-  if (!acceptance || acceptance.size === 0) return rows;
   const groupOf = (row) => {
+    if (!acceptance || acceptance.size === 0) return 2;
     const link = String(row?.link || "").toLowerCase();
     // Key the family on the ATS that SERVES the posting, not on the hostname.
     // Greenhouse serves many employers from their own domain - elastic on
@@ -3697,8 +3733,17 @@ function rankByAcceptance(rows, acceptance) {
     return rec.attempted > 0 ? 1 : 2;
   };
   return rows
-    .map((row, index) => ({ row, index, group: groupOf(row) }))
-    .sort((a, b) => (a.group - b.group) || (a.index - b.index))
+    .map((row, index) => ({
+      row,
+      index,
+      market: isIndiaBoardRow(row) ? 0 : 1,
+      score: Number.isFinite(Number(row?.score)) ? Number(row.score) : -1,
+      group: groupOf(row),
+    }))
+    .sort((a, b) => (a.market - b.market)
+      || (b.score - a.score)
+      || (a.group - b.group)
+      || (a.index - b.index))
     .map((entry) => entry.row);
 }
 
@@ -7578,6 +7623,7 @@ export {
   jobDescriptionFor,
   whyInterested,
   rankByAcceptance,
+  isIndiaBoardRow,
   readAcceptanceByAts,
   candidateFirstName,
   candidateLastName,

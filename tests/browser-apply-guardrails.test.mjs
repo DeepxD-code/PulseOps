@@ -1337,67 +1337,70 @@ test("the location country is answered, and a phone dialling code is not", () =>
   );
 });
 
-test("boards that accept submissions are attempted before boards that refuse", () => {
-  // Measured: Ashby 0 accepted / 34 attempted, Greenhouse 6 accepted / 24
-  // attempted. The queue ranked on score alone, so Ashby rows at score 78 took
-  // the first slots and six batches produced two verifications and a pile of
-  // refusals. Nothing in the queue showed that, because acceptance was recorded
-  // nowhere the queue read.
+test("India boards are tried first, then fit score, then the board's record", () => {
+  // The order has been wrong in both directions.
+  //
+  // First it ranked on score alone, so Ashby (0 accepted / 34 attempted) rows at
+  // score 78 took the first slots and six batches produced two verifications and
+  // a pile of refusals.
+  //
+  // Then it ranked on board acceptance alone, which put a 12-score
+  // "Engineering Manager, Infrastructure" ahead of a 65-score India backend role
+  // purely because Greenhouse has a better record than the India boards. The
+  // candidate is in Greater Noida: a US on-site role is not winnable at any
+  // score, and the India roles that ARE winnable never got a batch slot.
+  //
+  // Order now: India-native board, then fit score, then the board's record as a
+  // tiebreak. Stable on the original index, so equal rows never reshuffle.
   const acceptance = new Map([
     ["greenhouse", { accepted: 6, attempted: 24 }],
     ["ashby", { accepted: 0, attempted: 34 }],
   ]);
 
-  const rows = [
-    { id: 1, link: "https://jobs.ashbyhq.com/x/1", score: 78 },
-    { id: 2, link: "https://job-boards.greenhouse.io/a/jobs/2", score: 50 },
-    { id: 3, link: "https://www.mongodb.com/careers/job/?gh_jid=3", score: 65 },
+  // 1. An India board outranks a US ATS whatever the score or record.
+  const markets = [
+    { id: 1, link: "https://job-boards.greenhouse.io/a/jobs/1", score: 88, source: "greenhouse" },
+    { id: 2, link: "https://www.naukri.com/job-listings-2", score: 40, source: "Naukri (Java/Spring Boot)" },
+    { id: 3, link: "https://wellfound.com/company/x/jobs/3", score: 65, source: "Wellfound India (Backend)" },
   ];
-  // The Greenhouse row wins despite scoring 28 points lower.
-  assert.deepEqual(rankByAcceptance(rows, acceptance).map((r) => r.id), [2, 3, 1]);
+  assert.deepEqual(rankByAcceptance(markets, acceptance).map((r) => r.id), [3, 2, 1]);
 
-  // Within a group the original order is preserved - this changes WHICH board is
-  // tried first, not which role within it.
-  const ordered = rankByAcceptance(rows, acceptance);
-  const gh = ordered.filter((r) => r.link.includes("greenhouse.io") || r.link.includes("mongodb.com"));
-  assert.deepEqual(gh.map((r) => r.id), [2, 3], "score order kept inside the proven group");
-
-  // An employer-hosted Greenhouse board counts as GREENHOUSE, not as unknown.
-  // Keyed on the hostname it had no record and ranked BELOW Ashby, so the board
-  // that accepts everything sorted behind the board that refuses everything -
-  // purely because of how the URL is spelled. With no greenhouse record it is
-  // unknown, and within that group the original order holds, so the higher-scoring
-  // Ashby row leads.
-  const unknownOnly = new Map([["ashby", { accepted: 0, attempted: 34 }]]);
-  const mixed = [
-    { id: 7, link: "https://jobs.ashbyhq.com/y/7", score: 90 },
-    { id: 8, link: "https://www.mongodb.com/careers/job/?gh_jid=8", score: 20 },
-  ];
-  assert.deepEqual(rankByAcceptance(mixed, unknownOnly).map((r) => r.id), [7, 8]);
-
-  // Once greenhouse has a record, the employer-hosted board inherits it and
-  // overtakes Ashby despite scoring far lower.
-  const proven = new Map([
-    ["greenhouse", { accepted: 6, attempted: 24 }],
-    ["ashby", { accepted: 0, attempted: 34 }],
-  ]);
-  assert.deepEqual(rankByAcceptance(mixed, proven).map((r) => r.id), [8, 7]);
-
-  // A family that HAS attempted without a confirmation ranks between proven and
-  // unknown, so a board whose key later works is not demoted permanently.
-  const partial = new Map([
-    ["greenhouse", { accepted: 3, attempted: 5 }],
-    ["ashby", { accepted: 0, attempted: 9 }],
-  ]);
-  const two = [
+  // 2. Score decides before the board record does. Greenhouse accepts 6/24,
+  //    Ashby 0/34 - the record used to put the 10-score row first.
+  const scored = [
     { id: 4, link: "https://jobs.ashbyhq.com/z/4", score: 99 },
     { id: 5, link: "https://job-boards.greenhouse.io/b/jobs/5", score: 10 },
   ];
-  assert.deepEqual(rankByAcceptance(two, partial).map((r) => r.id), [5, 4]);
+  assert.deepEqual(rankByAcceptance(scored, acceptance).map((r) => r.id), [4, 5]);
 
-  // No history at all leaves the order untouched rather than guessing.
-  assert.deepEqual(rankByAcceptance(rows, new Map()).map((r) => r.id), [1, 2, 3]);
-  assert.deepEqual(rankByAcceptance(rows, null).map((r) => r.id), [1, 2, 3]);
+  // 3. On an equal score the record is the tiebreak: proven beats
+  //    attempted-without-confirmation.
+  const tie = [
+    { id: 6, link: "https://jobs.ashbyhq.com/z/6", score: 60 },
+    { id: 7, link: "https://job-boards.greenhouse.io/b/jobs/7", score: 60 },
+  ];
+  assert.deepEqual(rankByAcceptance(tie, acceptance).map((r) => r.id), [7, 6]);
+
+  // 4. An employer-hosted Greenhouse board counts as GREENHOUSE, not as unknown.
+  //    Keyed on the hostname it had no record and lost the tie to Ashby, purely
+  //    because of how the URL is spelled.
+  const hosted = [
+    { id: 8, link: "https://jobs.ashbyhq.com/y/8", score: 60 },
+    { id: 9, link: "https://www.mongodb.com/careers/job/?gh_jid=9", score: 60 },
+  ];
+  assert.deepEqual(rankByAcceptance(hosted, acceptance).map((r) => r.id), [9, 8]);
+
+  // 5. No history at all still applies the market and score order rather than
+  //    handing back whatever the SQL happened to return.
+  assert.deepEqual(rankByAcceptance(markets, new Map()).map((r) => r.id), [3, 2, 1]);
+  assert.deepEqual(rankByAcceptance(markets, null).map((r) => r.id), [3, 2, 1]);
+
+  // 6. Already ordered rows come back untouched - the sort is stable.
+  const india = [
+    { id: 10, link: "https://www.instahyre.com/job-10", score: 70 },
+    { id: 11, link: "https://www.naukri.com/job-listings-11", score: 60 },
+  ];
+  assert.deepEqual(rankByAcceptance(india, acceptance).map((r) => r.id), [10, 11]);
 });
 
 test("a first-name control is answered from the name on file", () => {

@@ -1,4 +1,4 @@
-// Why is each Evaluated row not eligible?
+// Why is each Evaluated row not eligible, and in what order will the batch run?
 //
 // Re-implements the gate's conditions with the real exported helpers, so the
 // reason per row is observed rather than guessed.
@@ -6,13 +6,16 @@
 // It reads the database LIVE. It used to read output/evaluated-rows.json, which
 // is a snapshot written by whichever run happened to produce it last - it was
 // reporting 79 rows while the table held 104, so the answer was quietly about
-// the past. It also hardcoded a score floor of 75 while runs actually use
-// PULSEOPS_MIN_SCORE (60), which made in-scope rows look rejected for scoring
-// below a threshold no run was using.
+// the past.
+//
+// It also used to bucket rows as "score N < 75". That gate no longer exists:
+// apply.mjs applies scope as the hard gate and uses score only to rank the
+// in-scope pool (in-scope median 52 vs out-of-scope 65, so a score floor rejected
+// the roles worth applying to). Reporting a floor here again would recreate the
+// same misunderstanding in the diagnostics.
 //
 // Usage:
-//   node tools/why-not-eligible.mjs              # honour PULSEOPS_MIN_SCORE
-//   PULSEOPS_MIN_SCORE=75 node tools/why-not-eligible.mjs
+//   node tools/why-not-eligible.mjs
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -23,14 +26,12 @@ import {
   isBlacklistedJob,
   isSimulationJob,
   isEligibleJob,
+  rankByAcceptance,
+  isIndiaBoardRow,
   inferATS,
 } from "../apply.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const MIN_SCORE = (() => {
-  const parsed = Number.parseInt(process.env.PULSEOPS_MIN_SCORE || "75", 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 75;
-})();
 
 function dbCandidates() {
   const dbPath = [process.env.PULSEOPS_DB_PATH, path.join(ROOT, "pulseops.db")]
@@ -61,11 +62,11 @@ const reasons = new Map();
 const bump = (r) => reasons.set(r, (reasons.get(r) || 0) + 1);
 const detail = new Map();
 const note = (id, r) => { if (!detail.has(r)) detail.set(r, []); detail.get(r).push(id); };
+const eligible = [];
 
 for (const row of rows) {
   const link = row.link || "";
   const ats = inferATS(link);
-  const score = Number(row.score);
   let reason = null;
   if (!link) reason = "no link";
   else if (!isAllowedInitialJobUrl(link)) reason = `blocked URL (${new URL(link).hostname})`;
@@ -74,8 +75,6 @@ for (const row of rows) {
   // for exactly those - so checking the title alone reports 56 in-scope roles
   // as rejected, which is what made this tool contradict the engine.
   else if (!isStrictTargetRole(row.title, row.text_summary || "")) reason = "out-of-scope role";
-  else if (!Number.isFinite(score)) reason = "score non-numeric";
-  else if (score < MIN_SCORE) reason = `score ${score} < ${MIN_SCORE}`;
   else if (ats === "indeed") reason = "Indeed (out of scope by policy)";
   else if (isSimulationJob(row)) reason = "simulation/mock";
   else if (isBlacklistedJob(row)) reason = "blacklisted";
@@ -84,24 +83,27 @@ for (const row of rows) {
   // engine's own Python bridge and is not in this row. Name the bucket for
   // what it is instead of implying a gate that has not been evaluated.
   else reason = "ELIGIBLE (send-pause state not checked here)";
+  if (reason.startsWith("ELIGIBLE")) eligible.push(row);
   bump(reason);
   note(row.id, reason);
 }
 
-const byAts = new Map();
-for (const row of rows) {
-  if (!row.link) continue;
-  const ats = inferATS(row.link);
-  if (ats === "indeed" || Number(row.score) < MIN_SCORE) continue;
-  byAts.set(ats, (byAts.get(ats) || 0) + 1);
-}
-
-console.log(`Evaluated rows: ${rows.length}   (score floor ${MIN_SCORE})\n`);
+console.log(`Evaluated rows: ${rows.length}\n`);
 for (const [reason, n] of [...reasons].sort((a, b) => b[1] - a[1])) {
   const ids = detail.get(reason).slice(0, 8).join(", ");
-  console.log(`${String(n).padStart(3)}  ${reason.padEnd(34)} ${ids}`);
+  console.log(`${String(n).padStart(3)}  ${reason.padEnd(38)} ${ids}`);
 }
-if (byAts.size) {
-  console.log(`\nAbove the score floor, by platform: ${[...byAts].sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `${k} ${v}`).join(", ")}`);
+
+// The batch slots are spent in this order. Acceptance history is not loaded
+// here, so the record tiebreak is left out; market and score are the two that
+// decide which role leads the batch.
+if (eligible.length) {
+  const ordered = rankByAcceptance(eligible, new Map());
+  console.log(`\nBatch order (top ${Math.min(12, ordered.length)} of ${ordered.length}):`);
+  for (const row of ordered.slice(0, 12)) {
+    const market = isIndiaBoardRow(row) ? "IN" : "US";
+    console.log(`  ${market} ${String(row.score).padStart(3)}  ${String(row.source || "").slice(0, 26).padEnd(26)} ${String(row.title || "").slice(0, 56)}`);
+  }
+  const india = eligible.filter(isIndiaBoardRow).length;
+  console.log(`\n${india} India-board rows, ${eligible.length - india} US/ATS rows.`);
 }
