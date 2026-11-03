@@ -583,15 +583,30 @@ def get_job_by_title_company(title: str, company: str) -> dict | None:
 
 
 def is_job_processed(title: str, company: str, link: str = "") -> bool:
+    """True when this posting has already been sourced.
+
+    Identity is the link first. The (title, company) pair is only a fallback,
+    and only when the employer is actually known: 64 Wellfound rows were stored
+    with company "Unknown", and matching on that permanently blocked every later
+    posting that happened to share a title — a different employer's "Software
+    Engineer" looked already seen.
+    """
     conn = get_connection()
     try:
         if link and link.strip():
             if conn.execute("SELECT 1 FROM jobs WHERE link=?", (link.strip(),)).fetchone():
                 return True
-        return bool(conn.execute(
-            "SELECT 1 FROM jobs WHERE LOWER(title)=? AND LOWER(company)=?",
-            (title.lower().strip(), company.lower().strip()),
-        ).fetchone())
+
+        title_norm = (title or "").strip().lower()
+        company_norm = (company or "").strip().lower()
+        if not title_norm or company_norm in {"", "unknown", "n/a", "na", "-", "none"}:
+            return False
+
+        rows = conn.execute(
+            "SELECT company FROM jobs WHERE LOWER(title)=?", (title_norm,)
+        ).fetchall()
+        target = normalise_company(company)
+        return any(normalise_company(row["company"]) == target for row in rows)
     except sqlite3.Error as e:
         print(f"  [DB Error] is_job_processed: {e}")
         raise DatabaseError(f"is_job_processed failed: {e}") from e

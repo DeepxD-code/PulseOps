@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
 import { BASIC_HTML, detectBasicHtml } from "./page-probe.mjs";
+import { cleanTitle } from "../weekly-scan/lib/relevance.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
@@ -203,6 +204,9 @@ const STRICT_ROLE_EXCLUDES = [
   "javascript", "java script", "typescript",
   // Data stores and frameworks the candidate does not work with.
   "mongo", "mongodb", "django",
+  // Languages outside the candidate's set. "Backend Engineer (Ruby)" is in-scope
+  // by role family and pure waste by stack.
+  "ruby", "rails", "php", "perl", "c#", ".net", "dotnet", "vb.net",
   // Design roles are not software engineering roles.
   "ui/ux", "ui ux", "ux/ui", "ui designer", "ux designer", "product designer",
   "graphic design", "product design", "web design", "figma",
@@ -431,14 +435,31 @@ function jobDescriptionFor(job) {
   return String(job?.text_summary || job?.description || "");
 }
 
+// Whole-token patterns for the exclude list. The previous test was
+// `value.includes(marker)`, which rejected "Salesforce Developer" (contains
+// "sales"), "Adios Engineer" (contains "ios") and "Reactive Systems Developer"
+// (contains "react"). Separator classes keep the marker's spelling variants
+// together: "full stack" / "full-stack" / "fullstack" are one family.
+const STRICT_ROLE_EXCLUDE_RES = STRICT_ROLE_EXCLUDES.map((marker) => {
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = marker.trim().split(/[\s\-/]+/).filter(Boolean).map(escape);
+  const body = parts.join("[\\s\\-/]*");
+  const squeezed = escape(marker.replace(/[\s\-/_]+/g, ""));
+  return new RegExp(`(?<![a-z0-9])(?:${body}|${squeezed})(?![a-z0-9])`, "i");
+});
+
 function isStrictTargetRole(title, description = "") {
   // roleBasis relies on capitalisation to strip a location glued onto the role
   // noun ("EngineerLondon"). Lower-casing first made every one of those rules
   // dead, so the raw title is normalised here and only then compared.
-  const raw = String(title || "").trim().replace(/\s+/g, " ");
+  // cleanTitle first: rows written before the cleaner existed still carry board
+  // chrome ("... Founded in 2021 50-200 employees"), and the chrome was what the
+  // exclude list usually matched.
+  const source = String(title || "").trim().replace(/\s+/g, " ");
+  const raw = cleanTitle(source) || source;
   const value = raw.toLowerCase();
   if (!value) return false;
-  if (STRICT_ROLE_EXCLUDES.some((marker) => value.includes(marker))) return false;
+  if (STRICT_ROLE_EXCLUDE_RES.some((pattern) => pattern.test(value))) return false;
 
   // A non-engineering discipline named in the title is disqualifying even when an
   // in-scope keyword is also present ("Solutions Architect, AI", "Security

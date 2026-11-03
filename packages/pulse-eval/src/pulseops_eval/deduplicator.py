@@ -57,7 +57,17 @@ def _within_48h(p1: str, p2: str) -> bool:
         return True
 
 
+def _company_known(name: str) -> bool:
+    """False for the placeholders boards emit when they cannot read the employer."""
+    return normalise_company(name) not in {"", "unknown", "n/a", "na", "-", "none"}
+
+
 def _is_same_job(a: dict, b: dict) -> bool:
+    # Fuzzy matching needs an employer to compare. With "Unknown" on both sides
+    # the Levenshtein distance is 0, so every pair of same-titled listings at
+    # unrelated companies collapsed into one job.
+    if not _company_known(a.get("company", "")) or not _company_known(b.get("company", "")):
+        return False
     norm_a = normalise_company(a.get("company", ""))
     norm_b = normalise_company(b.get("company", ""))
     if _levenshtein(norm_a, norm_b) > 2:
@@ -98,8 +108,9 @@ def deduplicate(jobs: list[dict], run_id: str = "") -> list[dict]:
                 kept[idx] = job
             continue
 
-        # Exact title+company match
-        if exact_key in seen_exact:
+        # Exact title+company match — only when the employer is known, otherwise
+        # two different companies' identically-titled roles are collapsed.
+        if _company_known(job.get("company", "")) and exact_key in seen_exact:
             idx = seen_exact[exact_key]
             if _source_rank(job) > _source_rank(kept[idx]):
                 kept[idx] = job
@@ -110,7 +121,8 @@ def deduplicate(jobs: list[dict], run_id: str = "") -> list[dict]:
         kept.append(job)
         if link:
             seen_links[link] = idx
-        seen_exact[exact_key] = idx
+        if _company_known(job.get("company", "")):
+            seen_exact[exact_key] = idx
 
     # Step 3: fuzzy dedup across kept list
     final: list[dict] = []

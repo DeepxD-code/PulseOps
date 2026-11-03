@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from google import genai
 from google.genai import types
 
+from pulseops_eval.title_clean import clean_title
+
 
 def _gemini_client(api_key):
     """One bounded client per process. See profile_builder for why."""
@@ -97,6 +99,10 @@ _STRICT_ROLE_EXCLUDES = (
     "javascript", "java script", "typescript",
     # Data stores and frameworks the candidate does not work with.
     "mongo", "mongodb", "django",
+    # Languages outside the candidate's set. A "Backend Engineer (Ruby)" title is
+    # in-scope by role family and pure waste by stack — GitLab alone posts several
+    # Ruby backend roles every week.
+    "ruby", "rails", "php", "laravel", "perl", "c#", ".net", "dotnet", "vb.net",
     # Design roles are not software engineering roles.
     "ui/ux", "ui ux", "ux/ui", "ui designer", "ux designer", "product designer",
     "graphic design", "product design", "web design", "figma",
@@ -105,7 +111,7 @@ _STRICT_ROLE_EXCLUDES = (
 _STRICT_ROLE_ALLOWED = re.compile(
     r"\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|"
     r"ai|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|"
-    r"deep[\s-]+learning|java|python)\b"
+    r"deep[\s-]+learning|java|python|golang|go|rust|kotlin|spring|grpc)\b"
     # Scraped titles concatenate company and role ("FirmMachine Learning
     # Researcher"), so these two must match without a leading word boundary.
     r"|machine[\s-]+learning|reinforcement[\s-]+learning"
@@ -113,13 +119,58 @@ _STRICT_ROLE_ALLOWED = re.compile(
     re.IGNORECASE,
 )
 
+# Disciplines that are out of scope even when an in-scope keyword also appears.
+# "Solutions Architect, AI" and "AI Deployment Specialist" name an AI product but
+# are pre-sales / delivery roles, not engineering ones. Mirrors OFF_DOMAIN in
+# apps/weekly-scan/lib/relevance.mjs.
+_OFF_DOMAIN_ROLE = re.compile(
+    r"\b(?:sales|marketing|recruiter|recruiting|talent\s+acquisition|"
+    r"account\s+executive|account\s+manager|business\s+development|"
+    r"business\s+analyst|customer\s+success|support\s+engineer|"
+    r"product\s+manager|project\s+manager|program\s+manager|product\s+designer|"
+    r"graphic\s+design|ux\s+designer|ui\s+designer|data\s+scientist|"
+    r"data\s+analyst|finance|accounting|legal|counsel|operations|consultant|"
+    r"specialist|strategist|solutions?\s+architect|solutions?\s+engineer|"
+    r"security\s+engineer|devrel|developer\s+advocate|technical\s+writer|"
+    r"copywriter|pre[\s-]?sales|post[\s-]?sales)\b",
+    re.IGNORECASE,
+)
+
+
+def _marker_regex(marker: str) -> re.Pattern[str]:
+    """Compile an exclude marker into a whole-token pattern.
+
+    The previous test was `marker in title`, which rejected "Salesforce
+    Developer" (contains "sales"), "Adios Engineer" (contains "ios") and
+    "Reactive Systems Developer" (contains "react"). Matching on token
+    boundaries fixes that, and the separator class keeps the marker's own
+    spelling variants together: "full stack" / "full-stack" / "fullstack" are one
+    role family, not three.
+    """
+    parts = [re.escape(p) for p in re.split(r"[\s\-/]+", marker.strip()) if p]
+    if not parts:
+        return re.compile(r"(?!x)x")
+    body = r"[\s\-/]*".join(parts)
+    # Also accept the squeezed form ("fullstack", "nodejs", "uiux").
+    squeezed = re.escape(re.sub(r"[\s\-/_]+", "", marker.strip()))
+    alternatives = {body, squeezed}
+    return re.compile(
+        r"(?<![a-z0-9])(?:%s)(?![a-z0-9])" % "|".join(sorted(alternatives, key=len, reverse=True)),
+        re.IGNORECASE,
+    )
+
+
+_STRICT_ROLE_EXCLUDE_RES = tuple(_marker_regex(m) for m in _STRICT_ROLE_EXCLUDES)
+
 
 def is_strict_target_role(title: str) -> bool:
     """Return True only for the candidate's explicitly allowed role families."""
-    value = re.sub(r"\s+", " ", str(title or "").strip().lower())
+    value = clean_title(title).lower()
     if not value:
         return False
-    if any(marker in value for marker in _STRICT_ROLE_EXCLUDES):
+    if any(pattern.search(value) for pattern in _STRICT_ROLE_EXCLUDE_RES):
+        return False
+    if _OFF_DOMAIN_ROLE.search(value):
         return False
     return bool(_STRICT_ROLE_ALLOWED.search(value))
 
@@ -133,10 +184,12 @@ def is_hard_excluded_role(title: str) -> bool:
     instead of being dropped. Rejecting every unkeyworded title silently
     discarded real ML/AI roles.
     """
-    value = re.sub(r"\s+", " ", str(title or "").strip().lower())
+    value = clean_title(title).lower()
     if not value:
         return False
-    return any(marker in value for marker in _STRICT_ROLE_EXCLUDES)
+    if any(pattern.search(value) for pattern in _STRICT_ROLE_EXCLUDE_RES):
+        return True
+    return bool(_OFF_DOMAIN_ROLE.search(value))
 
 
 # ── Stage 1 helpers ───────────────────────────────────────────────────────────
@@ -166,7 +219,7 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
     Zero-cost hard filter. Returns FilterResult(passed=False) with reason if rejected.
     Non-negotiable #8: this MUST pass before any LLM is called.
     """
-    title = (job.get("title") or "").strip()
+    title = clean_title(job.get("title") or "")
     desc  = (job.get("description") or "")
     title_lower = title.lower()
 
@@ -186,22 +239,26 @@ def hard_filter(job: dict, profile: dict) -> FilterResult:
             stage=1,
         )
 
-    # G1: hard_exclude as primary skill → REJECT
+    # G1: hard_exclude as the *title's* subject → REJECT.
+    #
+    # This used to test the description too, so a backend role whose JD happened
+    # to mention React or CSS was rejected as a frontend role. A mention in the
+    # body is not a role; the title is.
     for kw in hard_ex:
-        if _is_primary_skill(kw, title, desc):
+        if _marker_regex(kw).search(title_lower):
             return FilterResult(False,
-                f"Stage1: hard_exclude '{kw}' is primary skill", stage=1)
+                f"Stage1: hard_exclude '{kw}' is the title's subject", stage=1)
 
-    # G2: role_types.exclude in title → REJECT
+    # G2: role_types.exclude in the title → REJECT (token-boundary matched).
     for role in role_ex:
-        if role in title_lower:
+        if _marker_regex(role).search(title_lower):
             return FilterResult(False,
                 f"Stage1: excluded role type '{role}' in title", stage=1)
 
     # G3: seniority.exclude → REJECT (unless also contains intern/junior)
     if not _has_intern_exception(title):
         for lvl in senior_ex:
-            if lvl in title_lower:
+            if _marker_regex(lvl).search(title_lower):
                 return FilterResult(False,
                     f"Stage1: seniority '{lvl}' excluded (no intern/junior modifier)", stage=1)
 
