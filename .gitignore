@@ -125,3 +125,19 @@ portal/save_*.mjs
 /ezyev_link.py
 /watch_yc_mail.py
 /liveness*.json
+
+# ── Obscura cookie jars ──────────────────────────────────────────────────────
+# `obscura --storage-dir` writes live authenticated sessions here (instahyre,
+# naukri). Same class of secret as portal/*-storageState.json.
+.obscura/
+
+# ── Root-level scratch from a single investigation ──────────────────────────
+/tmp_*.py
+/tmp_*.mjs
+/tmp_*.json
+# Ad-hoc screenshot captured while probing a portal.
+/naukri-probe.png
+
+# ── Agent session capture (machine-local) ───────────────────────────────────
+# roam writes the local transcript cache here before pushing it to the relay.
+.opencode/

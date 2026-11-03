@@ -50,14 +50,21 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(r"E:\Potential-gold\PluseOPS")
+ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "pulseops.db"
 LOG_DIR = ROOT / "output" / "loop"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_SCORE = os.environ.get("PULSEOPS_MIN_SCORE", "45")
-MAX_ITERATIONS = int(os.environ.get("LOOP_MAX_ITERATIONS", "40"))
-SLEEP_BETWEEN = int(os.environ.get("LOOP_SLEEP_MINUTES", "15")) * 60
+MAX_ITERATIONS = int(os.environ.get("LOOP_MAX_ITERATIONS", "6"))
+# Four hours, not fifteen minutes. A full iteration is a weekly scan, a liveness
+# sweep over ~1000 rows and a live apply batch - roughly 20-40 minutes of real
+# work and a lot of board traffic. Re-running that every 15 minutes hammered the
+# same portals, re-scanned boards whose postings had not changed, and produced a
+# 16-application day that exhausted the daily cap before the good roles were
+# reached. The scheduled tasks (scripts/register-tasks.ps1) are the primary
+# mechanism; this loop is the fallback for a machine without Task Scheduler.
+SLEEP_BETWEEN = int(os.environ.get("LOOP_SLEEP_MINUTES", "240")) * 60
 
 ENV = dict(os.environ)
 ENV.update({
@@ -316,14 +323,15 @@ def iteration(index: int) -> str:
     if not gem["ok"] and not groq["ok"]:
         return "skipped-no-quota"
 
-    # Full pipeline. Liveness is a ~5 minute phase and now streams, so silence
-    # during it is expected rather than a fault.
+    # Delegates to the single runner so there is one place that knows how to
+    # invoke the pipeline and the apply stage (binaries, lock, log, flags).
     rc = run(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-File",
-         "scripts/run-automation.ps1", "-AcceptTerms", "-AcceptLegal"],
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(ROOT / "scripts" / "run-pulseops.ps1"), "-Job", "weekly",
+         "-AcceptTerms", "-AcceptLegal"],
         log_path, timeout=5400,
     )
-    log(f"  run-automation exit={rc}")
+    log(f"  run-pulseops exit={rc}")
 
     queued = export_score_queue(f"iteration-{index}")
     if queued:
