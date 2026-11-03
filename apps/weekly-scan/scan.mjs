@@ -865,6 +865,16 @@ async function scrapeWellfound(page, portal) {
         const cardText = (ownerEl?.innerText || "").replace(/\r/g, "").trim().slice(0, 400);
         const salary = card.match(/[₹$€£]\s?[\d,.]+\s*(?:[kK]|[Ll])?\s*(?:[-–—]\s?[₹$€£]?\s?[\d,.]+\s*(?:[kK]|[Ll])?)?/);
         const workMode = /\b(remote only|remote|in office|hybrid|onsite)\b/i.exec(card);
+        // The card also names the place, right after the work mode: "In office
+        // Bengaluru", "Remote · United States". This used to be dropped, so
+        // every Wellfound row stored location_raw="" and the location filter
+        // let it through as unknown/possible-remote - which is how 548 of 601
+        // pending rows ended up being roles whose own board refuses an India
+        // applicant ("not accepting applications from your current location").
+        const placeMatch =
+          /(?:remote only|remote|in office|hybrid|onsite)\b[\s·|,/-]*([A-Za-z][A-Za-z .'&-]{1,28}(?:,\s*[A-Za-z][A-Za-z .'&-]{1,28})?)/i.exec(cardText)
+          || /\b(India|United States|USA|US|United Kingdom|UK|Canada|Germany|Netherlands|Singapore|UAE|Dubai|London|New York|San Francisco|Seattle|Austin|Boston|Berlin|Toronto|Bengaluru|Bangalore|Hyderabad|Pune|Chennai|Mumbai|Noida|Gurugram|Gurgaon|Delhi)\b/i.exec(cardText);
+        const locationRaw = (placeMatch?.[1] || "").trim();
 
         seen.add(url.href);
         out.push({
@@ -872,6 +882,7 @@ async function scrapeWellfound(page, portal) {
           company,
           card_text: cardText,
           link: url.href,
+          location_raw: locationRaw.slice(0, 60),
           description: [
             salary ? `Salary shown: ${salary[0]}` : "Salary: not stated",
             workMode ? `Work mode: ${workMode[1]}` : "",

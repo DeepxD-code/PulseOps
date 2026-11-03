@@ -5837,6 +5837,37 @@ async function processJob(browser, job, profile, runtime = {}) {
         }
       }
       if (modalOpen && nAreas > 0) {
+        // Wellfound closes applications by geography and says so inside the
+        // modal, with the Send button rendered disabled rather than hidden:
+        //   "mozee is not accepting applications from your current location due
+        //    to timezone overlap"
+        //   "This job does not support the locations or timezones for remote
+        //    work on your profile."
+        // The engine used to fill what it could, find the answers uneditable,
+        // and record needs-review - so the same US-remote role was re-visited
+        // every run forever. Measured 2026-11-03 on #1131 (mozee, $125k-$170k,
+        // Texas) and #1118 (Deepgram, $150k-$220k, US-remote). There is no
+        // session that can make these submittable, so record the refusal and
+        // stop spending a browser visit on it.
+        if (ats === "wellfound") {
+          const refusal = await page.evaluate(() => {
+            const scope = document.querySelector('[class*="styles_modal"]') || document.body;
+            const text = (scope.innerText || "").replace(/\s+/g, " ");
+            const m = /[^.]*(?:not accepting applications from your current location|does not support the locations)[^.]*\.?/i.exec(text);
+            return m ? m[0].trim().slice(0, 220) : "";
+          }).catch(() => "");
+          const sendDisabled = await page.locator('button[type="submit"]:visible')
+            .evaluateAll((els) => els.length > 0 && els.every((el) => el.disabled === true))
+            .catch(() => false);
+          if (refusal && sendDisabled) {
+            console.log(`  [yc] board refuses this location: ${refusal}`);
+            if (!sharedCtx) await context.close();
+            return {
+              company: job.company, title: job.title, link: url, ats,
+              action: "location-ineligible", reason: refusal, pdf: resumePdf,
+            };
+          }
+        }
         // Wellfound location gate: "This job does not support the locations on
         // your profile" disables the answer box until you pick a location
         // option. Only ever claims relocation with explicit user approval.
@@ -5904,8 +5935,18 @@ async function processJob(browser, job, profile, runtime = {}) {
         } catch (e) { console.log(`  [yc] answer drafting failed: ${String(e).slice(0, 120)}`); }
         if (answers) {
           const keys = ["intro", "built", "why"];
-          for (let i = 0; i < Math.min(nAreas, 3); i++) {
-            const area = page.locator("textarea").nth(i);
+          // Wellfound keeps a pre-rendered (hidden) copy of this modal in the
+          // DOM, so document order is not the modal: filling textarea[0] and [1]
+          // writes into the hidden duplicate, reads back as 0 chars, and the
+          // ready-check then refuses the Send. Measured 2026-11-03. Target the
+          // visible ones and read the value back from the same element.
+          const areas = page.locator("textarea:visible");
+          const visibleCount = await areas.count().catch(() => 0);
+          if (visibleCount !== nAreas) {
+            console.log(`  [yc] ${nAreas} textarea(s) in the DOM, ${visibleCount} visible — using the visible ones`);
+          }
+          for (let i = 0; i < Math.min(visibleCount, 3); i++) {
+            const area = areas.nth(i);
             const text = answers[keys[i]] || "";
             try {
               await area.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
@@ -5914,7 +5955,8 @@ async function processJob(browser, job, profile, runtime = {}) {
             } catch (e) {
               // Fallback: JS focus + value set + input events (modals/overlays)
               await page.evaluate(([idx, val]) => {
-                const t = document.querySelectorAll("textarea")[idx];
+                const t = [...document.querySelectorAll("textarea")]
+                  .filter((el) => el.getClientRects().length > 0)[idx];
                 if (!t) return;
                 t.scrollIntoView({ block: "center" });
                 t.focus();
@@ -5924,9 +5966,7 @@ async function processJob(browser, job, profile, runtime = {}) {
                 t.dispatchEvent(new Event("change", { bubbles: true }));
               }, [i, text]).catch(() => {});
             }
-            const gotLen = await page.evaluate((idx) =>
-              ((document.querySelectorAll("textarea")[idx] || {}).value || "").length, i
-            ).catch(() => -1);
+            const gotLen = (await area.inputValue().catch(() => "")).length;
             console.log(`  [yc] textarea ${i + 1}: target ${text.length} chars, actual ${gotLen}`);
           }
           await page.waitForTimeout(1500);
@@ -5942,10 +5982,10 @@ async function processJob(browser, job, profile, runtime = {}) {
           if (DRY_RUN) {
             console.log(`  [DRY-RUN] YC answers drafted — would click Send (use --live)`);
           } else if ((await sendBtn.count()) > 0) {
-            const lens = await page.evaluate(() =>
-              [...document.querySelectorAll("textarea")].map((t) => (t.value || "").length)
-            ).catch(() => []);
-            const answersReady = lens.length >= nAreas && lens.slice(0, nAreas).every((length) => length >= 50);
+            const lens = await page.locator("textarea:visible")
+              .evaluateAll((els) => els.map((t) => (t.value || "").length))
+              .catch(() => []);
+            const answersReady = lens.length >= Math.min(nAreas, 3) && lens.every((length) => length >= 50);
             console.log(`  [yc] textarea lens: ${JSON.stringify(lens)}; ready=${answersReady}`);
             if (!answersReady) {
               console.log("  [yc] answers are incomplete — refusing final Send");
@@ -7276,6 +7316,10 @@ function statusForBrowserResult(result) {
   // never come, and re-running just repeats the refusal. Skipped is the honest
   // terminal state: we did apply, and the board declined to take it.
   if (action === "spam-refused") return "Skipped";
+  // The posting will not accept an application from the candidate's location
+  // (a US-only onsite/remote role, said plainly in the modal). Retrying cannot
+  // change that, and NeedsReview kept these rows coming back every run.
+  if (action === "location-ineligible") return "Skipped";
   // Blocked on a required question nobody has answered. Same terminal status as
   // an unconfirmed submission, but a different reason, so a retry gate can skip
   // it until an answer exists instead of re-filling the same form every run.
