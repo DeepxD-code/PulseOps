@@ -5384,8 +5384,32 @@ async function tryFederatedSignIn(page) {
   return { signedIn: false, reason: "no-federated-option" };
 };
 
+/**
+ * Rewrite a stored job URL into the form the board will actually serve.
+ *
+ * LinkedIn stores job links as https://in.linkedin.com/jobs/view/<slug>-<id> with
+ * tracking parameters. Measured 2026-11-03 with a fully signed-in profile: the
+ * www host served the posting normally, while the in.* host bounced to
+ * /authwall?trk=bf - so the row died as redirect-blocked before Easy Apply was
+ * ever reached, which is why the LinkedIn pool looked unrunnable rather than
+ * merely unhandled. The numeric id is the durable part of the URL.
+ */
+function normaliseJobUrl(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return value;
+  try {
+    const parsed = new URL(value);
+    if (!/(^|\.)linkedin\.com$/i.test(parsed.hostname)) return value;
+    if (!/\/jobs\/view\b/.test(parsed.pathname)) return value;
+    const id = (parsed.pathname.match(/(\d{6,})/) || [])[1];
+    return id ? `https://www.linkedin.com/jobs/view/${id}/` : value;
+  } catch {
+    return value;
+  }
+}
+
 async function processJob(browser, job, profile, runtime = {}) {
-  const url = String(job.link || job.url || "");
+  const url = normaliseJobUrl(String(job.link || job.url || ""));
   const ats = inferATS(url);
   const navBoundary = createNavigationBoundary(url, ats);
   const resumePdf = findResumePdf(job.company, job.title, job.pdf_path);
@@ -6550,20 +6574,41 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
 
-    // LinkedIn Easy Apply is multi-step: Next (x N) → Review → Submit. Walk it.
+    // LinkedIn Easy Apply is a wizard: Next (x N) → Review → Submit application.
+    //
+    // The modal has no role="dialog". Measured 2026-11-03 on a live India posting:
+    // the wizard renders in a plain <footer> whose button reads "Next" with no
+    // aria-label, so the old `div[role='dialog'] button:has-text('Next')` selector
+    // matched nothing - the walk never advanced, no Submit was ever on screen, and
+    // the row recorded NeedsReview. Four of eight rows in one measured batch died
+    // this way. LinkedIn holds 54 of the 55 India-located pending rows, so this
+    // was the most expensive selector in the file.
     if (ats === "linkedin" && !DRY_RUN) {
-      for (let step = 0; step < 5; step++) {
+      const advance = page.locator([
+        "footer button:has-text('Next')",
+        "footer button:has-text('Review')",
+        "button[aria-label='Continue to next step']",
+        "button[aria-label='Review your application']",
+      ].join(", "));
+      for (let step = 0; step < 8; step++) {
         if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
           if (!sharedCtx) await context.close();
           return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
         }
-        const next = page.locator("div[role='dialog'] button[aria-label='Continue to next step'], div[role='dialog'] button:has-text('Next'), button:has-text('Review your application')").first();
-        if ((await next.count()) === 0) break;
-        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
-        // Fill any visible inputs on this step before advancing
+        const visible = page.locator([
+          "footer button:has-text('Next'):visible",
+          "footer button:has-text('Review'):visible",
+          "button[aria-label='Continue to next step']:visible",
+          "button[aria-label='Review your application']:visible",
+        ].join(", "));
+        if ((await visible.count()) === 0) break;
+        // Fill the current step first: LinkedIn keeps Next enabled while required
+        // fields are empty, so clicking it just leaves the same step on screen.
         await fillCommonFields(page, ats, profile, job, navBoundary);
+        const next = visible.first();
+        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
         console.log(`  [easy-apply] step ${step + 1}: clicking "${label}"`);
-        await next.click({ timeout: 5000 }).catch(() => {});
+        await next.click({ timeout: 8000 }).catch(() => {});
         await page.waitForTimeout(2000);
       }
     }
