@@ -68,6 +68,31 @@ def test_clean_title_drops_company_blurb_before_the_role():
     assert clean_title(raw) == "Senior Software Engineer, Data Systems"
 
 
+def test_clean_title_drops_a_glued_yc_company_after_chrome_is_stripped():
+    # The recovery used to be gated on `len(value) > 60`, and board chrome had
+    # already removed "Full-time · <place>" by then, so a 41-character title
+    # skipped the check and went to the email queue as
+    # "PlutoLinkedIn for agents Founding Engineer" - the tagline quoted to the
+    # recruiter in place of the role.
+    assert (
+        clean_title(
+            "PlutoLinkedIn for agentsFounding EngineerFull-time · San Francisco, "
+            "CA, US / New York, NY, US · $120K - $200K"
+        )
+        == "Founding Engineer"
+    )
+    # The Full-time marker is glued to the role on some cards, so it cannot be
+    # matched with a leading \b.
+    assert (
+        clean_title(
+            "AI DronesSoftware EngineerFull-time · San Francisco, CA, US · $110 - $160"
+        )
+        == "AI Drones Software Engineer"
+    )
+    # A normal title is untouched: the role already starts the string.
+    assert clean_title("Backend EngineerFull-time · Remote") == "Backend Engineer"
+
+
 # ── Role scope: word boundaries, not substrings ─────────────────────────────
 
 @pytest.mark.parametrize(

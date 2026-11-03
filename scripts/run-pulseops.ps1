@@ -1,7 +1,7 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    Unattended PulseOps runner — daily or weekly, sourcing through to live apply.
+    Unattended PulseOps runner - daily or weekly, sourcing through to live apply.
 
 .DESCRIPTION
     One entry point for Task Scheduler, cron and a human double-click. It exists
@@ -11,7 +11,7 @@
                              exists, and keyed live mode off PULSEOPS_APPLY_LIVE,
                              a variable apply.mjs never reads.
       run-automation.ps1     weekly only, no lock, and resolves `python`/`node`
-                             from PATH — which a scheduled task does not inherit.
+                             from PATH - which a scheduled task does not inherit.
 
     What this does:
 
@@ -61,6 +61,12 @@ $ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
+# Console and file both carry UTF-8. Without this the Python side printed
+# "Querying gemini..." with a mangled ellipsis and every box rule in its output
+# came through as "?\"", which is what made the logs unreadable.
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+$env:PYTHONIOENCODING = "utf-8"
+
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $outDir = Join-Path $repo "output"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
@@ -72,12 +78,27 @@ function Write-Log([string]$message) {
     Add-Content -Path $logPath -Value $line -Encoding utf8
 }
 
-# ── Single-instance lock ────────────────────────────────────────────────────
+# Run a native command, echo it live, and append it to the log as UTF-8.
+#
+# Tee-Object -Append writes UTF-16LE on PowerShell 5.1, so the log ended up with
+# UTF-8 lines from Write-Log alternating with UTF-16 lines from Tee - readable
+# only as spaced-out characters, which defeats the purpose of having a log at
+# all. One encoding, one writer.
+function Invoke-Logged([string]$exe, [string[]]$argv) {
+    & $exe @argv 2>&1 | ForEach-Object {
+        $text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ }
+        Write-Host $text
+        Add-Content -Path $logPath -Value $text -Encoding utf8
+    }
+    return $LASTEXITCODE
+}
+
+# -- Single-instance lock ----------------------------------------------------
 $lockPath = Join-Path $outDir ".pulseops.lock"
 try {
     $lock = [System.IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 } catch {
-    Write-Output "[lock] another PulseOps run holds $lockPath — exiting without doing anything"
+    Write-Output "[lock] another PulseOps run holds $lockPath - exiting without doing anything"
     exit 0
 }
 try {
@@ -86,7 +107,7 @@ try {
     $lock.Write($payload, 0, $payload.Length)
     $lock.Flush()
 
-    # ── Binaries ────────────────────────────────────────────────────────────
+    # -- Binaries ------------------------------------------------------------
     # Resolved absolutely: a Task Scheduler action starts with the machine PATH,
     # not the user's shell PATH, and "python" is not on it there.
     function Resolve-Tool([string]$name, [string[]]$fallbacks) {
@@ -137,7 +158,7 @@ try {
     Write-Log "python=$python"
     if ($node) { Write-Log "node=$node" }
 
-    # ── 1. Pipeline ─────────────────────────────────────────────────────────
+    # -- 1. Pipeline ---------------------------------------------------------
     if ($Job -eq "weekly") {
         $moduleArgs = @("-m", "pulseops_weekly.main_weekly")
         if ($SkipLiveness) { $moduleArgs += "--skip-liveness" }
@@ -148,11 +169,10 @@ try {
     # -u: Python block-buffers stdout into a pipe, so an eight-minute liveness
     # phase produced no log at all and looked like a hang.
     Write-Log "--- pipeline: $python -u -X utf8 $($moduleArgs -join ' ')"
-    & $python -u -X utf8 @moduleArgs 2>&1 | Tee-Object -FilePath $logPath -Append
-    $pipelineExit = $LASTEXITCODE
+    $pipelineExit = Invoke-Logged $python (@("-u", "-X", "utf8") + $moduleArgs)
     Write-Log "pipeline_exit=$pipelineExit"
 
-    # ── 2. Live browser apply ───────────────────────────────────────────────
+    # -- 2. Live browser apply -----------------------------------------------
     $applyExit = 0
     if ($SkipApply) {
         Write-Log "--- browser apply skipped by -SkipApply"
@@ -167,7 +187,16 @@ try {
             Remove-Item Env:\PULSEOPS_ALLOW_EXTERNAL_APPLY -ErrorAction SilentlyContinue
         }
 
-        $applyArgs = @("apps/browser-apply/apply.mjs", "--headed", "--otp-pause")
+        # --edge: a persistent msedge profile. Without it every unattended run
+        # starts a clean chromium, so each India board is a fresh login wall and
+        # Cloudflare challenge - the run "succeeds" with a batch of
+        # needs-review rows and no submissions. The profile is shared with the
+        # scan so one operator sign-in covers both phases.
+        $edgeProfile = Join-Path $repo ".edge-profile-naukri"
+        if (-not (Test-Path $edgeProfile)) { $edgeProfile = Join-Path $repo ".edge-profile" }
+        $env:PULSEOPS_EDGE_PROFILE = $edgeProfile
+
+        $applyArgs = @("apps/browser-apply/apply.mjs", "--edge", "--headed", "--otp-pause")
         if ($DryRun) {
             $applyArgs += "--dry-run"
         } else {
@@ -177,19 +206,17 @@ try {
         if ($AcceptLegal) { $applyArgs += "--accept-legal" }
 
         Write-Log "--- apply: $node $($applyArgs -join ' ')"
-        & $node @applyArgs 2>&1 | Tee-Object -FilePath $logPath -Append
-        $applyExit = $LASTEXITCODE
+        $applyExit = Invoke-Logged $node $applyArgs
         Write-Log "browser_apply_exit=$applyExit"
     }
 
-    # ── 3. Push ─────────────────────────────────────────────────────────────
+    # -- 3. Push -------------------------------------------------------------
     $pushExit = 0
     if (-not $NoPush) {
         $branch = (& git branch --show-current).Trim()
         if ($branch) {
             for ($attempt = 1; $attempt -le 3; $attempt++) {
-                & git push origin $branch 2>&1 | Tee-Object -FilePath $logPath -Append
-                $pushExit = $LASTEXITCODE
+                $pushExit = Invoke-Logged "git" @("push", "origin", $branch)
                 if ($pushExit -eq 0) { break }
                 if ($attempt -lt 3) { Start-Sleep -Seconds ($attempt * 10) }
             }

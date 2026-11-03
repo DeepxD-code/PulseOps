@@ -79,6 +79,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register-tasks.ps1
   submit the same posting twice.
 - Every run writes `output/run-<job>-<timestamp>.log`; a scheduled failure has no
   console, so the log is the only evidence.
+- The apply phase runs with `--edge` and `PULSEOPS_EDGE_PROFILE`, defaulting to
+  `.edge-profile-naukri` (the profile the scan signs into) and falling back to
+  `.edge-profile`. Without a persistent profile every unattended run starts a
+  clean browser, so each India board is a fresh login wall plus Cloudflare
+  challenge and the batch ends as `NeedsReview` with no submissions. Sign in
+  once in that window and the session survives.
+- Ordering inside a batch: India-native board first, then fit score, then the
+  board's own acceptance record. A US on-site role cannot be taken from Greater
+  Noida at any score, so it never takes a slot ahead of a winnable India role.
 - Attestations are opt-in flags because they are statements made on the
   candidate's behalf. The registered tasks pass them; nothing else does.
 

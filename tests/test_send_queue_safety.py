@@ -149,6 +149,39 @@ def test_queue_drain_cleans_duplicate_for_already_resolved_job(temp_db, monkeypa
     assert temp_db.get_pending_queue_items() == []
 
 
+def test_queue_claim_prefers_india_board_even_at_a_lower_score(temp_db):
+    # The daily cap (ten sends) is the scarce resource, and score alone spent it
+    # on US ATS rows: Databricks 95, MongoDB 92 and Scale AI 88 drained first
+    # while the India roles that are winnable from Greater Noida sat behind them.
+    # India-native boards now rank first; the score still orders within a market.
+    us_job = temp_db.save_job(
+        title="Software Engineering Intern (2027)",
+        company="databricks",
+        link="https://databricks.com/jobs/2027",
+        source="Databricks",
+        status="EmailQueued",
+        score=95,
+    )
+    temp_db.enqueue_send(us_job, 95, "G8 us")
+    india_job = temp_db.save_job(
+        title="Backend Engineer",
+        company="Astra",
+        link="https://wellfound.com/company/astra/jobs/backend",
+        source="Wellfound India (Backend)",
+        status="EmailQueued",
+        score=78,
+    )
+    temp_db.enqueue_send(india_job, 78, "G8 india")
+
+    claimed = temp_db.claim_pending_queue_item()
+    assert claimed is not None
+    assert int(claimed["job_id"]) == india_job
+    # And the US row is still reachable afterwards - nothing was dropped.
+    second = temp_db.claim_pending_queue_item()
+    assert second is not None
+    assert int(second["job_id"]) == us_job
+
+
 def test_stale_processing_claim_is_resolved_without_retry(temp_db, monkeypatch):
     from pulseops_outreach import send_engine as engine
     from datetime import datetime, timedelta

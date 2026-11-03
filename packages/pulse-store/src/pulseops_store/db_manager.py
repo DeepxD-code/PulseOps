@@ -1304,7 +1304,22 @@ def claim_pending_queue_item() -> dict | None:
             "j.status AS job_status, j.link AS job_link, j.source AS job_source "
             "FROM send_queue q JOIN jobs j ON j.id=q.job_id "
             "WHERE q.status='pending' "
-            "ORDER BY q.score DESC, q.queued_at ASC, q.id ASC LIMIT 1"
+            # India-native boards first, then score.
+            #
+            # The queue was ordered on score alone, and the highest scores come
+            # from the US ATS boards (Databricks 95, MongoDB 92, Scale AI 88) -
+            # roles the candidate cannot take from Greater Noida. With a cap of
+            # ten sends a day they drained first, so the India roles that are
+            # actually winnable sat behind a week of US on-site postings. The cap
+            # is the scarce resource; spend it on the winnable market.
+            "ORDER BY CASE WHEN LOWER(COALESCE(j.source,'')) LIKE '%naukri%' "
+            "OR LOWER(COALESCE(j.source,'')) LIKE '%instahyre%' "
+            "OR LOWER(COALESCE(j.source,'')) LIKE '%hirist%' "
+            "OR LOWER(COALESCE(j.source,'')) LIKE '%wellfound%' "
+            "OR LOWER(COALESCE(j.source,'')) LIKE '%cutshort%' "
+            "OR LOWER(COALESCE(j.source,'')) LIKE '%foundit%' "
+            "THEN 0 ELSE 1 END, "
+            "q.score DESC, q.queued_at ASC, q.id ASC LIMIT 1"
         ).fetchone()
         if row is None:
             conn.commit()

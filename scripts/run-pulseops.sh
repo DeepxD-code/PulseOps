@@ -95,7 +95,12 @@ elif [ -z "$NODE" ]; then
   log "--- browser apply skipped: node missing"
 else
   export PULSEOPS_ALLOW_EXTERNAL_APPLY=1
-  APPLY_ARGS=(apps/browser-apply/apply.mjs --headed --otp-pause)
+  # --edge keeps one persistent msedge profile: without it every run is a fresh
+  # login wall plus Cloudflare challenge on the India boards.
+  EDGE_PROFILE="$REPO/.edge-profile-naukri"
+  [ -d "$EDGE_PROFILE" ] || EDGE_PROFILE="$REPO/.edge-profile"
+  export PULSEOPS_EDGE_PROFILE="$EDGE_PROFILE"
+  APPLY_ARGS=(apps/browser-apply/apply.mjs --edge --headed --otp-pause)
   if [ "$DRY_RUN" -eq 1 ]; then
     APPLY_ARGS+=(--dry-run)
   else

@@ -115,7 +115,15 @@ export function cleanTitle(raw) {
   value = value.replace(/([a-z\)])((?:[A-Z][a-z]{2,}){1,4})\s*$/, "$1 $2");
 
   // 1b. An employer glued onto the role ("FirmMachine Learning Researcher").
-  value = value.replace(GLUED_ROLE, " $1");
+  //
+  // Whether this fired is the reliable glue signal step 4 needs. The old test
+  // was `length > 60 && "Full-time" in raw`, and board chrome strips
+  // "Full-time · <place>" first, so it ran on the shortened string: "AI
+  // DronesSoftware EngineerFull-time · San Francisco, CA, US" is 58 characters
+  // and kept its company glued on. Python mirror: title_clean.py.
+  const unglued = value.replace(GLUED_ROLE, " $1");
+  const glueFound = unglued !== value;
+  value = unglued;
 
   // 2. Pipe metadata ("Backend Engineer | Bangalore"). Location and seniority
   //    segments are dropped; a segment that names a technology is kept so the
@@ -132,7 +140,12 @@ export function cleanTitle(raw) {
 
   // 4. Glued company + tagline + role (YC). Keep from the last role-start word
   //    only when the text before it does not already look like a role phrase.
-  if (value.length > 60 && /(?:full|part)[\s-]?time\b/i.test(String(raw || ""))) {
+  //    Gated on a glue signal - the raw carried a Full-time/Part-time marker, or
+  //    step 1b had to pull a role word apart - and NOT on length. The length
+  //    test ran after board chrome had already removed "Full-time · <place>",
+  //    so "PlutoLinkedIn for agents Founding Engineer" (41 chars) skipped it and
+  //    went to queue with the tagline still attached.
+  if (glueFound || /(?:full|part)[\s-]?time\b/i.test(String(raw || ""))) {
     const m = ROLE_START.exec(value);
     if (m && m.index > 0) value = m[1];
   }

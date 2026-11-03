@@ -140,7 +140,17 @@ def clean_title(raw: str) -> str:
     value = re.sub(r"([a-z\)])((?:[A-Z][a-z]{2,}){1,4})\s*$", r"\1 \2", value)
 
     # 1b. An employer glued onto the role ("FirmMachine Learning Researcher").
-    value = _GLUED_ROLE.sub(r" \1", value)
+    #
+    # The fact that this fired is the reliable signal that company/tagline is
+    # glued to the role, which step 4 needs. The old test was `len > 60 and
+    # "Full-time" in the raw`, and board chrome strips "Full-time · <place>"
+    # first, so the check was running on the already-shortened string: "AI
+    # DronesSoftware EngineerFull-time · San Francisco, CA, US" is 58 chars and
+    # kept the company glued on, while "PlutoLinkedIn for agentsFounding
+    # Engineer· <place>" was 60+ only before the chrome came off.
+    unglued = _GLUED_ROLE.sub(r" \1", value)
+    glue_found = unglued != value
+    value = unglued
 
     # 2. Pipe metadata ("Backend Engineer | Bangalore"). Location and seniority
     #    segments are dropped; a segment that names a technology is kept so the
@@ -159,7 +169,12 @@ def clean_title(raw: str) -> str:
 
     # 4. Glued company + tagline + role (YC). Keep from the last role-start word
     #    only when the text before it does not already look like a role phrase.
-    if len(value) > 60 and re.search(r"(?:full|part)[\s-]?time\b", str(raw or ""), re.I):
+    #    Gated on a glue signal - the raw carried a Full-time/Part-time marker, or
+    #    step 1b had to pull a role word apart - and NOT on length. The length
+    #    test ran after board chrome had already removed "Full-time · <place>",
+    #    so a 41-character "PlutoLinkedIn for agents Founding Engineer" skipped it
+    #    and went to the queue with the tagline still attached.
+    if glue_found or re.search(r"(?:full|part)[\s-]?time\b", str(raw or ""), re.I):
         match = _ROLE_START.search(value)
         if match and match.start(1) > 0:
             value = match.group(1)

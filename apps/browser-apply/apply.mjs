@@ -127,6 +127,13 @@ const AUTO = process.argv.includes("--auto");
 const LOAD_EMAIL_QUEUE = process.argv.includes("--email-queue");
 const INCLUDE_INDEED = process.argv.includes("--include-indeed");
 const EDGE = process.argv.includes("--edge"); // real Edge persistent profile (beats Cloudflare)
+// Which persistent profile to launch. The scan phase already signs into Naukri
+// and Wellfound in its own profile (.edge-profile-naukri), and a login the
+// operator completed once there should count for the apply phase too - two
+// profiles meant two sign-ins, and the unattended run had neither.
+const EDGE_PROFILE = path.resolve(
+  process.env.PULSEOPS_EDGE_PROFILE || path.join(ROOT, ".edge-profile"),
+);
 let sharedCtx = null;
 const MOCK_ONLY = process.argv.includes("--mock");
 const JOB_URL_FLAG = process.argv.find((a) => a.startsWith("--job-url="));
@@ -7160,7 +7167,10 @@ print(json.dumps(result))
         if (!isStrictTargetRole(row?.title, jobDescriptionFor(row))) note("out-of-scope role");
         if (status !== "evaluated") note(`status=${status || "unknown"}`);
         if (!Number.isFinite(Number(row?.score))) note("score=non-numeric");
-        else if (Number(row.score) < MIN_SCORE) note(`score<${MIN_SCORE}`);
+        // No score bucket here. Score ranks the in-scope pool; it never removed a
+        // row from it (`isEligibleJob` has had no score check since the 12-score
+        // manager role outranked a 65-score India role). Reporting "score<N" as a
+        // drop reason is what made the queue's real blocker invisible twice.
         if (row?._send_pause_available === false || row?._db_pause_available === false) note("pause flag unavailable");
         if (Object.prototype.hasOwnProperty.call(row || {}, "job_id")
             && !Object.prototype.hasOwnProperty.call(row || {}, "_send_paused")) note("missing pause state");
@@ -7422,7 +7432,7 @@ async function main() {
   // Relauch instead, and say so, so a batch survives one dead window.
   const launchContext = async () => {
     if (EDGE || process.argv.includes("--edge")) {
-      sharedCtx = await chromium.launchPersistentContext(path.join(ROOT, ".edge-profile"), {
+      sharedCtx = await chromium.launchPersistentContext(EDGE_PROFILE, {
         channel: "msedge",
         headless: false,
         viewport: { width: 1366, height: 900 },
@@ -7467,7 +7477,7 @@ async function main() {
 
   try {
     if (EDGE || process.argv.includes("--edge")) {
-      console.log(`[Edge] persistent profile ${path.join(ROOT, ".edge-profile")} (msedge, headed)`);
+      console.log(`[Edge] persistent profile ${EDGE_PROFILE} (msedge, headed)`);
     }
     await launchContext();
 
