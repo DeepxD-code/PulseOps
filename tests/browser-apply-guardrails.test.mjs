@@ -417,7 +417,6 @@ test("strict role gate excludes full-stack, frontend, Laravel, mobile, and embed
     "Laravel Developer",
     "Android Engineer",
     "Embedded Systems Engineer Intern",
-    "Software Engineer Intern",
   ]) {
     assert.equal(isStrictTargetRole(title), false, title);
   }
@@ -428,6 +427,11 @@ test("strict role gate excludes full-stack, frontend, Laravel, mobile, and embed
     "Java Backend Engineer",
     "C++ Software Engineer",
     "GenAI Engineer",
+    // Names no discipline, which is why this gate used to refuse it. It is also
+    // exactly the posting an entry-level candidate must apply to, and the India
+    // boards phrase it this way more often than "Backend Intern". The entry-level
+    // branch requires both an intern/trainee marker and an engineering noun.
+    "Software Engineer Intern",
   ]) {
     assert.equal(isStrictTargetRole(title), true, title);
   }

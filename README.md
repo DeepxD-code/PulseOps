@@ -8,12 +8,14 @@ Automated job search: scrape → evaluate → apply. Runs 2x daily + weekly port
 
 | You're looking for... | Go to |
 |---|---|
-| Daily pipeline | `main.py` → `apps/daily-pipeline/` (planned) |
-| Weekly portal scan | `main_weekly.py`, `portal/scan.mjs` |
-| Browser auto-apply | `portal/apply.mjs` (`--dry-run` / `--live --auto`) |
-| Login saver | `portal/save_sessions.mjs` → `portal/storageState.json` |
-| Reusable libs | `core/`, `evaluation/`, `outreach/`, `persistence/`, `notifications/`, `memory/` → `packages/` (planned) |
-| Job portals config | `portal/portals.yml` |
+| Daily pipeline | `pulseops_pipeline.main` → `apps/daily-pipeline/` (planned) |
+| Weekly portal scan | `pulseops_weekly.main_weekly`, `apps/weekly-scan/scan.mjs` |
+| Browser auto-apply | `apps/browser-apply/apply.mjs` (`--dry-run` / `--live --auto`) |
+| Unattended runner (the entry point) | `scripts/run-pulseops.ps1` / `scripts/run-pulseops.sh` |
+| Scheduled tasks | `scripts/register-tasks.ps1` |
+| Login saver | `apps/browser-apply/tools/signin.mjs` → `portal/<portal>-storageState.json` |
+| Reusable libs | `packages/` (`pulse-eval`, `pulse-store`, `pulse-core`, …) |
+| Job portals config | `apps/weekly-scan/portals.yml` |
 | Runbooks | `docs/runbooks/` (planned; now `CRON.md`, `SCHEDULER.md`) |
 | Env vars | [.env.example](.env.example) |
 
@@ -52,14 +54,41 @@ python doctor.py --init
 python main.py --simulate
 ```
 
+## Running it unattended
+
+One entry point, on purpose. Two half-runners used to exist: `run-auto.bat`
+hardcoded a deleted path, and `run-automation.ps1` was weekly-only, took no lock
+and resolved `python`/`node` from PATH (which a Task Scheduler action does not
+inherit).
+
+```powershell
+# Register the schedules: daily 09:00 and 18:00, weekly Sunday 08:00.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register-tasks.ps1
+
+# Or run one now, filling forms without submitting.
+.\scripts\run-pulseops.ps1 -Job daily -DryRun
+
+# Live, unattended, with the terms/legal attestations the boards require.
+.\scripts\run-pulseops.ps1 -Job weekly -AcceptTerms -AcceptLegal
+```
+
+- The runner probes for the interpreter that actually has `pulseops_*`
+  installed. On this machine `python` on PATH is 3.14 while the editable installs
+  live in 3.12, and the old runner failed every night with ModuleNotFoundError.
+- A single lock file means a slow apply batch cannot overlap the next tick and
+  submit the same posting twice.
+- Every run writes `output/run-<job>-<timestamp>.log`; a scheduled failure has no
+  console, so the log is the only evidence.
+- Attestations are opt-in flags because they are statements made on the
+  candidate's behalf. The registered tasks pass them; nothing else does.
+
 ## Common checks
 
 ```bash
-make test
-make lint
-python -m notifications.email_watcher --dry-run
-node portal/scan.mjs --mock
-node portal/apply.mjs --dry-run
+powershell -ExecutionPolicy Bypass -File scripts/test.ps1   # pytest + node --test
+node apps/weekly-scan/scan.mjs --only-portal=naukri          # one portal, fast
+node apps/browser-apply/tools/why-not-eligible.mjs           # why the queue is empty
+node apps/browser-apply/apply.mjs --dry-run                  # fill, do not submit
 ```
 
 ## Tech stack

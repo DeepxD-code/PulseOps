@@ -343,6 +343,15 @@ def soft_filter(job: dict, profile: dict) -> FilterResult:
     title        = (job.get("title") or "").strip()
     desc_snippet = (job.get("description") or "")[:200]
 
+    # A title that names an in-scope discipline outright needs no second opinion:
+    # "Backend Developer" is the domain. Asking the model anyway cost one paced
+    # Gemini call (~5s at 12 RPM) per posting, which is 15 minutes of a weekly run
+    # spent re-confirming the allow list. The model is kept for the ambiguous
+    # titles it is actually there for - "Research Engineer", "Founding Engineer",
+    # "Product Engineer" - whose discipline only shows in the body.
+    if is_strict_target_role(title):
+        return FilterResult(True, "Stage2: explicit in-scope title (LLM skipped)", stage=2)
+
     domain = profile.get("domain", {}) if isinstance(profile, dict) else {}
     domain_title = domain.get("title", "")
     core_skills  = domain.get("core_skills", [])

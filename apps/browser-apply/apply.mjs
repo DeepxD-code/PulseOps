@@ -268,8 +268,15 @@ const AI_WITH_ENGINEERING_NOUN = new RegExp(
 );
 
 const STRICT_ROLE_ALLOWED = new RegExp(
-  String.raw`\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python)\b`
+  String.raw`\b(?:backend|back[\s-]end|ml|artificial[\s-]+intelligence|ai[\s/-]*ml|genai|generative[\s-]+ai|llm\w*|nlp|computer[\s-]+vision|deep[\s-]+learning|java|python|golang|rust|kotlin|spring(?:[\s-]?boot)?|grpc)\b`
+  // "Go" only as a stack word: a bare \bgo\b would admit "Go-To-Market Manager".
+  + String.raw`|\bgo\b(?=\s*(?:developer|engineer|programmer|backend))`
   + String.raw`|machine[\s-]+learning|reinforcement[\s-]+learning|\bc\b|c\+\+|c\s*\/\s*c\+\+`
+  // profile.yml role_types.include names these four outright, so a title that
+  // says them is in scope without asking the posting body. Leaving them on the
+  // generic body-check refused "DevOps Engineer" and "Infrastructure Engineer"
+  // whenever the scrape captured only company boilerplate.
+  + String.raw`|\b(?:devops|dev[\s-]ops|sre|site\s+reliability|infrastructure|platform)\b`
   // Blockchain and web3 are admitted as disciplines rather than excluded: the
   // candidate has shipped a blockchain platform, so the work is transferable
   // engineering and the rubric grades on that.
@@ -435,6 +442,13 @@ function jobDescriptionFor(job) {
   return String(job?.text_summary || job?.description || "");
 }
 
+// Entry-level markers and role nouns, used together for titles that name no
+// discipline ("Software Engineer Trainee", "Associate Software Engineer").
+const ENTRY_LEVEL_MARKER =
+  /\b(?:intern|internship|trainee|fresher|graduate|new\s+grad|entry[\s-]?level|junior|jr|associate|sde\s*[- ]?[12])\b/;
+const ENGINEERING_NOUN =
+  /\b(?:engineer|engineering|developer|development|programmer|sde|software|backend|back[\s-]end)\b/;
+
 // Whole-token patterns for the exclude list. The previous test was
 // `value.includes(marker)`, which rejected "Salesforce Developer" (contains
 // "sales"), "Adios Engineer" (contains "ios") and "Reactive Systems Developer"
@@ -469,6 +483,15 @@ function isStrictTargetRole(title, description = "") {
   if (STRICT_ROLE_GENERIC_DENY.test(roleBasis(raw) || value)) return false;
 
   if (STRICT_ROLE_ALLOWED.test(value)) return true;
+
+  // Entry-level postings are this candidate's whole target market, and the India
+  // boards phrase them as "Software Engineer Trainee", "Associate Software
+  // Engineer" or "SDE 1" rather than naming a discipline. Those titles carry no
+  // keyword for the allow list and were then refused by the generic body-check,
+  // whose evidence is usually company boilerplate rather than a requirements
+  // list. Require BOTH an entry-level marker and a role noun, so "Marketing
+  // Intern" and "Associate Product Manager" stay out.
+  if (ENTRY_LEVEL_MARKER.test(value) && ENGINEERING_NOUN.test(value)) return true;
 
   // Generic title: judge on the body rather than discarding the role.
   if (!isGenericRoleTitle(raw)) return false;
