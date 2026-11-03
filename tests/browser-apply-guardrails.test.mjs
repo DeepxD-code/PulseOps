@@ -1337,7 +1337,7 @@ test("the location country is answered, and a phone dialling code is not", () =>
   );
 });
 
-test("India boards are tried first, then fit score, then the board's record", () => {
+test("India rows are tried first, then fit score, then the board's record", () => {
   // The order has been wrong in both directions.
   //
   // First it ranked on score alone, so Ashby (0 accepted / 34 attempted) rows at
@@ -1357,13 +1357,25 @@ test("India boards are tried first, then fit score, then the board's record", ()
     ["ashby", { accepted: 0, attempted: 34 }],
   ]);
 
-  // 1. An India board outranks a US ATS whatever the score or record.
+  // 1. An India row outranks a US ATS whatever the score or record.
   const markets = [
     { id: 1, link: "https://job-boards.greenhouse.io/a/jobs/1", score: 88, source: "greenhouse" },
     { id: 2, link: "https://www.naukri.com/job-listings-2", score: 40, source: "Naukri (Java/Spring Boot)" },
-    { id: 3, link: "https://wellfound.com/company/x/jobs/3", score: 65, source: "Wellfound India (Backend)" },
+    { id: 3, link: "https://wellfound.com/company/x/jobs/3", score: 65, source: "Wellfound India (Backend)", location_raw: "Bengaluru" },
   ];
   assert.deepEqual(rankByAcceptance(markets, acceptance).map((r) => r.id), [3, 2, 1]);
+
+  // 1b. A board name is not a place. Wellfound's scraper used to store no
+  //     location at all, so 87 blank rows scored 85-88 and sorted ahead of the
+  //     54 LinkedIn rows that were actually in India - and every one of the
+  //     blank Wellfound roles then disabled Send with "not accepting
+  //     applications from your current location". Unstated place = no claim.
+  const unstated = [
+    { id: 12, link: "https://wellfound.com/company/y/jobs/12", score: 88, source: "Wellfound India", location_raw: "" },
+    { id: 13, link: "https://www.linkedin.com/jobs/view/13", score: 61, source: "LinkedIn", location_raw: "Bengaluru, Karnataka, India" },
+    { id: 14, link: "https://wellfound.com/company/z/jobs/14", score: 90, source: "Wellfound India", location_resolved: "foreign" },
+  ];
+  assert.deepEqual(rankByAcceptance(unstated, acceptance).map((r) => r.id), [13, 14, 12]);
 
   // 2. Score decides before the board record does. Greenhouse accepts 6/24,
   //    Ashby 0/34 - the record used to put the 10-score row first.

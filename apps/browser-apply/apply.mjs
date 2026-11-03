@@ -3698,7 +3698,7 @@ print(json.dumps(out))
   return table;
 }
 
-/**
+/*
  * Order eligible rows so the best applications are spent first.
  *
  * The previous order was board-acceptance first, then whatever the SQL returned.
@@ -3707,15 +3707,33 @@ print(json.dumps(out))
  * than the India boards - the batch was spent on rows the role gate should never
  * have admitted, while the roles the candidate can actually win never ran.
  *
- * Order now: India-native boards first (the candidate is in Greater Noida and
- * cannot take a US on-site role), then fit score, and only then the board's
- * acceptance record, which is a tiebreak rather than a priority. The sort is
- * stable on the original index, so equal rows never reshuffle between runs.
+ * Order now: India first (the candidate is in Greater Noida and cannot take a US
+ * on-site role), then fit score, and only then the board's acceptance record,
+ * which is a tiebreak rather than a priority. The sort is stable on the original
+ * index, so equal rows never reshuffle between runs.
  */
-const INDIA_BOARD = /naukri|instahyre|hirist|wellfound|cutshort|foundit|naukri\.com/i;
+const INDIA_ONLY_BOARD = /naukri|instahyre|hirist|cutshort|foundit|naukri\.com/i;
 
+const INDIA_PLACE = /\bindia\b|bangalore|bengaluru|hyderabad|pune|chennai|mumbai|noida|gurgaon|gurugram|delhi|ncr|kolkata|ahmedabad|jaipur|kochi|coimbatore|indore|chandigarh/i;
+
+/**
+ * Is this row worth one of the batch's slots before the US-AWS-looking work?
+ *
+ * A board name alone is not evidence. Wellfound used to be in INDIA_BOARD, and
+ * because its scraper never captured the place, 87 blank-location rows scored
+ * 85-88 and sorted ahead of 54 LinkedIn rows that were actually in India - a
+ * measured batch of 8 spent every slot on US-only Wellfound roles whose own
+ * modal disables Send ("not accepting applications from your current location").
+ *
+ * So: a stated India place wins regardless of board. On the India-only boards an
+ * unstated place is still India (that is all they list). Anywhere else an
+ * unstated place is not evidence of anything and sorts behind.
+ */
 function isIndiaBoardRow(row) {
-  return INDIA_BOARD.test(String(row?.source || "")) || INDIA_BOARD.test(String(row?.link || ""));
+  const place = `${row?.location_resolved || ""} ${row?.location_raw || ""}`;
+  if (INDIA_PLACE.test(place)) return true;
+  const where = `${row?.source || ""} ${row?.link || ""}`;
+  return INDIA_ONLY_BOARD.test(where);
 }
 
 function rankByAcceptance(rows, acceptance) {
