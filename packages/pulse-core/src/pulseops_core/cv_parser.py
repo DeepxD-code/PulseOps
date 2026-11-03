@@ -96,6 +96,10 @@ _SECTION_ALIASES: dict[str, str] = {
     "experience": "experience", "work experience": "experience",
     "employment": "experience", "professional experience": "experience",
     "projects": "projects", "open source": "projects", "personal projects": "projects",
+    # Research is a project entry with a paper-style header, and its bullets are
+    # the strongest evidence in the CV for "hardest technical problem" answers -
+    # without this alias they fall into "other" and never reach raw_bullets.
+    "research": "projects",
     "education": "education",
     "skills": "skills", "technical skills": "skills", "core skills": "skills",
     "certifications": "certifications", "certificates": "certifications",
