@@ -4,12 +4,20 @@ name: PulseOps Daily Pipeline
 # See ../../CRON.md for required repo secrets and the state-branch pattern
 # this workflow relies on to persist pulseops.db across stateless runners.
 
+# Schedule disabled 2026-11-03. It has never completed a single step of work:
+# every run dies at "Checkout persistent state" because the pulseops-state branch
+# it requires does not exist, and the workflow correctly refuses to bootstrap an
+# empty DB - so the two failures mailed each day were the only thing it produced.
+#
+# The deeper reason not to re-enable it as-is: this pipeline's browser phase
+# needs warm logins on Wellfound, Instahyre, Hirist, LinkedIn and Naukri, and
+# those boards reject datacenter IPs outright (a headless LinkedIn fetch from
+# this machine returned Cloudflare's "Sorry, you have been blocked"; the same
+# fetch in a headed window showed a normal login page). A GitHub runner can
+# therefore never hold those sessions, so an unattended cloud apply cannot land
+# an application - the local Task Scheduler run, which uses the real Edge
+# profile, is the engine.
 on:
-  schedule:
-    # 03:30 UTC = 09:00 IST — morning run (send window open)
-    - cron: "30 3 * * *"
-    # 12:30 UTC = 18:00 IST — evening run (end of send window, per request 2× daily)
-    - cron: "30 12 * * *"
   workflow_dispatch:
     inputs:
       simulate:

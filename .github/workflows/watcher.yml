@@ -3,9 +3,10 @@ name: PulseOps Email Watcher
 # Runs every 30m — bounce auto-fix + platform job ingest
 # See packages/pulse-notify/src/pulseops_notify/email_watcher.py
 
+# Schedule disabled 2026-11-03 - see the note at the top of daily.yml. It fails
+# at "Checkout persistent state" on every tick because pulseops-state does not
+# exist, and the DB it needs is produced by the local run, not here.
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:

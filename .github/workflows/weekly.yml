@@ -4,11 +4,11 @@ name: PulseOps Weekly Portal Scan
 # Wellfound India, plus the ATS company boards in portal/portals.yml.
 # Shares the same pulseops-state branch as daily.yml — see CRON.md.
 
+# Schedule disabled 2026-11-03 - see the note at the top of daily.yml. The scan
+# needs the same pulseops-state branch, and the boards it scans (Naukri,
+# Instahyre, Wellfound) block datacenter IPs, so a runner cannot replace the
+# local weekly run.
 on:
-  schedule:
-    # 02:30 UTC Sunday = 08:00 IST Sunday — ahead of the daily run's 09:00
-    # IST send window, matching config/settings.yml `portal.run_day/run_time`.
-    - cron: "30 2 * * 0"
   workflow_dispatch:
     inputs:
       simulate:
