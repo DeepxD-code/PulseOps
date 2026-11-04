@@ -93,6 +93,16 @@ candidate:
     business_travel_6_8_weeks: 'Yes'
     ever_interviewed_here: 'No'
     open_to_relocation: 'Yes'
+    # A yes/no "are you open to relocation?" is not enough for boards that ask
+    # WHICH cities you would move to. Hirist renders that as a mandatory
+    # checkbox group ("Please select the city you are currently residing or
+    # willing to relocate to", one box per city) and #1054 stalled on it with
+    # every other field filled. Committing to a named city is the candidate's
+    # call, so this stays EMPTY until he states it: with no list, the group is
+    # left unticked and logged [answer-missing] rather than guessed from the
+    # job's own city or from current_location.
+    # Format: comma-separated city names, e.g. 'Chennai, Pune'.
+    relocation_cities: ''
     future_us_residence: 'Yes'
     requires_visa_sponsorship: 'Yes'
     # Legal agreements are a separate class of act: accepting one changes what

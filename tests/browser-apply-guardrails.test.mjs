@@ -35,8 +35,10 @@ import {
   portalApiHostAllowed,
   placeAliases,
   experienceBandFor,
+  relocationPicks,
   availabilityDate,
   salaryAnswer,
+  salaryInLacs,
   isFingerprintVendorHost,
   finalGuardAction,
   isEligibleJob,
@@ -636,7 +638,15 @@ test("salary is answered in the unit the question asked for", () => {
   // Quoting the wrong unit is a wrong number, not a format mismatch.
   assert.equal(salaryAnswer(stated, "desired_salary desired salary range (per month)"), "INR 35,000 - 45,000 per month");
   assert.equal(salaryAnswer(stated, "what is your expected compensation? per annum"), "INR 8,40,000 - 10,80,000 per annum");
-  assert.equal(salaryAnswer(stated, "expected salary lpa"), "INR 8,40,000 - 10,80,000 per annum");
+  // "in Lacs" / "LPA" asks for the number in lacs. Answering the rupee string to
+  // a field labelled "in Lacs" is off by five orders of magnitude, and Hirist
+  // asks exactly that as a mandatory box ("expected CTC in Lacs per annum").
+  assert.equal(salaryAnswer(stated, "expected salary lpa"), "8.4 - 10.8");
+  assert.equal(salaryAnswer(stated, "What is your expected CTC in Lacs per annum?"), "8.4 - 10.8");
+  // A profile that already states lacs is passed through, not divided again.
+  assert.equal(salaryAnswer({ desired_salary_annual: "4-5 LPA" }, "expected CTC in lacs"), "4 - 5");
+  assert.equal(salaryInLacs("INR 8,40,000 - 10,80,000 per annum"), "8.4 - 10.8");
+  assert.equal(salaryInLacs(""), "");
   assert.equal(salaryAnswer(stated, "desired monthly salary"), "INR 35,000 - 45,000 per month");
   // No unit stated: the monthly form, which is the one the operator's floor
   // was given in, and it carries its own unit so it cannot be misread.
@@ -698,6 +708,33 @@ test("plain identity facts are answered from the profile, absent facts are not i
   // "How did you hear about X" is answered truthfully as the board, never as a referral.
   assert.equal(richByTag["how you heard"], "This job board");
   assert.equal(identityFacts({}, { how_you_heard: "A colleague" }).find((f) => f.tag === "how you heard").value, "A colleague");
+
+  // A notice period is a duration and a start date is a date. They used to be
+  // the same fact, so Hirist's mandatory "What is your Notice Period?" box was
+  // answered with the computed start date ("2026-12-04") instead of "30 days".
+  assert.equal(richByTag["notice period"], "30 days");
+  assert.match(richByTag["availability date"], /^\d{4}-\d{2}-\d{2}$/);
+  assert.notEqual(richByTag["notice period"], richByTag["availability date"]);
+  // The notice-period answer never claims a start date on a form that has no
+  // notice period question.
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "notice period"), false);
+
+  // "Current CTC" is the candidate's actual package, which is nothing while he
+  // is not employed. It is never answered from the expected-salary figures.
+  assert.equal(
+    identityFacts({}, { current_company: "Not currently employed" }).find((f) => f.tag === "current CTC").value,
+    "0",
+  );
+  assert.equal(
+    identityFacts({}, { current_company: "AKS Intelligent Systems LLP" }).some((f) => f.tag === "current CTC"),
+    false,
+    "an employed candidate's current CTC is unknown, so no figure is invented",
+  );
+  const desiredFact = identityFacts({}, { desired_salary_annual: "INR 8,40,000 per annum" })
+    .find((f) => f.tag === "desired salary");
+  // The expected-salary fact must not answer a "current CTC" box.
+  assert.equal(desiredFact.hint.test("What is your current CTC in Lacs per annum?"), false);
+  assert.equal(desiredFact.hint.test("What is your expected CTC in Lacs per annum?"), true);
 
   // Work authorisation is answered only where the question is scoped to the
   // job's country. A form can ask about the job's country AND the candidate's
@@ -899,6 +936,34 @@ test("screening radios are answered from stated facts, never guessed", () => {
   // A question that is not about years must never consume a band.
   assert.equal(experienceBandFor("Are you currently living in Bangalore?", bands, 0.2), null);
   assert.equal(experienceBandFor(q, bands, Number.NaN), null);
+});
+
+test("relocation checkbox groups are answered only from a stated city list", () => {
+  // Hirist #1054, live: "4. Please select the city you are currently residing
+  // or willing to relocate to" with one checkbox per city. There is no radio
+  // group and each box has its own element name, so the only honest source is
+  // a list the candidate wrote himself.
+  const q = "4. Please select the city you are currently residing or willing to relocate to Chennai Pune";
+  assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Chennai, Pune" }).picks, ["Chennai", "Pune"]);
+  assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Pune" }).picks, ["Pune"]);
+  // Nothing stated: no city is ticked, and the caller logs the exact question.
+  const unset = relocationPicks(q, ["Chennai", "Pune"], {});
+  assert.deepEqual(unset.picks, []);
+  assert.deepEqual(unset.wanted, []);
+  assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], null).picks, []);
+  // A stated city this posting does not offer must not tick a different one.
+  assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Bengaluru" }).picks, []);
+  // The option may carry a qualifier; the city name is what a person ticks.
+  assert.deepEqual(
+    relocationPicks(q, ["Pune (relocation required)", "Chennai"], { relocation_cities: "pune" }).picks,
+    ["Pune (relocation required)"],
+  );
+  // A city name must not leak into a different city.
+  assert.deepEqual(relocationPicks(q, ["New Delhi"], { relocation_cities: "Delhi" }).picks, []);
+  // Any other checkbox group is not this fact's business, so it is untouched
+  // rather than answered with a city name.
+  assert.equal(relocationPicks("Which benefits do you need?", ["Health insurance", "Gym"], { relocation_cities: "Chennai" }), null);
+  assert.equal(relocationPicks("4. Do you hold a valid passport?", ["Yes", "No"], { relocation_cities: "Pune" }), null);
 });
 
 test("blacklist matching is enforced independently of the SQL query", () => {

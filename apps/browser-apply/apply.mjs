@@ -1567,16 +1567,39 @@ function availabilityDate(candidate, from = new Date()) {
  * per-month question is off by two orders of magnitude - so the unit is read
  * from the question itself.
  */
+/**
+ * Render a stated salary in lacs, because the question was asked in lacs.
+ *
+ * Hirist asks "What is your expected CTC in Lacs per annum?" as a mandatory
+ * free-text box. The profile holds "INR 8,40,000 - 10,80,000 per annum", and
+ * typing that into a field that says "in Lacs" is a wrong number rather than a
+ * formatting nicety - it reads as eight lakh lakhs. Values already stated in
+ * lacs ("4-5 LPA") pass through untouched, so one function serves both shapes.
+ */
+function salaryInLacs(value) {
+  const numbers = (String(value || "").match(/\d[\d,]*(?:\.\d+)?/g) || [])
+    .map((raw) => Number(String(raw).replace(/,/g, "")))
+    .filter((n) => Number.isFinite(n));
+  if (!numbers.length) return "";
+  const rendered = numbers.slice(0, 2).map((n) => (
+    n >= 100000 ? String(Number((n / 100000).toFixed(2))) : String(n)
+  ));
+  return rendered.length > 1 ? `${rendered[0]} - ${rendered[1]}` : rendered[0];
+}
+
 function salaryAnswer(stated, signature) {
   const sig = String(signature || "");
   const perMonth = /\b(?:per|a|\/)\s*month|monthly|month\s*[-–]?\s*\??\s*$/i.test(sig)
     || /\bmonth\b/i.test(sig);
   const perAnnum = /\b(?:per|a|\/)\s*(?:annum|year)|annually|annual|lpa|lakh\s*per\s*annum|\bctc\b/i.test(sig);
-  if (perMonth && !perAnnum) return String(stated?.desired_salary_monthly ?? "").trim();
-  if (perAnnum && !perMonth) return String(stated?.desired_salary_annual ?? "").trim();
+  let value = "";
+  if (perMonth && !perAnnum) value = String(stated?.desired_salary_monthly ?? "").trim();
+  else if (perAnnum && !perMonth) value = String(stated?.desired_salary_annual ?? "").trim();
   // Neither unit stated: offer the monthly form, which is the one the floor
   // was given in, and say the unit so it cannot be misread.
-  return String(stated?.desired_salary_monthly ?? stated?.desired_salary_annual ?? "").trim();
+  else value = String(stated?.desired_salary_monthly ?? stated?.desired_salary_annual ?? "").trim();
+  // "in Lacs" / "LPA" asks for the number in lacs, whatever the profile states.
+  return /\blacs?\b|\blakhs?\b|\blpa\b/i.test(sig) ? salaryInLacs(value) : value;
 }
 
 /**
@@ -1865,11 +1888,31 @@ function identityFacts(candidate, stated, job = null) {
       // the wrong unit is a wrong number rather than a format mismatch. The
       // operator's floor is >= 35,000 INR/month; both forms sit at or above it.
       // Falls back to expected_salary only when neither stated form exists.
-      hint: /desired\s+salary|salary\s+(?:range|expectation)|expected\s+(?:salary|compensation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)/i,
+      //
+      // CTC is the same question under an Indian name. The hint only accepts it
+      // in the expected/desired form: "current CTC" is a different question (and
+      // for this candidate the answer is zero) so a bare \bctc\b here would
+      // quote an expected figure as a current one.
+      hint: /(?:expected|desired|required)\s+(?:ctc|package|salary|compensation)|salary\s+(?:range|expectation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)|ctc\s+expectation/i,
       // Resolved per control: a board asking "per month" and one asking
       // "per annum" need different numbers, and the same profile cannot
       // answer both with one string.
       byField: (signature) => salaryAnswer(stated, signature),
+    },
+    {
+      tag: "current CTC",
+      // "What is your current CTC in Lacs per annum?" - a fact, and the profile
+      // states it: current_company is "Not currently employed", so there is no
+      // current package to report and 0 is the truthful answer. If the candidate
+      // were employed this resolves to nothing rather than inventing a figure.
+      hint: /current\s+(?:ctc|package|annual\s+compensation)|present\s+(?:ctc|package|salary)|current\s+annual\s+salary/i,
+      // Only a stated employment status settles this. An empty profile gets
+      // nothing rather than a "0" that claims the candidate earns nothing.
+      value: (() => {
+        const company = String(stated?.current_company ?? "").trim();
+        if (!company) return "";
+        return /not currently employed|unemployed|no current employer/i.test(company) ? "0" : "";
+      })(),
     },
     {
       tag: "how you heard",
@@ -1878,6 +1921,17 @@ function identityFacts(candidate, stated, job = null) {
       // a false statement to the employer.
       hint: /how\s+did\s+you\s+hear\s+about|how\s+you\s+(?:heard|found)\s+(?:about|this)|where\s+did\s+you\s+(?:hear|find)\s+(?:about|this)/i,
       value: stated?.how_you_heard || "This job board",
+    },
+    {
+      tag: "notice period",
+      // "What is your Notice Period?" is a DURATION, and Hirist asks it as a
+      // mandatory free-text box on the screening form. It used to be answered by
+      // the availability rule below, which wrote the computed start date into it
+      // - the operator's 30-day notice appeared as "2026-12-04" on the form, a
+      // statement nobody made. A notice period is answered in its own unit, and
+      // availabilityDate() stays for real date controls.
+      hint: /notice\s+period|how\s+long\s+is\s+your\s+notice|notice\s+required/i,
+      value: String(candidate?.notice_period ?? "").trim(),
     },
     {
       tag: "availability date",
@@ -1889,7 +1943,7 @@ function identityFacts(candidate, stated, job = null) {
       // start-date?", so the one form with a hyphen missed while the answer sat
       // in the profile the whole time: notice_period 30 days -> 2026-11-04.
       // Every separator in this pattern is now `[-\s]?`.
-      hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start[-\s]?date|date[-\s]?(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|notice\s+period|desired\s+start|pick[-\s]?(?:a\s+)?date|select[-\s]?(?:a\s+)?date|choose[-\s]?(?:a\s+)?date/i,
+      hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start[-\s]?date|date[-\s]?(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|desired\s+start|pick[-\s]?(?:a\s+)?date|select[-\s]?(?:a\s+)?date|choose[-\s]?(?:a\s+)?date/i,
       value: availabilityDate(candidate),
     },
     {
@@ -3096,8 +3150,27 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
     return { clicked: false, blocked: true, reason: "redirect" };
   }
   const sels = ATS_SELECTORS[ats]?.applyBtn || ATS_SELECTORS.generic.applyBtn;
+  /**
+   * The first match in DOM order is not necessarily the control a person can
+   * see. Hirist renders two Apply buttons and one is a hidden responsive
+   * duplicate; clicking that one does nothing, the run then waits for a form the
+   * board never opened, and an application that a single click would have sent
+   * is recorded as NeedsReview. Prefer the first visible match, and fall back to
+   * the plain first match for stubs and for pages where nothing reports visible.
+   */
+  const firstVisibleMatch = async (locator) => {
+    if (typeof locator?.nth !== "function" || typeof locator?.count !== "function") {
+      return locator.first();
+    }
+    const total = await locator.count().catch(() => 0);
+    for (let i = 0; i < Math.min(total, 10); i++) {
+      const candidate = locator.nth(i);
+      if (await candidate.isVisible?.().catch(() => false)) return candidate;
+    }
+    return locator.first();
+  };
   for (const sel of sels) {
-    const el = page.locator(sel).first();
+    const el = await firstVisibleMatch(page.locator(sel));
     if (await el.count() > 0) {
       const href = typeof el.getAttribute === "function" ? await el.getAttribute("href").catch(() => null) : null;
       const innerText = typeof el.innerText === "function" ? await el.innerText().catch(() => "") : "";
@@ -4634,6 +4707,109 @@ async function answerFactualRadioQuestions(page, candidate) {
   }
 }
 
+/**
+ * Decide which options of a city/relocation checkbox group to tick.
+ *
+ * Returns null when the question is not about relocation at all - a checkbox
+ * group about skills or consents is not this fact's business. Otherwise returns
+ * the option labels the operator's stated list covers, which may be empty.
+ */
+function relocationPicks(question, options, stated) {
+  const text = String(question || "");
+  if (!/relocat|currently\s+(?:residing|living|based)|willing\s+to\s+(?:move|relocate)/i.test(text)) {
+    return null;
+  }
+  const wanted = String(stated?.relocation_cities ?? "")
+    .split(/[,|;]/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const opts = (Array.isArray(options) ? options : []).map((o) => String(o).trim());
+  const picks = opts.filter((opt) => {
+    const o = opt.toLowerCase();
+    // The option may carry a qualifier - "Pune (relocation required)" - so a
+    // prefix match is what a person means by ticking "Pune".
+    return wanted.some((place) => o === place || o.startsWith(`${place} `) || o.startsWith(`${place},`));
+  });
+  return { picks, wanted };
+}
+
+/**
+ * Answer a "which cities will you work in" checkbox group from a stated list.
+ *
+ * Hirist asks "Please select the city you are currently residing or willing to
+ * relocate to" as a mandatory checkbox group, one checkbox per city, each with
+ * its own element name - so there is no radio group to read and no name to group
+ * by. #1054 was abandoned on exactly this: every text box and radio was filled
+ * and Next stayed disabled because this one group was empty.
+ *
+ * Willingness to move is a life decision, not a fact in the CV, so it is never
+ * inferred from current_location or from the job's own city. Only cities the
+ * operator listed in application_answers.relocation_cities are ticked; anything
+ * else is left alone and named in the log.
+ */
+async function answerFactualCheckboxQuestions(page, candidate) {
+  const stated = candidate?.application_answers || {};
+  const groups = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const byQuestion = new Map();
+    for (const input of document.querySelectorAll('input[type="checkbox"]')) {
+      if (input.checked || input.disabled) continue;
+      const label = input.id
+        ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`)
+        : null;
+      const optionText = norm(label?.innerText || input.closest("label")?.innerText || "");
+      if (!optionText) continue;
+      // The question is the nearest ancestor that holds more than the option
+      // text alone. Options of one question share that ancestor, which is what
+      // groups them - their element names are all different.
+      let node = input;
+      let question = "";
+      while (node && node !== document.body) {
+        const text = norm(node.innerText);
+        if (text.length > optionText.length + 12) { question = text.slice(0, 400); break; }
+        node = node.parentElement;
+      }
+      if (!question) continue;
+      const entry = byQuestion.get(question) || { question, ids: [], options: [] };
+      entry.ids.push(input.id);
+      entry.options.push(optionText.slice(0, 60));
+      byQuestion.set(question, entry);
+    }
+    return [...byQuestion.values()];
+  }).catch(() => []);
+  if (!Array.isArray(groups) || groups.length === 0) return;
+
+  for (const group of groups) {
+    const question = group.question.replace(/\s+/g, " ").trim();
+    const decision = relocationPicks(question, group.options, stated);
+    if (!decision) continue;
+    if (!decision.wanted.length) {
+      console.log(`    [answer-missing] "${question.slice(0, 90)}" — ${group.options.join("/") || "cities"} left unticked (application_answers.relocation_cities unset)`);
+      continue;
+    }
+    if (!decision.picks.length) {
+      console.log(`    [answer-missing] "${question.slice(0, 60)}": ${group.options.join("/")} offers no ${decision.wanted.join("/")}`);
+      continue;
+    }
+    const ids = decision.picks.map((pick) => group.ids[group.options.indexOf(pick)]);
+    const clicked = await page.evaluate((targets) => {
+      const done = [];
+      for (const id of targets) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        (label || el.closest("label") || el.parentElement)?.click();
+        done.push({ id, checked: el.checked });
+      }
+      return done;
+    }, ids).catch(() => []);
+    const ok = Array.isArray(clicked) && clicked.length > 0 && clicked.every((c) => c.checked);
+    console.log(ok
+      ? `    [answer] "${question.slice(0, 60)}" → "${decision.picks.join(", ")}" from application_answers.relocation_cities`
+      : `    [answer-missing] "${question.slice(0, 60)}": checkbox did not accept "${decision.picks.join(", ")}"`);
+  }
+}
+
 async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   const currentUrl = typeof page?.url === "function" ? page.url() : "";
   // Autofill sends PII, so dry-run and live mode share the same HTTPS
@@ -5345,6 +5521,8 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // facts. Anything else is named in the log, so a form blocked on a disabled
     // Next points at the exact question that needs an operator answer.
     await answerFactualRadioQuestions(page, candidate);
+    // Same principle for checkbox groups: Ask before assuming.
+    await answerFactualCheckboxQuestions(page, candidate);
   }
 
   // Cover letter: use HQ recommendation if available (generic placeholder)
@@ -5971,6 +6149,17 @@ async function processJob(browser, job, profile, runtime = {}) {
         if (again.blocked) break;
       }
       if (surfaceReady) await fillCommonFields(page, ats, profile, job, navBoundary);
+    }
+    // Some Hirist postings have no screening form at all: the Apply click is the
+    // whole application and the board answers with /job/applied?jobId=<id>. The
+    // run then waited 3 x 12s for a form that never comes and recorded
+    // NeedsReview on an application the board had already accepted - measured
+    // on StatusNeo #1095, where the receipt mail arrived seconds after the click.
+    // The board's own applied state is the evidence, so read it before deciding.
+    if (!applyNavigation.blocked && await hasHiristAppliedBadge(page)) {
+      console.log("  [hirist] Apply landed on the board's applied page — recording verified submission");
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
     }
     if (applyNavigation.blocked) {
       if (!sharedCtx) await context.close();
@@ -8089,8 +8278,10 @@ export {
   portalApiHostAllowed,
   placeAliases,
   experienceBandFor,
+  relocationPicks,
   availabilityDate,
   salaryAnswer,
+  salaryInLacs,
   isFingerprintVendorHost,
   finalGuardAction,
   isCurrentPageTrusted,
