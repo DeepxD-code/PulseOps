@@ -59,6 +59,14 @@ candidate:
     language_chinese: 'No'
     language_hindi: 'Yes'
     language_english: 'Yes'
+    # Hirist's screening form (and a few others) ask, as a mandatory radio:
+    # "Have you worked in a Founding Engineer, Forward Deployed Engineer (FDE),
+    # Product Engineer, or similar high-ownership role?" cv.md lists a backend
+    # internship at AKS Intelligent Systems LLP and a research-lead role on the
+    # final-year project; neither carries a founding/FDE title. Answer is 'No'.
+    # Flip it to 'Yes' if you consider the AKS work high-ownership - it is a
+    # statement about your history, so it has to be yours.
+    high_ownership_role_experience: 'No'
     frontend_experience: 'No'
     fullstack_frontend_experience: 'No'
     react_experience: 'No'

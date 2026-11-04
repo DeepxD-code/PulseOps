@@ -32,6 +32,9 @@ import {
   candidateFirstName,
   candidateLastName,
   portalAssetHostAllowed,
+  portalApiHostAllowed,
+  placeAliases,
+  experienceBandFor,
   availabilityDate,
   salaryAnswer,
   isFingerprintVendorHost,
@@ -138,6 +141,11 @@ test("multi-step flow walks Continue then stops when no navigation remains", asy
     url: () => "https://jobs.ashbyhq.com/acme/9f1c",
     locator: (sel = "") => ({
       first() { return this; },
+      // The walker now picks the first VISIBLE navigation control, because a
+      // responsive footer renders a hidden duplicate that swallows the click
+      // (Hirist). A real locator has nth()/isVisible(), so model them.
+      nth() { return this; },
+      async isVisible() { return true; },
       // Truthful about captchas. Returning 1 for EVERY selector claimed a
       // captcha iframe existed on a page that has none, and hasCaptcha() fails
       // closed on an uninspectable match - correctly. The flow then stopped as
@@ -147,6 +155,9 @@ test("multi-step flow walks Continue then stops when no navigation remains", asy
       // "no-navigation" outcome depends on.
       async count() {
         if (/captcha|hcaptcha|recaptcha/i.test(sel)) return 0;
+        // The fake page has exactly one control - the navigation button - and
+        // no form fields, so every field/combobox selector must count 0.
+        if (!/continue|next|proceed/i.test(sel)) return 0;
         return step === 0 ? 1 : 0;
       },
       async innerText() { return "Continue"; },
@@ -172,8 +183,11 @@ test("multi-step flow refuses to click a non-navigation control", async () => {
     url: () => "https://jobs.ashbyhq.com/acme/9f1c",
     locator: (sel = "") => ({
       first() { return this; },
+      // See the note in the stub above: a real locator exposes nth()/isVisible().
+      nth() { return this; },
+      async isVisible() { return true; },
       // See the note in the stub above: this page has no captcha, so say so.
-      async count() { return /captcha|hcaptcha|recaptcha/i.test(sel) ? 0 : 1; },
+      async count() { return /captcha|hcaptcha|recaptcha/i.test(sel) ? 0 : (/continue|next|proceed/i.test(sel) ? 1 : 0); },
       async innerText() { return "Search Jobs"; },
       async getAttribute() { return null; },
       async isDisabled() { return false; },
@@ -797,6 +811,54 @@ test("a portal's own scripts load, and only while on that portal", () => {
   assert.equal(portalAssetHostAllowed("https://jobs.ashbyhq.com", u("https://ajax.googleapis.com/ajax/libs/jquery-1.11.1/jquery.min.js")), false);
   assert.equal(portalAssetHostAllowed("https://evil.example", u("https://static.instahyre.com/js/output.1.js")), false);
   assert.equal(portalAssetHostAllowed("https://www.instahyre.com.evil.example", u("https://static.instahyre.com/js/output.1.js")), false);
+});
+
+test("a portal's own API host feeds the page, but only the calls it needs", () => {
+  const u = (s) => new URL(s);
+  // Hirist's job page is client-rendered from gladiator.hirist.tech. Blocking
+  // that host dropped the page from 13,458 characters to 286 with no Apply
+  // button, which is what had stranded all 31 pending Hirist rows.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/detail/1676086/"), "GET", "xhr"), true);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/user/notification/count"), "GET", "fetch"), true);
+  // The screening form waits on exactly one POST: the session check.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://assessmentapi.hirist.tech/v1/login"), "POST", "xhr"), true);
+  // Writes beyond it, and any other verb, stay blocked.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://assessmentapi.hirist.tech/v1/answers"), "POST", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/apply/1676086/"), "POST", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/detail/1676086/"), "DELETE", "xhr"), false);
+  // Scripts never arrive through the API allowance.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/x.js"), "GET", "script"), false);
+  // Scoped to the board's own page.
+  assert.equal(portalApiHostAllowed("https://evil.example", u("https://gladiator.hirist.tech/job/detail/1/"), "GET", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech.evil.example", u("https://gladiator.hirist.tech/job/detail/1/"), "GET", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.instahyre.com", u("https://gladiator.hirist.tech/job/detail/1/"), "GET", "xhr"), false);
+});
+
+test("screening radios are answered from stated facts, never guessed", () => {
+  // "Are you currently living in Bangalore?" - answered from where he actually
+  // lives, with the NCR cities treated as the one place they are.
+  const ncr = placeAliases("Greater Noida, Uttar Pradesh");
+  assert.equal(ncr.has("greater noida"), true);
+  assert.equal(ncr.has("noida"), true);
+  assert.equal(ncr.has("delhi ncr"), true);
+  assert.equal(ncr.has("bangalore"), false);
+  const kolkata = placeAliases("Kolkata, West Bengal");
+  assert.equal(kolkata.has("delhi"), false);
+  assert.equal(kolkata.has("kolkata"), true);
+
+  // "How many years of professional software engineering experience?" - the
+  // band has to contain 0.2 years, not merely the first option.
+  const bands = ["Less than 2 years", "2 - 3 Years", "3 - 5 Years", "5+ Years"];
+  const q = "5. How many years of professional software engineering experience do you have?";
+  assert.equal(experienceBandFor(q, bands, 0.2), "Less than 2 years");
+  assert.equal(experienceBandFor(q, bands, 2.5), "2 - 3 Years");
+  assert.equal(experienceBandFor(q, bands, 4), "3 - 5 Years");
+  assert.equal(experienceBandFor(q, bands, 9), "5+ Years");
+  assert.equal(experienceBandFor(q, ["0-1 years", "1-3 years"], 0.2), "0-1 years");
+  assert.equal(experienceBandFor(q, ["Fresher", "Experienced"], 0), "Fresher");
+  // A question that is not about years must never consume a band.
+  assert.equal(experienceBandFor("Are you currently living in Bangalore?", bands, 0.2), null);
+  assert.equal(experienceBandFor(q, bands, Number.NaN), null);
 });
 
 test("blacklist matching is enforced independently of the SQL query", () => {

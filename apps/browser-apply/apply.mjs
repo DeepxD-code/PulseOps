@@ -2647,6 +2647,16 @@ const PORTAL_ASSET_HOSTS = Object.freeze({
     "ajax.googleapis.com",
     "cdnjs.cloudflare.com",
   ],
+  // Hirist is a Next.js app served from www.hirist.tech with every JS chunk on
+  // js-static.hirist.tech. Measured 2026-11-03: with that host blocked the page
+  // keeps its server-rendered shell but never hydrates, so no Apply control
+  // exists to click and all 31 pending Hirist rows died on "no Apply button
+  // found for generic". Unblocked, the same page renders Login/Apply and the
+  // Apply click opens the board's own login-or-apply dialog.
+  "hirist.tech": ["js-static.hirist.tech"],
+  "www.hirist.tech": ["js-static.hirist.tech"],
+  "hirist.com": ["js-static.hirist.tech"],
+  "www.hirist.com": ["js-static.hirist.tech"],
 });
 
 /**
@@ -2692,6 +2702,59 @@ function portalAssetHostAllowed(pageOrigin, url) {
   if (!hosts) return false;
   const host = canonicalHost(url.hostname);
   return hosts.some((candidate) => canonicalHost(candidate) === host);
+}
+
+/**
+ * A portal's own API hosts, allowed for reads - plus the exact auth handshake
+ * it needs to render an application form.
+ *
+ * Hirist is here because the job page is not server-rendered: the posting, the
+ * salary line and the Apply button itself are all fetched from
+ * gladiator.hirist.tech after hydration. Measured 2026-11-03 by blocking only
+ * that host - the page fell from 13,458 characters to 286 with no Apply button,
+ * which is exactly the "no Apply button found for generic" the runner had been
+ * recording on all 31 pending rows.
+ *
+ * The screening form one click later hangs on a single POST to
+ * assessmentapi.hirist.tech/v1/login: with it blocked the page stays a skeleton
+ * (128 characters, no questions) and with it allowed the questions render
+ * (864 characters). That call carries the session the browser already has, so
+ * it is the board's own auth check, not an application submission - and it is
+ * pinned to one host and one path rather than opened per method.
+ *
+ * Everything else about the board's POSTs, including the real submit, stays
+ * subject to the normal apply-path rules.
+ */
+const PORTAL_API_HOSTS = Object.freeze({
+  "hirist.tech": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
+  "www.hirist.tech": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
+  "hirist.com": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
+  "www.hirist.com": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
+});
+
+const PORTAL_API_POST_PATHS = Object.freeze({
+  "assessmentapi.hirist.tech": ["/v1/login"],
+});
+
+function portalApiHostAllowed(pageOrigin, url, method, requestType) {
+  if (!pageOrigin || !url || url.protocol !== "https:") return false;
+  const type = String(requestType || "").toLowerCase();
+  if (!["xhr", "fetch", "other", ""].includes(type)) return false;
+  let pageHost = "";
+  try {
+    pageHost = canonicalHost(new URL(pageOrigin).hostname);
+  } catch {
+    return false;
+  }
+  const hosts = PORTAL_API_HOSTS[pageHost];
+  if (!hosts) return false;
+  const host = canonicalHost(url.hostname);
+  if (!hosts.some((candidate) => canonicalHost(candidate) === host)) return false;
+  const verb = String(method || "GET").toUpperCase();
+  if (verb === "GET" || verb === "HEAD") return true;
+  const paths = PORTAL_API_POST_PATHS[host];
+  if (!paths || !["xhr", "fetch"].includes(type)) return false;
+  return paths.some((prefix) => url.pathname.startsWith(prefix));
 }
 
 function isAllowedAssetRequest(requestUrl, requestType, ats) {
@@ -2894,6 +2957,7 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
         const blankFrame = /^about:blank(?:[#?].*)?$/i.test(String(requestUrl || ""));
         const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, ats)
           || portalAssetHostAllowed(frameOrigin, requestParsed);
+        const trustedPortalApi = portalApiHostAllowed(frameOrigin, requestParsed, requestMethod, requestType);
         const trustedReadOnlyApi = isAllowedReadOnlyApiRequest(
           requestUrl, requestType, requestMethod, ats
         );
@@ -2907,7 +2971,7 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
         const trustedFingerprintVendor = isFingerprintVendorHost(requestParsed);
         const trustedAtsPost = isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, ats);
         if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
-            && !trustedCaptchaToken && !trustedAtsPost && !trustedFingerprintVendor
+            && !trustedCaptchaToken && !trustedAtsPost && !trustedFingerprintVendor && !trustedPortalApi
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
           console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
@@ -4131,8 +4195,18 @@ async function advanceMultiStepFlow(page, {
   for (let step = 0; step < maxSteps; step++) {
     if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) return { stopped: "redirect" };
     await fillCommonFields(page, ats, profile, job, navBoundary);
-    const next = page.locator(navSelector).first();
-    if ((await next.count()) === 0) return { stopped: "no-navigation" };
+    // The first match in DOM order is not necessarily the control the user can
+    // see: responsive layouts keep a hidden duplicate of the footer (Hirist
+    // renders both), and clicking that one silently does nothing - which is how
+    // #492 "clicked Next" six times and stayed on the same screening form.
+    const candidates = page.locator(navSelector);
+    let next = null;
+    const candidateCount = await candidates.count().catch(() => 0);
+    for (let i = 0; i < Math.min(candidateCount, 10); i++) {
+      const el = candidates.nth(i);
+      if (await el.isVisible().catch(() => false)) { next = el; break; }
+    }
+    if (!next) return { stopped: "no-navigation" };
     const label = (((await next.innerText().catch(() => "")) || "")
       || (await next.getAttribute("aria-label").catch(() => ""))
       || (await next.getAttribute("value").catch(() => ""))).trim().slice(0, 60);
@@ -4157,9 +4231,26 @@ async function advanceMultiStepFlow(page, {
     }
     console.log(`  [${tag}] step ${step + 1}: clicking "${label}"`);
     await next.scrollIntoViewIfNeeded().catch(() => {});
-    await next.click({ timeout: 5000 }).catch(() => {});
+    let clickError = "";
+    await next.click({ timeout: 5000 }).catch((error) => {
+      clickError = String(error).split("\n")[0].slice(0, 100);
+    });
+    if (clickError) {
+      await next.click({ timeout: 4000, force: true }).catch((error) => {
+        clickError = String(error).split("\n")[0].slice(0, 100);
+      });
+    }
     await page.waitForTimeout(2000);
-    const confirmed = await page.evaluate(() =>
+    if (clickError) {
+      console.log(`  [${tag}] step ${step + 1}: click failed — ${clickError}`);
+      return { stopped: "click-failed" };
+    }
+    // A board that answers with its own "applied" page has recorded the
+    // application; Hirist sends the form to /job/applied?jobId=<id>. That page
+    // is the board's receipt, so it counts as confirmation rather than as a
+    // navigation that needs another step.
+    const appliedPage = /\/job\/applied|already-applied/i.test(String(page.url?.() || ""));
+    const confirmed = appliedPage || await page.evaluate(() =>
       /application submitted|you applied|application received|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|successfully applied/i.test(document.body?.innerText || "")
     ).catch(() => false);
     if (confirmed) return { stopped: "confirmed" };
@@ -4383,6 +4474,163 @@ async function waitForCaptchaResolution(page) {
     // A failed challenge probe is not evidence that verification disappeared.
     console.log(`  [captcha] challenge probe failed; blocking: ${String(e).slice(0, 100)}`);
     return false;
+  }
+}
+
+/**
+ * Answer the mandatory radio questions a board asks about facts the profile
+ * already states, and report the ones it cannot answer.
+ *
+ * Hirist gates every application behind a screening form whose "Next" button
+ * stays disabled until each starred question is answered. Measured 2026-11-03
+ * on Vedantu (#492): the salary, expected-salary and notice-period questions
+ * came pre-filled from the profile, but three bare radio groups did not - "Are
+ * you currently living in Bangalore?", the years-of-experience band, and a
+ * role-history question. Nothing in the commitment list matched them, so the
+ * form was abandoned with a disabled Next and the row went to NeedsReview.
+ *
+ * These two are answered from facts, not from preference: where the candidate
+ * currently lives, and how many years he has worked. Both are already in the
+ * profile (current_location, experience_years) and both stay truthful whichever
+ * way they land. History questions that no field can settle (a founding/FDE
+ * role) are answered only from application_answers, which the operator writes.
+ * Anything else is left untouched and named in the log, because a guess on a
+ * history question is a false statement on an application.
+ */
+function placeAliases(location) {
+  const raw = String(location || "").toLowerCase();
+  const parts = raw.split(/[,/]/).map((p) => p.trim()).filter(Boolean);
+  const aliases = new Set(parts);
+  // Greater Noida / Noida / Gurugram / Ghaziabad / Faridabad are all the Delhi
+  // NCR, and boards ask about it under every one of those names.
+  const ncr = ["greater noida", "noida", "gurugram", "gurgaon", "ghaziabad", "faridabad", "delhi", "new delhi", "delhi ncr", "ncr"];
+  if (parts.some((p) => ncr.includes(p))) ncr.forEach((a) => aliases.add(a));
+  return aliases;
+}
+
+function experienceBandFor(question, options, years) {
+  if (!/years?\b.*experience|experience\b.*years?|total experience/i.test(question)) return null;
+  if (!Number.isFinite(years)) return null;
+  for (const option of options) {
+    const text = String(option).toLowerCase();
+    let lo = null;
+    let hi = null;
+    let m;
+    if ((m = text.match(/(\d+(?:\.\d+)?)\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)/))) {
+      lo = Number(m[1]);
+      hi = Number(m[2]);
+    } else if ((m = text.match(/less than\s*(\d+(?:\.\d+)?)/))) {
+      lo = 0;
+      hi = Number(m[1]) - 0.0001;
+    } else if ((m = text.match(/(\d+(?:\.\d+)?)\s*\+/))) {
+      lo = Number(m[1]);
+      hi = Number.POSITIVE_INFINITY;
+    } else if ((m = text.match(/more than\s*(\d+(?:\.\d+)?)/))) {
+      lo = Number(m[1]) + 0.0001;
+      hi = Number.POSITIVE_INFINITY;
+    } else if (/fresher|no experience|none/.test(text)) {
+      lo = 0;
+      hi = 0.999;
+    }
+    if (lo === null) continue;
+    if (years >= lo && years <= hi) return option;
+  }
+  return null;
+}
+
+async function answerFactualRadioQuestions(page, candidate) {
+  // Questions about the candidate's own history that no CV field can be turned
+  // into an answer mechanically. Each is answered only when the operator has
+  // stated it in application_answers; otherwise it is left blank and named.
+  const stated = candidate?.application_answers || {};
+  const statedQuestions = [
+    { key: "high_ownership_role_experience", hint: /founding engineer|forward deployed|\bFDE\b|high[- ]ownership/i },
+    { key: "ever_interviewed_here", hint: /interviewed (?:with|at) (?:us|this company)|previously interviewed/i },
+  ];
+  const groups = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const byName = new Map();
+    for (const input of document.querySelectorAll('input[type="radio"]')) {
+      if (!input.name) continue;
+      const holder = input.closest("label") || (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null) || input.parentElement;
+      const text = norm(holder?.innerText || input.value);
+      const entry = byName.get(input.name) || { name: input.name, options: [], checked: false, question: "" };
+      if (text) entry.options.push(text.slice(0, 60));
+      if (input.checked) entry.checked = true;
+      byName.set(input.name, entry);
+    }
+    // The question is the nearest ancestor block that holds more text than the
+    // options alone: a radio group's container also carries its label.
+    for (const entry of byName.values()) {
+      const first = document.querySelector(`input[name="${CSS.escape(entry.name)}"]`);
+      const optionLength = entry.options.reduce((sum, t) => sum + t.length, 0);
+      let node = first;
+      while (node && node !== document.body) {
+        const text = norm(node.innerText);
+        if (text.length > optionLength + 12) { entry.question = text.slice(0, 400); break; }
+        node = node.parentElement;
+      }
+    }
+    return [...byName.values()].filter((g) => !g.checked && g.options.length > 1);
+  }).catch(() => []);
+  if (!Array.isArray(groups) || groups.length === 0) return;
+
+  for (const group of groups) {
+    const question = group.question.replace(/\s+/g, " ").trim();
+    if (!question) continue;
+    const questionClause = question.split(/\?\s*/)[0];
+    let answer = null;
+    let from = "";
+    const living = questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
+    if (living) {
+      const target = living[1].trim().toLowerCase();
+      const aliases = placeAliases(candidate?.current_location);
+      answer = aliases.has(target) ? "Yes" : "No";
+      from = `current_location (${candidate?.current_location || "unset"})`;
+    } else {
+      const years = Number.parseFloat(String(candidate?.experience_years ?? ""));
+      const band = experienceBandFor(question, group.options, years);
+      if (band) {
+        answer = band;
+        from = `experience_years (${years})`;
+      } else {
+        const statedMatch = statedQuestions.find((item) => item.hint.test(question));
+        const value = statedMatch ? String(stated[statedMatch.key] ?? "").trim() : "";
+        if (value) {
+          answer = value;
+          from = `application_answers.${statedMatch.key}`;
+        }
+      }
+    }
+    if (!answer) {
+      console.log(`    [answer-missing] "${question.slice(0, 90)}" — left blank (no factual source)`);
+      continue;
+    }
+    const wanted = String(answer).toLowerCase();
+    const index = group.options.findIndex((opt) => opt.trim().toLowerCase() === wanted);
+    if (index < 0) {
+      console.log(`    [answer-missing] "${question.slice(0, 60)}": ${group.options.join("/")} offers no "${answer}"`);
+      continue;
+    }
+    const input = page.locator(`input[type="radio"][name="${group.name}"]`).nth(index);
+    // Hirist (and most custom-styled radio groups) hide the native input with
+    // display:none and expose a <label for>. Playwright's check() cannot click a
+    // display:none element, and clicking the wrapper div does nothing - only the
+    // label forwards activation to the input, so click that.
+    const landed = await page.evaluate(({ name, idx }) => {
+      const members = [...document.querySelectorAll('input[type="radio"]')].filter((el) => el.name === name);
+      const target = members[idx];
+      if (!target) return false;
+      const label = target.id ? document.querySelector(`label[for="${CSS.escape(target.id)}"]`) : null;
+      (label || target.closest("label") || target.parentElement)?.click();
+      return target.checked;
+    }, { name: group.name, idx: index }).catch(() => false)
+      || await input.isChecked().catch(() => false);
+    if (landed) {
+      console.log(`    [answer] "${question.slice(0, 60)}" → "${group.options[index]}" from ${from}`);
+    } else {
+      console.log(`    [answer-missing] "${question.slice(0, 60)}": control did not accept "${group.options[index]}"`);
+    }
   }
 }
 
@@ -5091,6 +5339,12 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         }
       }
     }
+
+    // Radio questions about facts the profile already states - where the
+    // candidate lives, how many years he has worked - are answered from those
+    // facts. Anything else is named in the log, so a form blocked on a disabled
+    // Next points at the exact question that needs an operator answer.
+    await answerFactualRadioQuestions(page, candidate);
   }
 
   // Cover letter: use HQ recommendation if available (generic placeholder)
@@ -5101,8 +5355,33 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   return true;
 }
 
-async function hasVisibleAppliedBadge(page) {
-  const pageHit = await page.evaluate(() => {
+/**
+ * Hirist's own applied state for a posting.
+ *
+ * The job page swaps its Apply button for one reading "Applied" once an
+ * application exists, and going back to the posting after submitting lands on
+ * /job/applied?jobId=<id>. Neither phrasing matches the generic badge phrasings
+ * ("application submitted", "you applied"), so a completed application was being
+ * re-read as "no Apply button found" and downgraded to NeedsReview. Scoped to
+ * the board's own hosts so the word "Applied" on any other site stays ignored.
+ */
+async function hasHiristAppliedBadge(page) {
+  let host = "";
+  try { host = canonicalHost(new URL(page.url()).hostname); } catch { return false; }
+  if (!/(^|\.)hirist\.(?:tech|com)$/.test(host)) return false;
+  if (/\/job\/applied|already-applied/i.test(String(page.url() || ""))) return true;
+  return page.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    return [...document.querySelectorAll("button, a, [role='button']")]
+      .some((el) => visible(el) && /^applied$/i.test((el.innerText || "").trim()));
+  }).catch(() => false);
+}
+
+async function hasVisibleAppliedBadge(page) {  const pageHit = await page.evaluate(() => {
     const statusText = /^(applied|already applied|application submitted|application sent|you applied)$/i;
     const statusAria = /^(applied|already applied|application submitted|application sent|you applied)/i;
     const visible = (el) => {
@@ -5402,7 +5681,11 @@ function normaliseJobUrl(raw) {
     if (!/(^|\.)linkedin\.com$/i.test(parsed.hostname)) return value;
     if (!/\/jobs\/view\b/.test(parsed.pathname)) return value;
     const id = (parsed.pathname.match(/(\d{6,})/) || [])[1];
-    return id ? `https://www.linkedin.com/jobs/view/${id}/` : value;
+    // Some scraped links carry the slug but no id. www still serves those by
+    // slug, so drop the tracking query and keep the path rather than failing.
+    return id
+      ? `https://www.linkedin.com/jobs/view/${id}/`
+      : `https://www.linkedin.com${parsed.pathname}`;
   } catch {
     return value;
   }
@@ -5611,6 +5894,17 @@ async function processJob(browser, job, profile, runtime = {}) {
     // Young Turk flow) and record a verified, idempotent outcome.
     if (HUMAN_FINAL_STATUSES.has(ats) && !(await hasCaptcha(page)) && await hasVisibleAppliedBadge(page)) {
       console.log(`  [${ats}] server-side Applied badge already present — recording verified submission`);
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
+    }
+
+    // A Hirist posting answers with the word "Applied" in place of its Apply
+    // button once the candidate has applied. That is the board's own record, and
+    // the only way to reach it is to have completed the screening form - so it is
+    // read as a verified submission rather than falling through to "no Apply
+    // button found" and a NeedsReview that says nothing.
+    if (await hasHiristAppliedBadge(page)) {
+      console.log("  [hirist] posting shows Applied for this candidate — recording verified submission");
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
     }
@@ -7792,6 +8086,9 @@ export {
   candidateFirstName,
   candidateLastName,
   portalAssetHostAllowed,
+  portalApiHostAllowed,
+  placeAliases,
+  experienceBandFor,
   availabilityDate,
   salaryAnswer,
   isFingerprintVendorHost,
