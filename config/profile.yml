@@ -97,12 +97,15 @@ candidate:
     # WHICH cities you would move to. Hirist renders that as a mandatory
     # checkbox group ("Please select the city you are currently residing or
     # willing to relocate to", one box per city) and #1054 stalled on it with
-    # every other field filled. Committing to a named city is the candidate's
-    # call, so this stays EMPTY until he states it: with no list, the group is
-    # left unticked and logged [answer-missing] rather than guessed from the
-    # job's own city or from current_location.
-    # Format: comma-separated city names, e.g. 'Chennai, Pune'.
-    relocation_cities: ''
+    # every other field filled.
+    #
+    # Stated by the candidate 2026-11-04: the India tech hubs he would move to.
+    # NCR is expanded to Delhi / Noida / Gurugram / Ghaziabad / Faridabad in
+    # code, and each city covers its other spelling (Bengaluru/Bangalore), so
+    # the list stays one word per hub instead of every variant a board might
+    # print. Anything not listed is left unticked and logged [answer-missing]
+    # rather than guessed from the job's own city.
+    relocation_cities: 'Bengaluru, Hyderabad, Pune, Chennai, NCR'
     future_us_residence: 'Yes'
     requires_visa_sponsorship: 'Yes'
     # Legal agreements are a separate class of act: accepting one changes what

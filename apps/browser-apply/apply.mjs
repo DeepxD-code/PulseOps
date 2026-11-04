@@ -2786,8 +2786,30 @@ const PORTAL_API_HOSTS = Object.freeze({
   "www.hirist.com": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
 });
 
+/**
+ * The screening form's own submission, as XHR rather than a form post.
+ *
+ * Measured on #1054: with every question answered and Next enabled, the click
+ * posts to gladiator.hirist.tech/job/assessment_complete?jobcode=<id> and then
+ * gladiator.hirist.tech/job/apply?jobcode=<id>. Both were blocked, so the page
+ * did nothing at all, six attempts in a row, and the row recorded NeedsReview -
+ * no Hirist screening application could ever complete while that was true.
+ *
+ * This is the one place the board's own submission is allowed through, so it is
+ * pinned to the exact paths and to a query that names a numeric jobcode; the
+ * act itself is still gated by the final-action check (live mode, --auto, pause
+ * re-read) that runs immediately before the click.
+ */
+const PORTAL_SUBMIT_POST_PATHS = Object.freeze({
+  "gladiator.hirist.tech": /^\/job\/(?:apply|assessment_complete)$/,
+});
+
 const PORTAL_API_POST_PATHS = Object.freeze({
-  "assessmentapi.hirist.tech": ["/v1/login"],
+  // /v1/login is the board's own session check: with it blocked the screening
+  // form stays a skeleton (128 chars, no questions).
+  // /v1/questionResponse is the form recording the answer we just typed into
+  // it; with it blocked the page renders but Next never advances.
+  "assessmentapi.hirist.tech": ["/v1/login", "/v1/questionResponse"],
 });
 
 function portalApiHostAllowed(pageOrigin, url, method, requestType) {
@@ -2806,9 +2828,15 @@ function portalApiHostAllowed(pageOrigin, url, method, requestType) {
   if (!hosts.some((candidate) => canonicalHost(candidate) === host)) return false;
   const verb = String(method || "GET").toUpperCase();
   if (verb === "GET" || verb === "HEAD") return true;
+  if (!["xhr", "fetch"].includes(type)) return false;
   const paths = PORTAL_API_POST_PATHS[host];
-  if (!paths || !["xhr", "fetch"].includes(type)) return false;
-  return paths.some((prefix) => url.pathname.startsWith(prefix));
+  if (paths && paths.some((prefix) => url.pathname.startsWith(prefix))) return true;
+  // The form's own submission, pinned to exact paths and to a numeric jobcode.
+  const submitPath = PORTAL_SUBMIT_POST_PATHS[host];
+  if (submitPath && submitPath.test(url.pathname)) {
+    return /(?:^|&)jobcode=\d+(?:&|$)/.test(String(url.search || "").replace(/^\?/, ""));
+  }
+  return false;
 }
 
 function isAllowedAssetRequest(requestUrl, requestType, ats) {
@@ -4578,6 +4606,20 @@ function placeAliases(location) {
   // NCR, and boards ask about it under every one of those names.
   const ncr = ["greater noida", "noida", "gurugram", "gurgaon", "ghaziabad", "faridabad", "delhi", "new delhi", "delhi ncr", "ncr"];
   if (parts.some((p) => ncr.includes(p))) ncr.forEach((a) => aliases.add(a));
+  // The same Indian city is written two ways, and a board picks either: "Are
+  // you currently living in Bangalore?" was answered No for a Bengaluru
+  // resident because the two spellings never met.
+  const spellings = [
+    ["bengaluru", "bangalore"],
+    ["mumbai", "bombay"],
+    ["chennai", "madras"],
+    ["kolkata", "calcutta"],
+    ["pune", "poona"],
+  ];
+  for (const [a, b] of spellings) {
+    if (aliases.has(a)) aliases.add(b);
+    if (aliases.has(b)) aliases.add(a);
+  }
   return aliases;
 }
 
@@ -4723,12 +4765,17 @@ function relocationPicks(question, options, stated) {
     .split(/[,|;]/)
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
+  // A stated "NCR" covers every city in it, and a stated city covers the other
+  // spelling of itself. Expanding through placeAliases means the profile lists
+  // hubs by name instead of enumerating every board's variant of them.
+  const accepted = new Set();
+  for (const place of wanted) placeAliases(place).forEach((a) => accepted.add(a));
   const opts = (Array.isArray(options) ? options : []).map((o) => String(o).trim());
   const picks = opts.filter((opt) => {
     const o = opt.toLowerCase();
     // The option may carry a qualifier - "Pune (relocation required)" - so a
     // prefix match is what a person means by ticking "Pune".
-    return wanted.some((place) => o === place || o.startsWith(`${place} `) || o.startsWith(`${place},`));
+    return [...accepted].some((place) => o === place || o.startsWith(`${place} `) || o.startsWith(`${place},`));
   });
   return { picks, wanted };
 }

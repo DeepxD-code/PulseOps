@@ -899,6 +899,21 @@ test("a portal's own API host feeds the page, but only the calls it needs", () =
   assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/user/notification/count"), "GET", "fetch"), true);
   // The screening form waits on exactly one POST: the session check.
   assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://assessmentapi.hirist.tech/v1/login"), "POST", "xhr"), true);
+  // Answers the form typed are recorded through the board's own endpoint. With
+  // it blocked the form rendered, every field filled, Next was enabled, and
+  // pressing Next did nothing - six times.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://assessmentapi.hirist.tech/v1/questionResponse"), "POST", "xhr"), true);
+  // The submission itself is an XHR to the board's API, not a form post:
+  // observed live as /job/assessment_complete?jobcode=<id> then
+  // /job/apply?jobcode=<id>.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/apply?jobcode=1678230"), "POST", "xhr"), true);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/assessment_complete?jobcode=1678230"), "POST", "xhr"), true);
+  // ...but only those two paths, only with a numeric jobcode, only POST, and
+  // only from the board's own page.
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/apply"), "POST", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/apply?jobcode=abc"), "POST", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/delete?jobcode=1"), "POST", "xhr"), false);
+  assert.equal(portalApiHostAllowed("https://evil.example", u("https://gladiator.hirist.tech/job/apply?jobcode=1"), "POST", "xhr"), false);
   // Writes beyond it, and any other verb, stay blocked.
   assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://assessmentapi.hirist.tech/v1/answers"), "POST", "xhr"), false);
   assert.equal(portalApiHostAllowed("https://www.hirist.tech", u("https://gladiator.hirist.tech/job/apply/1676086/"), "POST", "xhr"), false);
@@ -946,6 +961,20 @@ test("relocation checkbox groups are answered only from a stated city list", () 
   const q = "4. Please select the city you are currently residing or willing to relocate to Chennai Pune";
   assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Chennai, Pune" }).picks, ["Chennai", "Pune"]);
   assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Pune" }).picks, ["Pune"]);
+  // The profile lists hubs by name; each covers its other spelling and NCR
+  // covers every city inside it, so one word per hub is enough.
+  assert.deepEqual(
+    relocationPicks(q, ["Bengaluru", "Bangalore", "Chennai"], { relocation_cities: "Bengaluru" }).picks,
+    ["Bengaluru", "Bangalore"],
+  );
+  assert.deepEqual(
+    relocationPicks(q, ["Delhi NCR", "Gurugram", "Noida", "Mumbai"], { relocation_cities: "NCR" }).picks,
+    ["Delhi NCR", "Gurugram", "Noida"],
+  );
+  assert.deepEqual(
+    relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Bengaluru, Hyderabad, Pune, Chennai, NCR" }).picks,
+    ["Chennai", "Pune"],
+  );
   // Nothing stated: no city is ticked, and the caller logs the exact question.
   const unset = relocationPicks(q, ["Chennai", "Pune"], {});
   assert.deepEqual(unset.picks, []);
@@ -958,8 +987,8 @@ test("relocation checkbox groups are answered only from a stated city list", () 
     relocationPicks(q, ["Pune (relocation required)", "Chennai"], { relocation_cities: "pune" }).picks,
     ["Pune (relocation required)"],
   );
-  // A city name must not leak into a different city.
-  assert.deepEqual(relocationPicks(q, ["New Delhi"], { relocation_cities: "Delhi" }).picks, []);
+  // A stated city must not tick a different one.
+  assert.deepEqual(relocationPicks(q, ["Chennai", "Pune"], { relocation_cities: "Mumbai" }).picks, []);
   // Any other checkbox group is not this fact's business, so it is untouched
   // rather than answered with a city name.
   assert.equal(relocationPicks("Which benefits do you need?", ["Health insurance", "Gym"], { relocation_cities: "Chennai" }), null);

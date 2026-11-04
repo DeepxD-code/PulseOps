@@ -56,8 +56,13 @@ DEFAULT_SOURCES = ("wellfound", "instahyre", "hirist", "linkedin", "glassdoor", 
 
 # A receipt says the application was accepted by the board. Anything vaguer is
 # not evidence of a submission.
+#
+# "Application Successful" is Hirist's wording ("Application Successful: <Company>
+# - <Title>") and it matched none of the phrasings below, so every Hirist receipt
+# was invisible to this script while the rows they proved sat at NeedsVerification.
 RECEIPT_RE = re.compile(
     r"successfully submitted|application submitted|application (?:has been |was )?received"
+    r"|application successful|application sent successfully"
     r"|thanks for applying|thank you for applying|we(?:'ve| have) received your application"
     r"|your application to|applied successfully|application sent",
     re.I,
@@ -94,9 +99,10 @@ def mail_receipts(days: int) -> list[tuple[str, str]]:
         ids: list[bytes] = []
         try:
             raw = ('subject:("successfully submitted" OR "application submitted" OR '
-                   '"application received" OR "thanks for applying" OR '
-                   '"thank you for applying" OR "received your application" OR '
-                   '"your application to" OR "applied successfully" OR "application sent")')
+                   '"application received" OR "application successful" OR '
+                   '"thanks for applying" OR "thank you for applying" OR '
+                   '"received your application" OR "your application to" OR '
+                   '"applied successfully" OR "application sent")')
             typ, data = conn.search(None, "X-GM-RAW", f'"{raw}"')
             ids = data[0].split() if data and data[0] else []
         except imaplib.IMAP4.error:
@@ -155,7 +161,7 @@ def main() -> int:
 
     print(f"\n  stuck rows          : {len(rows)}")
     print(f"  out of scope (source): {len(skipped_source)}   (left alone)")
-    print(f"  evidenced by mail   : {len(keep)}   (left alone)")
+    print(f"  evidenced by mail   : {len(keep)}   (promoted to Verified)")
     print(f"  no evidence         : {len(reopen)}   (retryable)")
     print(f"  company unreadable  : {len(unmatched)}   (left alone)")
 
@@ -165,14 +171,14 @@ def main() -> int:
     if len(reopen) > 25:
         print(f"    ... and {len(reopen) - 25} more")
 
-    print("\n  staying stuck (a receipt names the company):")
+    print("\n  verifying (a receipt names the company):")
     for job_id, status, source, company in keep[:12]:
         print(f"    #{job_id:<5} {status:<17} {source[:26]:<26} {company[:34]}")
     if len(keep) > 12:
         print(f"    ... and {len(keep) - 12} more")
 
     if not args.apply:
-        print("\n  report only - pass --apply to reset the unattempted rows")
+        print("\n  report only - pass --apply to reset the unattempted rows and verify the receipted ones")
         return 0
 
     with closing(sqlite3.connect(DB)) as conn:
@@ -181,6 +187,17 @@ def main() -> int:
             chunk = ids[chunk_start:chunk_start + 200]
             conn.execute(
                 f"update jobs set status='Evaluated' where id in ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+        conn.commit()
+        # The mailbox decides in both directions. A row the board has already
+        # confirmed must not sit at NeedsVerification forever: that state says
+        # "we cannot tell", and the receipt is exactly the thing that tells us.
+        verified = [r[0] for r in keep]
+        for chunk_start in range(0, len(verified), 200):
+            chunk = verified[chunk_start:chunk_start + 200]
+            conn.execute(
+                f"update jobs set status='Verified' where id in ({','.join('?' * len(chunk))})",
                 chunk,
             )
         conn.commit()
