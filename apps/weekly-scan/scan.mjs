@@ -1119,28 +1119,71 @@ async function scrapeJobHai(page, portal) {
 async function scrapeYC(page, portal) {
   await page.goto(portal.url, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForSelector('a[href*="/jobs/"] , body', { timeout: 12000 }).catch(() => {});
-  return page.$$eval(
-    'a[href*="/jobs/"], a[href^="jobs/"]',
-    (nodes, sourceName) =>
-      nodes.map((a) => {
-        let link = "";
-        try {
-          const url = new URL(a.getAttribute("href") || "", location.origin);
-          // Work at a Startup category/company pages are not application
-          // listings.  Only numeric /jobs/<id> URLs are safe to emit.
-          if (/^https?:\/\/(?:www\.)?workatastartup\.com\/jobs\/\d+(?:[/?#]|$)/i.test(url.href)) {
-            link = url.href;
-          }
-        } catch {}
-        return {
-          title: (a.textContent || "").trim() || "Startup Role",
-          company: "YC Startup",
-          link,
-          description: `Source: ${sourceName} (YC).`,
-        };
-      }).filter((j) => j.link && j.title && j.title.length > 4).slice(0, 80),
-    portal.name
-  );
+  // Work at a Startup is an Inertia app. The rendered card carries only the job
+  // title, so reading anchors stamped every row with the literal company name
+  // "YC Startup" - 48 rows of one employer that does not exist, which defeats
+  // dedupe, the outreach channel and any per-company judgement. The page ships
+  // its whole job list as JSON in the root data-page attribute, and that JSON
+  // carries companyName, location and salary. Read it first; keep the anchor
+  // scrape as a fallback for the day the payload shape changes.
+  const fromPayload = await page.evaluate(() => {
+    const root = document.querySelector("[data-page]");
+    if (!root) return [];
+    let payload = null;
+    try {
+      payload = JSON.parse(root.getAttribute("data-page") || "{}");
+    } catch {
+      return [];
+    }
+    const props = payload?.props || {};
+    const list = Array.isArray(props.jobs) ? props.jobs : (Array.isArray(props.jobList) ? props.jobList : []);
+    return list
+      .filter((job) => job && job.id && job.title)
+      .map((job) => ({
+        title: String(job.title).trim(),
+        company: String(job.companyName || "").trim(),
+        link: `https://www.workatastartup.com/jobs/${job.id}`,
+        location: String(job.location || "").trim(),
+        salary: String(job.salary || "").trim(),
+        oneLiner: String(job.companyOneLiner || "").trim(),
+      }));
+  }).catch(() => []);
+
+  const jobs = mapYCJobs(fromPayload, portal.name);
+  if (jobs.length) return jobs;
+
+  // The payload is gone, so the board changed shape. The cards name only the
+  // role, which is why the old anchor scrape stamped "YC Startup" on 48 rows;
+  // rather than repeat that, report the miss and emit nothing. A board that
+  // silently stops contributing is visible in the run summary; a board that
+  // contributes fake employers is not.
+  console.log(`[warn] ${portal.name}: data-page job payload not found — 0 jobs from this portal until the card shape is re-measured`);
+  return [];
+}
+
+/**
+ * Turn Work at a Startup's own job records into scan rows.
+ *
+ * Kept out of scrapeYC so it can be tested without a browser: the payload is
+ * the only source of a real employer name, and getting it wrong is silent.
+ */
+function mapYCJobs(list, sourceName) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((job) => job && job.title && job.company && String(job.title).trim().length > 4)
+    .slice(0, 80)
+    .map((job) => ({
+      title: String(job.title).trim().slice(0, 118),
+      company: String(job.company).trim(),
+      card_text: [job.title, job.company, job.location, job.oneLiner].filter(Boolean).join(" · ").slice(0, 400),
+      link: String(job.link || ""),
+      location_raw: String(job.location || "").trim().slice(0, 60),
+      description: [
+        job.salary ? `Salary shown: ${job.salary}` : "Salary: not stated",
+        `Source: ${sourceName} (YC).`,
+        job.oneLiner ? `Company: ${job.oneLiner}` : "",
+      ].filter(Boolean).join(" "),
+    }));
 }
 
 /**
@@ -1722,6 +1765,7 @@ async function main() {
 
 export {
   main,
+  mapYCJobs,
   validateJobLink,
   validateJobUrl,
   isValidJobLink,

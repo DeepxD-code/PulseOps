@@ -572,6 +572,46 @@ test("job selection refuses terminal, review, paused, low-score, and Indeed rows
   assert.notEqual(scan.validateJobLink("https://jobs.example.co.in/x", portal).reason, "unknown_or_unallowlisted_engine");
 });
 
+test("YC rows carry the real startup, not the board's own name", async () => {
+  const scan = await import("../apps/weekly-scan/scan.mjs");
+  // Work at a Startup's cards name only the role. Reading them stamped all 48
+  // rows with the literal company "YC Startup", which made the employer column
+  // useless - every row deduped against every other and outreach had nobody to
+  // address. The board ships its own records; these are the fields it gives.
+  const rows = scan.mapYCJobs([
+    {
+      title: "Full Stack Engineer",
+      company: "GiveCampus",
+      link: "https://www.workatastartup.com/jobs/25984",
+      location: "DC, SF, and remote / Remote (US)",
+      salary: "$120K - $200K",
+      oneLiner: "The fundraising platform for schools.",
+    },
+    {
+      title: "Backend Engineer",
+      company: "Artha Labs",
+      link: "https://www.workatastartup.com/jobs/4242",
+      location: "",
+      salary: "",
+      oneLiner: "",
+    },
+  ], "YC Combinator (Work at a Startup)");
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].company, "GiveCampus");
+  assert.equal(rows[1].company, "Artha Labs");
+  assert.equal(rows.every((r) => r.company !== "YC Startup"), true);
+  // The place comes from the board, so the India filter can judge a YC row on
+  // its own location instead of treating it as unknown.
+  assert.equal(rows[0].location_raw, "DC, SF, and remote / Remote (US)");
+  assert.equal(rows[1].location_raw, "");
+  assert.match(rows[0].description, /Salary shown: \$120K - \$200K/);
+  assert.match(rows[1].description, /Salary: not stated/);
+  // A record without an employer is dropped rather than filed under a guess.
+  assert.deepEqual(scan.mapYCJobs([{ title: "Backend Engineer", company: "", link: "https://www.workatastartup.com/jobs/1" }], "YC"), []);
+  assert.deepEqual(scan.mapYCJobs(null, "YC"), []);
+});
+
 test("the board's own fingerprint vendor is reachable, by hashed subdomain", () => {
   // Enabled on the operator's instruction. A real browser loading an Ashby board
   // runs SEON; we did not, so every session was anomalous on the one signal the

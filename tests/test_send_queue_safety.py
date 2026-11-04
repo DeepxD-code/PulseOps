@@ -94,6 +94,53 @@ def test_queue_drain_defers_temporary_and_resolves_human_review(temp_db, monkeyp
     assert temp_db.get_pending_queue_items() == []
 
 
+def test_a_deferral_records_the_reason_it_is_deferring_for(temp_db, monkeypatch):
+    """The stored reason has to describe the latest attempt, not the first one.
+
+    Twenty-four rows deferred by the 09:00-18:00 send window still read
+    "current time 00:05 IST is outside send window" eighteen days later, because
+    the reason was written once at queue time and never refreshed. Read on its
+    own that says the drain is broken; what it actually said was the hour the
+    job happened to be first queued at.
+    """
+    from pulseops_outreach import send_engine as engine
+
+    job_id = _queued_job(temp_db, "NightQueued", 90)
+    assert temp_db.get_pending_queue_items()[0]["reason"] == "G8 test"
+
+    monkeypatch.setattr(
+        engine,
+        "decide_send",
+        lambda **kwargs: {
+            "action": "QUEUE",
+            "reason": "current time 00:05 IST is outside send window 09:00-18:00",
+            "guardrail": "G8",
+        },
+    )
+    engine.process_pending_send_queue({}, run_id="queue-test", limit=1)
+    rows = temp_db.get_pending_queue_items()
+    assert len(rows) == 1
+    assert int(rows[0]["job_id"]) == job_id
+    assert "00:05" in rows[0]["reason"]
+
+    monkeypatch.setattr(
+        engine,
+        "decide_send",
+        lambda **kwargs: {
+            "action": "QUEUE",
+            "reason": "current time 18:00 IST is outside send window 09:00-18:00",
+            "guardrail": "G8",
+        },
+    )
+    engine.process_pending_send_queue({}, run_id="queue-test", limit=1)
+    refreshed = temp_db.get_pending_queue_items()
+    assert "18:00" in refreshed[0]["reason"]
+    assert "00:05" not in refreshed[0]["reason"]
+    # Still pending and still the same job: the refresh must not consume it.
+    assert int(refreshed[0]["job_id"]) == job_id
+    assert temp_db.get_job(job_id)["status"] == "EmailQueued"
+
+
 def test_queue_send_and_transport_uncertainty_are_not_retried(temp_db, monkeypatch):
     from pulseops_outreach import send_engine as engine
 

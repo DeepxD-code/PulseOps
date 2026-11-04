@@ -1389,12 +1389,21 @@ def resolve_stale_processing_queue(timeout_minutes: int = 60) -> int:
         conn.close()
 
 
-def update_queue_status(queue_id: int, status: str) -> None:
+def update_queue_status(queue_id: int, status: str, reason: str | None = None) -> None:
+    """Move a queue row, optionally replacing its recorded reason.
+
+    ``reason`` is what an operator reads when asking "why is this row still
+    pending?". It was written once, at queue time, and never refreshed - so 24
+    rows deferred by the 09:00-18:00 send window still showed "current time
+    00:05 IST is outside send window" eighteen days later, which reads as a
+    queue stuck forever rather than a queue waiting for the window. A deferral
+    now overwrites the reason it is deferring for.
+    """
     conn = get_connection()
     try:
         conn.execute(
-            "UPDATE send_queue SET status=?, processed_at=? WHERE id=?",
-            (status, _now(), queue_id),
+            "UPDATE send_queue SET status=?, processed_at=?, reason=COALESCE(?, reason) WHERE id=?",
+            (status, _now(), reason, queue_id),
         )
         conn.commit()
     except sqlite3.Error as e:

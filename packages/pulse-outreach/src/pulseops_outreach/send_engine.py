@@ -1195,7 +1195,12 @@ def process_pending_send_queue(
             or "auto_send_emails=false" in reason_lower
         )
         if temporary:
-            db.update_queue_status(queue_id, "pending")
+            # Record WHY this attempt deferred, not why the first one did.
+            db.update_queue_status(
+                queue_id,
+                "pending",
+                f"{guardrail}: {reason}".strip(": ").strip()[:300] or reason[:300],
+            )
             if current_status == "Evaluated":
                 db.update_job_status(job_id, "EmailQueued")
             result["deferred"] += 1
