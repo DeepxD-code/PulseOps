@@ -29,6 +29,23 @@ from pulseops_store import db_manager as db
 BOUNCE_SUBJECT_RE = re.compile(r"(delivery status notification|undeliverable|address not found|mail delivery failed|returned mail|bounced|550 5\.1\.1|550 5\.4\.1)", re.IGNORECASE)
 BOUNCE_BODY_RE = re.compile(r"(550 5\.1\.1|address not found|recipient rejected|user unknown|mailbox unavailable|delivery has failed)", re.IGNORECASE)
 
+# The sentence the mailbox writes when a recipient does not exist, e.g. Google's
+# "Your message wasn't delivered to hiring@anthropic.com because the address
+# couldn't be found". Reading this phrase names one address unambiguously,
+# unlike "the first email in the body" - which also finds the help links and
+# the sender's own address.
+BOUNCE_RECIPIENT_RES = (
+    re.compile(r"(?:wasn'?t|was not|has not been|could not be|couldn'?t be)\s+delivered\s+to\s+([\w.+-]+@[\w.-]+)", re.I),
+    re.compile(r"delivery\s+to\s+(?:the\s+following\s+recipients?\s+)?(?:failed|permanently failed)[^@]{0,40}?([\w.+-]+@[\w.-]+)", re.I),
+    re.compile(r"your\s+message\s+to\s+([\w.+-]+@[\w.-]+)", re.I),
+)
+
+# One or more dot-separated labels. The old pattern required TWO labels after
+# the @, so an ordinary address (hiring@anthropic.com) was invisible: 75 real
+# bounces sat in the inbox unrecognised while the follow-up engine kept
+# re-sending to mailboxes Gmail had already refused.
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
 PLATFORM_SENDERS = {
     "naukri": ["naukri.com", "naukri@naukri.com", "do-not-reply@naukri.com"],
     "indeed": ["indeed.com", "no-reply@indeed.com", "indeedapply@indeed.com"],
@@ -67,20 +84,59 @@ def _snippet(msg: email.message.Message, n=800) -> str:
             txt = payload.decode("utf-8", errors="ignore")[:n]
     return " ".join(txt.split())
 
+def _is_own_or_agent_address(address: str) -> bool:
+    low = (address or "").lower()
+    if not low:
+        return True
+    own = {v.lower() for v in (os.getenv("SMTP_EMAIL"), os.getenv("IMAP_EMAIL")) if v}
+    if low in own:
+        return True
+    return any(marker in low for marker in ("mailer-daemon", "googlemail.com", "google.com"))
+
+
+def _dsn_recipients(msg: email.message.Message | None) -> list[str]:
+    """Read Final-Recipient / Original-Recipient out of a DSN report part."""
+    if msg is None:
+        return []
+    found: list[str] = []
+    try:
+        parts = msg.walk() if msg.is_multipart() else [msg]
+    except Exception:
+        return []
+    for part in parts:
+        if part.get_content_type() != "message/delivery-status":
+            continue
+        payload = part.get_payload()
+        chunks = payload if isinstance(payload, list) else [payload]
+        for chunk in chunks:
+            text = chunk.as_string() if hasattr(chunk, "as_string") else str(chunk)
+            for match in re.finditer(r"(?:Final|Original)-Recipient:\s*rfc822;\s*<?([^>\s;]+)", text, re.I):
+                found.append(match.group(1))
+    return found
+
+
 def _extract_bounced_email(subject: str, body: str, original_msg: email.message.Message | None = None) -> str | None:
-    # Try to find the bounced recipient in DSN
-    for pattern in [r"Original-Recipient:\s*rfc822;([^\s]+)", r"Final-Recipient:\s*rfc822;([^\s]+)", r"Recipient: ([^\s]+@[^\s]+)"]:
-        m = re.search(pattern, body, re.IGNORECASE)
-        if m:
-            return m.group(1).strip(";<>")
-    # Fallback: extract first email in body after bounce marker
-    if BOUNCE_BODY_RE.search(body) or BOUNCE_SUBJECT_RE.search(subject):
-        emails = re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+\.[a-z]{2,}", body, re.IGNORECASE)
-        # filter out our own
-        own = (os.getenv("SMTP_EMAIL") or os.getenv("IMAP_EMAIL") or "").lower()
-        for e in emails:
-            if own not in e.lower() and "mailer-daemon" not in e.lower():
-                return e
+    # 1. The report part is the machine-readable truth when the mailbox
+    #    includes one.
+    for candidate in _dsn_recipients(original_msg):
+        if not _is_own_or_agent_address(candidate):
+            return candidate.strip(";<>")
+    # 2. The sentence the mailbox wrote. Names one address, no guessing.
+    for pattern in BOUNCE_RECIPIENT_RES:
+        for match in pattern.finditer(body or ""):
+            if not _is_own_or_agent_address(match.group(1)):
+                return match.group(1).strip(";<>")
+    # 3. Anything quoted as the failed recipient.
+    for pattern in (r"Original-Recipient:\s*rfc822;([^\s]+)", r"Final-Recipient:\s*rfc822;([^\s]+)", r"Recipient:\s*([^\s]+@[^\s]+)"):
+        match = re.search(pattern, body or "", re.IGNORECASE)
+        if match and not _is_own_or_agent_address(match.group(1)):
+            return match.group(1).strip(";<>")
+    # 4. Last resort: the first address in a message already known to be a
+    #    bounce. Only reached when the phrasing above changed.
+    if BOUNCE_BODY_RE.search(body or "") or BOUNCE_SUBJECT_RE.search(subject or ""):
+        for candidate in EMAIL_RE.findall(body or ""):
+            if not _is_own_or_agent_address(candidate):
+                return candidate
     return None
 
 def _detect_platform(from_addr: str, subject: str) -> str | None:
@@ -90,6 +146,22 @@ def _detect_platform(from_addr: str, subject: str) -> str | None:
             if s.lower() in low:
                 return platform
     return None
+
+def _is_transient_delay(subject: str, body: str) -> bool:
+    """True for "delayed, we will keep trying" mail, which is not a bounce.
+
+    Gmail files both a delay and a permanent failure under the same
+    "Delivery Status Notification" subject, so the search cannot tell them
+    apart. A delay means the server is still retrying; condemning the mailbox
+    on one would suppress an address that works.
+    """
+    text = f"{subject or ''} {body or ''}".lower()
+    if re.search(r"\b(?:failure|failed permanently|address not found|does not exist|user unknown)\b", text):
+        return False
+    if re.search(r"\bdelay(?:ed)?\b", text) and re.search(r"retry|will (?:keep|continue) trying|still trying|temporar", text):
+        return True
+    return "delivery status notification (delay)" in text
+
 
 def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
     imap_host = os.getenv("IMAP_HOST", "imap.gmail.com")
@@ -107,7 +179,15 @@ def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
         print(f"[watcher] IMAP login failed: {e}")
         return {"error": str(e)}
 
-    stats = {"bounces_fixed": 0, "platform_jobs_ingested": 0, "bounces": [], "platform_jobs": []}
+    stats = {
+        "bounces_fixed": 0,
+        "bounces_seen": 0,
+        "bounces_transient": 0,
+        "bounces_unmatched": [],
+        "platform_jobs_ingested": 0,
+        "bounces": [],
+        "platform_jobs": [],
+    }
     try:
         for folder in ["INBOX"]:
             try:
@@ -127,26 +207,51 @@ def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
                         msg = email.message_from_bytes(msg_data[0][1])
                         subject = _decode(msg.get("Subject", ""))
                         body = _snippet(msg, 1500)
+                        # A DELAY is not a bounce. Gmail sends the same
+                        # "Delivery Status Notification" subject for "your
+                        # message is delayed, we will keep trying", and the
+                        # search matches both. Marking a mailbox dead on a delay
+                        # would kill a perfectly good address, so only a
+                        # permanent failure gets to condemn one.
+                        if _is_transient_delay(subject, body):
+                            stats["bounces_transient"] += 1
+                            continue
                         bounced = _extract_bounced_email(subject, body, msg)
                         if not bounced:
                             continue
-                        # Check if we sent to this address
-                        recent = db.get_recent_outreach(days=30)
-                        match = next((r for r in recent if r.get("contact_email","").lower() == bounced.lower()), None)
-                        if not match:
+                        stats["bounces_seen"] += 1
+                        # The address is the identifier, not the send date. This
+                        # used to match only outreach from the last 30 days, so
+                        # mail sent in September and bounced in November matched
+                        # nothing: 75 bounces were sitting in the inbox while
+                        # this loop reported "bounces_fixed 0", the domain was
+                        # never paused, and the follow-up engine kept re-sending
+                        # to mailboxes Gmail had already refused.
+                        matches = db.get_outreach_by_contact_email(bounced)
+                        if not matches:
+                            # Still a real bounce - we may simply have no row for
+                            # it (an unsubscribe reply, a stale manual send). Say
+                            # so instead of counting it as nothing.
+                            stats["bounces_unmatched"].append(bounced)
+                            print(f"[bounce] {bounced} — no outreach row for this address; not marked")
                             continue
-                        print(f"[bounce] {bounced} from {match.get('company')} — {subject[:80]}")
+                        print(f"[bounce] {bounced} from {matches[0].get('company')} — {subject[:80]}")
                         stats["bounces"].append(bounced)
-                        if not dry_run:
-                            try:
-                                db.mark_outreach_bounced(match["id"], bounced)
-                                db.update_job_status(match["job_id"], "Bounced")
-                                # G9 will pause domain next run via bounce count
-                                stats["bounces_fixed"] += 1
-                            except Exception as e:
-                                print(f"  [bounce fix failed] {e}")
-                        else:
+                        if dry_run:
                             stats["bounces_fixed"] += 1
+                            continue
+                        try:
+                            # One dead mailbox means every message to it failed,
+                            # so mark them all - that is what removes them from
+                            # the follow-up and send-queue candidate sets.
+                            changed = db.mark_address_bounced(bounced)
+                            for row in matches:
+                                if row.get("job_id"):
+                                    db.update_job_status(row["job_id"], "Bounced")
+                            # G9 pauses the domain from the bounce count.
+                            stats["bounces_fixed"] += changed
+                        except Exception as e:
+                            print(f"  [bounce fix failed] {e}")
                 except Exception as e:
                     print(f"[watcher] bounce search {keyword} failed: {e}")
 
@@ -193,7 +298,13 @@ def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
                     except Exception as e:
                         print(f"[watcher] platform {platform} failed: {e}")
 
-        print(f"[watcher] done — bounces_fixed {stats['bounces_fixed']}, platform_jobs {stats['platform_jobs_ingested']}")
+        print(
+            f"[watcher] done — {stats['bounces_fixed']} row(s) marked bounced from "
+            f"{stats['bounces_seen']} bounce message(s), "
+            f"{stats['bounces_transient']} transient delay(s) ignored, "
+            f"{len(stats['bounces_unmatched'])} address(es) with no outreach row, "
+            f"platform_jobs {stats['platform_jobs_ingested']}"
+        )
         return stats
     finally:
         try:

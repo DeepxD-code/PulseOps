@@ -366,13 +366,15 @@ def _check_g8_send_window(start_str: str, end_str: str, tz_name: str) -> None:
 
 
 def _check_g9_bounce(domain: str) -> None:
-    recent   = db.get_recent_outreach(days=30)
-    bounces  = sum(1 for r in recent if r.get("domain") == domain
-                   and r.get("status") == "bounced")
+    # Distinct dead mailboxes on the domain, however long ago we wrote to them.
+    # The old version counted bounce ROWS among the last 30 days of outreach,
+    # and a bounce marks the row it condemns - so a mailbox that failed two
+    # months ago was invisible here the moment the mailbox was retried.
+    bounces = db.count_bounced_addresses_for_domain(domain)
     threshold = 2
     if bounces >= threshold:
         raise BounceThresholdReachedError(
-            f"G9: domain '{domain}' has {bounces} bounces (threshold {threshold}) — paused"
+            f"G9: domain '{domain}' has {bounces} bounced addresses (threshold {threshold}) — paused"
         )
 
 

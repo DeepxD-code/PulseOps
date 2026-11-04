@@ -1516,6 +1516,122 @@ def mark_outreach_bounced(outreach_id: int, bounced_email: str) -> None:
         conn.close()
 
 
+def get_outreach_by_contact_email(email: str) -> list[dict]:
+    """Every outreach row ever sent to one address.
+
+    Deliberately not windowed by date. A bounce names the mailbox that does not
+    exist, and that is true of the mailbox however long ago we wrote to it -
+    matching only the last 30 days of outreach is what made 75 real bounces
+    report as ``bounces_fixed 0``: the mail that bounced was sent in September
+    and read again in November.
+    """
+    address = (email or "").strip().lower()
+    if "@" not in address:
+        return []
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT o.*, j.title AS job_title FROM outreach o "
+            "LEFT JOIN jobs j ON j.id = o.job_id "
+            "WHERE lower(o.contact_email)=? ORDER BY o.sent_at DESC",
+            (address,),
+        ).fetchall()
+        return _rows(rows)
+    except sqlite3.Error as e:
+        print(f"  [DB Error] get_outreach_by_contact_email: {e}")
+        raise DatabaseError(f"get_outreach_by_contact_email failed: {e}") from e
+    finally:
+        conn.close()
+
+
+def mark_address_bounced(bounced_email: str) -> int:
+    """Mark every outreach row to a dead address as bounced; return the count.
+
+    One mailbox is one mailbox: if the address does not exist, then every
+    message sent to it failed, not only the one whose bounce we happened to
+    read. Marking them all is both truthful and what stops the retries - the
+    send queue and the follow-up engine both select ``status='sent'``, so a
+    bounced row is never written to again.
+    """
+    address = (bounced_email or "").strip().lower()
+    if "@" not in address:
+        return 0
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "UPDATE outreach SET status='bounced', notes=? "
+            "WHERE lower(contact_email)=? AND status!='bounced'",
+            (f"bounced: {address}", address),
+        )
+        changed = cur.rowcount or 0
+        if changed:
+            conn.execute(
+                "UPDATE domain_contacts SET bounce_count=bounce_count+1 WHERE lower(domain)=?",
+                (address.rsplit("@", 1)[-1],),
+            )
+        conn.commit()
+        return changed
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"  [DB Error] mark_address_bounced: {e}")
+        raise DatabaseError(f"mark_address_bounced failed: {e}") from e
+    finally:
+        conn.close()
+
+
+def count_bounced_addresses_for_domain(domain: str) -> int:
+    """How many distinct mailboxes on this domain have bounced.
+
+    Distinct addresses, not rows: four messages to hiring@anthropic.com is one
+    dead mailbox, not four, and counting rows would let a single bad guess pause
+    an entire domain. Deliberately not windowed by date either - the outreach
+    row carries the send date, which can be weeks older than the bounce that
+    condemned it, so a date filter here reads a fresh bounce as history.
+    """
+    target = (domain or "").strip().lower()
+    if not target:
+        return 0
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT lower(contact_email)) FROM outreach "
+            "WHERE status='bounced' AND ("
+            "  lower(domain)=? OR lower(substr(contact_email, instr(contact_email,'@')+1))=?"
+            ")",
+            (target, target),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except sqlite3.Error as e:
+        print(f"  [DB Error] count_bounced_addresses_for_domain: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_followup_count_today() -> int:
+    """Follow-ups already sent today.
+
+    G7 counted only new outreach rows, and a follow-up does not create one - it
+    stamps ``followup_sent_at`` on the existing row. So the daily cap could
+    never trip on follow-ups: nine went out in ninety minutes against a cap of
+    five, spaced only by MIN_SEND_GAP. The cap has to count both kinds of send.
+    """
+    conn = get_connection()
+    try:
+        today = datetime.now().date().isoformat()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM outreach WHERE followup_sent_at IS NOT NULL "
+            "AND date(followup_sent_at) = date(?)",
+            (today,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except sqlite3.Error as e:
+        print(f"  [DB Error] get_followup_count_today: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
 def get_stale_queue_items(days: int = 3) -> list[dict]:
     conn = get_connection()
     try:

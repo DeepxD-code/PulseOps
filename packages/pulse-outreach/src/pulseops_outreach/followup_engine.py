@@ -146,18 +146,15 @@ def _is_blacklisted(company: str, domain: str, settings: dict) -> bool:
 
 
 def _is_domain_bounce_paused(domain: str) -> bool:
-    """
-    Reads recent outreach for bounce markers.
-    bounce_pause_threshold from settings defaults to 2.
-    If a real bounce-detection system marks status='bounced', check count.
+    """True when two or more distinct mailboxes on the domain have bounced.
+
+    Same rule as G9 in the send engine: distinct dead addresses, counted over
+    all history rather than the last 30 days of outreach, because the bounce
+    marks the outreach row it condemns and that row can be far older than the
+    bounce itself.
     """
     try:
-        recent = db.get_recent_outreach(days=30)
-        bounces = sum(
-            1 for r in recent
-            if r.get("domain") == domain and r.get("status") == "bounced"
-        )
-        return bounces >= 2
+        return db.count_bounced_addresses_for_domain(domain) >= 2
     except Exception as exc:
         print(f"  [Follow-up] bounce state unreadable — treating domain as paused ({exc}).")
         return True
@@ -293,8 +290,10 @@ def process_followups(
             audit_log.write_followup(run_id, company, job_title, "SKIP", "G3: blacklisted")
             continue
 
-        # G7 daily cap
-        if not simulate and db.get_outreach_count_today() >= daily_cap:
+        # G7 daily cap. Follow-ups count: they are real mail from the same
+        # mailbox, and counting only new outreach rows let nine go out in ninety
+        # minutes against a cap of five.
+        if not simulate and (db.get_outreach_count_today() + db.get_followup_count_today()) >= daily_cap:
             print(f"  [Skip] Follow-up for {company}: daily cap reached")
             raise DailyCapReachedError("Follow-up: daily cap reached")
 
