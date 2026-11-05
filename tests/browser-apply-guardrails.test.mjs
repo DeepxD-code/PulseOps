@@ -614,6 +614,51 @@ test("YC rows carry the real startup, not the board's own name", async () => {
   assert.deepEqual(scan.mapYCJobs(null, "YC"), []);
 });
 
+test("Hirist rows carry the employer and a clean title", async () => {
+  const scan = await import("../apps/weekly-scan/scan.mjs");
+  // The card is one anchor containing every field with no separator, so reading
+  // the anchor's text glued the experience band onto the title ("AI Agent
+  // Platform7") and the skill tags after it. Twelve of thirty-two recent rows
+  // were wrong that way, and nine more had the job title in the company column.
+  const rows = scan.mapHiristCards([
+    {
+      link: "https://www.hirist.tech/j/healthifyme-senior-backend-engineer-python-1682114",
+      heading: "HealthifyMe - Senior Backend Engineer - Python",
+      experience: "4 - 6 yrs",
+      location: "Multiple Locations",
+      tags: ["Python", "Django", "FastAPI"],
+      card_text: "HealthifyMe - Senior Backend Engineer - Python4 - 6 yrsMultiple LocationsPythonDjangoFastAPIPosted today",
+    },
+    {
+      // A confidential posting: the heading is the role alone. Filing its first
+      // segment as the company is what put "Software Engineer" and "Technical
+      // Lead" in the employer column, where they could never match a receipt.
+      link: "https://www.hirist.tech/j/senior-software-development-engineer-ai-agent-platform-1678230",
+      heading: "Senior Software Development Engineer - AI Agent Platform",
+      experience: "7 - 12 yrs",
+      location: "Bangalore",
+      tags: [],
+      card_text: "Senior Software Development Engineer - AI Agent Platform7 - 12 yrsBangalore",
+    },
+  ], "Hirist (Backend Development)");
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].company, "HealthifyMe");
+  assert.equal(rows[0].title, "Senior Backend Engineer - Python");
+  // The experience band must not survive into the title.
+  assert.doesNotMatch(rows[0].title, /4 - 6|yrs/i);
+  assert.equal(rows[0].location_raw, "Multiple Locations");
+  assert.match(rows[0].description, /Experience: 4 - 6 yrs/);
+  assert.match(rows[0].description, /Skills: Python, Django, FastAPI/);
+
+  assert.equal(rows[1].company, "Unknown");
+  // Nothing is thrown away when there is no employer: the whole heading is the
+  // role, including its "- AI Agent Platform" half.
+  assert.equal(rows[1].title, "Senior Software Development Engineer - AI Agent Platform");
+  assert.deepEqual(scan.mapHiristCards(null, "Hirist"), []);
+  assert.deepEqual(scan.mapHiristCards([{ heading: "Too short" }], "Hirist"), []);
+});
+
 test("the board's own fingerprint vendor is reachable, by hashed subdomain", () => {
   // Enabled on the operator's instruction. A real browser loading an Ashby board
   // runs SEON; we did not, so every session was anomalous on the one signal the

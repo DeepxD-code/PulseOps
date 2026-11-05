@@ -1030,11 +1030,12 @@ async function scrapeHirist(page, portal) {
     await page.waitForTimeout(1400);
   }
 
-  return page.$$eval(
+  const cards = await page.$$eval(
     "a[href*='/j/']",
-    (nodes, sourceName) => {
+    (nodes) => {
       const out = [];
       const seen = new Set();
+      const text = (el) => (el ? (el.textContent || "").replace(/\s+/g, " ").trim() : "");
       for (const a of nodes) {
         const raw = a.getAttribute("href") || "";
         // /j/<company>-<title>-<numeric id>?ref=...&jobPos=N
@@ -1042,30 +1043,76 @@ async function scrapeHirist(page, portal) {
         const url = new URL(raw, location.origin);
         url.search = "";
         if (seen.has(url.href)) continue;
-
-        // The card reads "Vedantu Innovations - Product Engineer - Java2 - 5 yrs
-        // BangaloreJavaSpring..." - company first, then the role, then
-        // experience/location/skills glued on. Split on the first separators
-        // rather than trusting the slug, whose company segment has no reliable
-        // boundary ("vedantu-innovations-product-engineer-java").
-        const raw_text = (a.textContent || "").replace(/\s+/g, " ").trim();
-        const parts = raw_text.split(/\s+[-–]\s+/);
-        const company = (parts[0] || "").trim();
-        const title = (parts[1] || "").trim();
-        if (title.length < 4) continue;
-
         seen.add(url.href);
         out.push({
-          title: title.slice(0, 118),
-          company: company || "Unknown",
           link: url.href,
-          description: `Location/experience/skills: ${raw_text.slice(company.length + title.length + 4, 260).trim()}. Source: ${sourceName}.`,
+          // The card's own heading element, not the anchor's whole text. The
+          // anchor text is every field flattened together with no separator -
+          // "... Product Engineer - Java2 - 5 yrs BangaloreJavaSpring..." - so
+          // the experience band and the skill tags glued onto the title.
+          heading: text(a.querySelector('[data-testid="job_title"]')),
+          experience: text(a.querySelector('[data-testid="job_experience"]')),
+          location: text(a.querySelector('[data-testid="job_location"]')),
+          tags: [...a.querySelectorAll('[data-testid^="job_tag_"]')].map(text).filter(Boolean),
+          card_text: (a.textContent || "").replace(/\s+/g, " ").trim(),
         });
       }
       return out.slice(0, 40);
     },
-    portal.name,
   );
+  return mapHiristCards(cards, portal.name);
+}
+
+// Role nouns that can never be an employer's name. Used only to answer "is
+// this segment a company, or is the card anonymous?" - deliberately noun forms
+// only ("engineer", not "engineering"), because plenty of companies are called
+// something Engineering.
+const HIRIST_ROLE_WORDS = /\b(engineer|developer|manager|analyst|architect|consultant|specialist|designer|scientist|programmer|intern|trainee|executive|officer|administrator|tester|lead|associate)\b/i;
+
+/**
+ * Turn Hirist listing cards into scan rows.
+ *
+ * Kept out of scrapeHirist so it can be tested without a browser, because both
+ * ways this went wrong were silent: the title carried the experience band and
+ * the skill tags ("AI Agent Platform7"), and when a card had no company segment
+ * the company column took the job title ("Software Engineer"), so those rows
+ * could never match an application receipt - the only proof a submission
+ * landed.
+ *
+ * The heading is "<company> - <title>" ("HealthifyMe - Senior Backend Engineer
+ * - Python"). The company is the first segment ONLY when that segment is not
+ * itself a role; a confidential posting renders as a bare "Java Developer -
+ * Spring Boot", and there the honest answer is Unknown, not a second copy of
+ * the role in the company field.
+ */
+function mapHiristCards(cards, sourceName) {
+  if (!Array.isArray(cards)) return [];
+  const rows = [];
+  for (const card of cards) {
+    if (!card || !card.link) continue;
+    const heading = String(card.heading || "").replace(/\s+/g, " ").trim();
+    const segments = heading.split(/\s+[-\u2013\u2014]\s+/);
+    const first = (segments[0] || "").trim();
+    const hasCompany = segments.length > 1 && first.length > 1 && !HIRIST_ROLE_WORDS.test(first);
+    const company = hasCompany ? first : "Unknown";
+    // Without a company the whole heading is the role, so it is kept intact
+    // rather than losing its first segment.
+    const title = (hasCompany ? segments.slice(1).join(" - ") : heading).trim();
+    if (title.length < 4) continue;
+    rows.push({
+      title: title.slice(0, 118),
+      company,
+      link: String(card.link),
+      location_raw: String(card.location || "").trim().slice(0, 60),
+      description: [
+        card.experience ? `Experience: ${card.experience}.` : "",
+        card.location ? `Location: ${card.location}.` : "",
+        Array.isArray(card.tags) && card.tags.length ? `Skills: ${card.tags.join(", ")}.` : "",
+        `Source: ${sourceName}.`,
+      ].filter(Boolean).join(" ").slice(0, 400),
+    });
+  }
+  return rows.slice(0, 40);
 }
 
 async function scrapeJobHai(page, portal) {
@@ -1766,6 +1813,7 @@ async function main() {
 export {
   main,
   mapYCJobs,
+  mapHiristCards,
   validateJobLink,
   validateJobUrl,
   isValidJobLink,
