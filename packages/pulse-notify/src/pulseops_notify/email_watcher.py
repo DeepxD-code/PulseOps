@@ -194,15 +194,32 @@ def run_watcher(dry_run: bool = False, limit_per_folder: int = 20) -> dict:
                 mail.select(folder)
             except Exception:
                 continue
-            # 1. Bounces: search recent 7 days, subject contains bounce keywords
+            # 1. Bounces: every match in the last 30 days, by UID.
+            #
+            # This used to take only the LAST `limit_per_folder` (20) messages
+            # per keyword, in sequence order, with no date bound. Once the inbox
+            # held more than 20 bounces, the older ones were never looked at
+            # again, and the addresses they condemn stayed status='sent' - still
+            # eligible for the follow-up engine and the send queue. Measured
+            # 2026-11-05: 77 bounce messages in the inbox, and 11 addresses that
+            # had already refused mail were still marked 'sent'.
+            #
+            # UIDs, not sequence numbers: mail arrives during the scan and every
+            # arrival shifts positional numbers, so a FETCH can read a different
+            # message than the one that was searched for.
+            bounce_since = (datetime.now() - timedelta(days=30)).strftime("%d-%b-%Y")
+            seen_uids: set[bytes] = set()
             for keyword in ['"Delivery Status Notification"', '"Undeliverable"', '"Address not found"', '"Returned mail"', '"Mail Delivery Failed"']:
                 try:
-                    status, data = mail.search(None, f'SUBJECT {keyword}')
+                    status, data = mail.uid("SEARCH", None, "SINCE", bounce_since, "SUBJECT", keyword)
                     if status != "OK" or not data or not data[0]:
                         continue
-                    for msg_id in data[0].split()[-limit_per_folder:]:
-                        status, msg_data = mail.fetch(msg_id, "(RFC822)")
-                        if status != "OK":
+                    for msg_id in data[0].split():
+                        if msg_id in seen_uids:
+                            continue
+                        seen_uids.add(msg_id)
+                        status, msg_data = mail.uid("FETCH", msg_id, "(RFC822)")
+                        if status != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                             continue
                         msg = email.message_from_bytes(msg_data[0][1])
                         subject = _decode(msg.get("Subject", ""))

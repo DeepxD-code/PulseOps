@@ -36,6 +36,7 @@ import sqlite3
 import ssl
 import sys
 from contextlib import closing
+from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 from pathlib import Path
 
@@ -68,6 +69,31 @@ RECEIPT_RE = re.compile(
     re.I,
 )
 
+# The subject searches, one per phrase. Kept next to RECEIPT_RE so the two lists
+# cannot drift apart - a phrase recognised here but never searched for is a
+# receipt that can never be found.
+RECEIPT_PHRASES = (
+    "successfully submitted",
+    "application submitted",
+    "application received",
+    "application successful",
+    "thanks for applying",
+    "thank you for applying",
+    "received your application",
+    "your application to",
+    "applied successfully",
+    "application sent",
+)
+
+# A one-time code proves the board asked "are you human?", not that it accepted
+# anything. Greenhouse's "Security code for your application to Scale AI" reads
+# exactly like a receipt to RECEIPT_RE.
+RECEIPT_EXCLUDE_RE = re.compile(
+    r"security code|verification code|one[- ]time (?:code|password)|passcode"
+    r"|\botp\b|verify your (?:email|address)|confirm your email",
+    re.I,
+)
+
 COMPANY_NOISE = re.compile(
     r"\b(?:pvt|private|ltd|limited|inc|llc|corp|corporation|technologies|technology|tech|"
     r"labs|systems|solutions|software|india|global|group|company|the)\b",
@@ -79,6 +105,23 @@ def normalise(text: str) -> str:
     text = re.sub(r"\(.*?\)", " ", text or "")
     text = COMPANY_NOISE.sub(" ", text)
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def receipt_subject(subject: str) -> str | None:
+    """Return the flattened subject when it is an application receipt.
+
+    Returns None for anything that is not evidence the board accepted an
+    application: a folded subject is joined first, so a long line break cannot
+    hide the phrase being matched, and one-time codes are rejected outright.
+    """
+    flat = re.sub(r"\s+", " ", subject or "").strip()
+    if not flat:
+        return None
+    if RECEIPT_EXCLUDE_RE.search(flat):
+        return None
+    if not RECEIPT_RE.search(flat):
+        return None
+    return flat
 
 
 def mail_receipts(days: int) -> list[tuple[str, str]]:
@@ -96,32 +139,65 @@ def mail_receipts(days: int) -> list[tuple[str, str]]:
         # Ask Gmail for only the receipt-shaped subjects instead of pulling
         # headers for the whole inbox: 1500 round-trips dropped the TLS socket
         # mid-scan (imaplib.abort: EOF occurred in violation of protocol).
+        #
+        # One search per phrase, unioned, rather than one nested OR. Gmail's
+        # extended search treats the quotes inside ``subject:("a" OR "b")``
+        # inconsistently and the whole query came back with 16 messages while the
+        # individual phrases matched 73 - including the Wellfound receipts this
+        # script exists to read. Also bounded by --days, so a receipt from last
+        # year cannot vouch for a row that is stuck now.
+        #
+        # UIDs, not sequence numbers. Sequence numbers are positional: this
+        # inbox receives mail throughout a scan, and every arrival shifts them,
+        # so the FETCH that was meant for one receipt read a different message.
+        # That is how the Artha Labs acceptance silently went missing while the
+        # row it proves was queued for a second application.
         ids: list[bytes] = []
+        misses = 0
         try:
-            raw = ('subject:("successfully submitted" OR "application submitted" OR '
-                   '"application received" OR "application successful" OR '
-                   '"thanks for applying" OR "thank you for applying" OR '
-                   '"received your application" OR "your application to" OR '
-                   '"applied successfully" OR "application sent")')
-            typ, data = conn.search(None, "X-GM-RAW", f'"{raw}"')
-            ids = data[0].split() if data and data[0] else []
+            since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+            seen_ids: set[bytes] = set()
+            for phrase in RECEIPT_PHRASES:
+                typ, data = conn.uid("SEARCH", None, "SINCE", since, "SUBJECT", f'"{phrase}"')
+                for num in (data[0].split() if data and data[0] else []):
+                    if num not in seen_ids:
+                        seen_ids.add(num)
+                        ids.append(num)
         except imaplib.IMAP4.error:
             # Not Gmail-backed: fall back to a ranged header scan.
-            typ, data = conn.search(None, "ALL")
+            typ, data = conn.uid("SEARCH", None, "ALL")
             ids = (data[0].split() if data and data[0] else [])[::-1][:600]
 
         for num in ids[::-1]:
-            typ, chunk = conn.fetch(num, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
-            if not chunk or not isinstance(chunk[0], tuple):
+            # One retry, and a visible count when it still fails: a refused
+            # FETCH used to be skipped in silence, which looks exactly like
+            # "no receipt".
+            chunk = None
+            for _ in range(2):
+                typ, got = conn.uid("FETCH", num, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+                if got and isinstance(got[0], tuple):
+                    chunk = got
+                    break
+            if chunk is None:
+                misses += 1
                 continue
             msg = email.message_from_bytes(chunk[0][1])
             try:
                 subject = str(make_header(decode_header(msg.get("Subject") or "")))
             except Exception:
                 subject = str(msg.get("Subject") or "")
-            sender = header(msg.get("From")).lower()
-            if RECEIPT_RE.search(subject):
-                out.append((sender, subject))
+            # A long subject arrives folded, with a line break in the middle of
+            # a phrase: "Application to Artha Labs (part of Attention Tag)
+            # successfully\n submitted" does not contain the string
+            # "successfully submitted", so RECEIPT_RE said no and a real
+            # acceptance was read as "no receipt". Whitespace is flattened
+            # before anything is matched.
+            flat = receipt_subject(subject)
+            if not flat:
+                continue
+            out.append((header(msg.get("From")).lower(), flat))
+        if misses:
+            print(f"  [warn] {misses} message(s) could not be read - receipts may be missing")
     return out
 
 
@@ -156,7 +232,10 @@ def main() -> int:
         if len(key) < 3:
             unmatched.append((job_id, status, source, company))
             continue
-        hit = any(key in text for text in receipt_text)
+        # Whole-word, not substring: "Astra" must not be proven by a receipt for
+        # "Astralis", and "Brave" must not be proven by "Bravewave".
+        pattern = re.compile(rf"\b{re.escape(key)}\b")
+        hit = any(pattern.search(text) for text in receipt_text)
         (keep if hit else reopen).append((job_id, status, source, company))
 
     print(f"\n  stuck rows          : {len(rows)}")
