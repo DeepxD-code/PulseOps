@@ -1645,6 +1645,21 @@ function splitCandidateName(raw) {
   return { first: tokens[0], last: tokens[tokens.length - 1] };
 }
 
+// Where the application actually came from is a property of the row, not of the
+// candidate, so it is read from the row's own source. Naming the board is a
+// true statement; a made-up referral would not be.
+function heardFromBoard(row) {
+  const where = `${row?.source || ""} ${row?.link || ""}`.toLowerCase();
+  if (/linkedin/.test(where)) return "LinkedIn";
+  if (/wellfound/.test(where)) return "Wellfound";
+  if (/hirist/.test(where)) return "Hirist";
+  if (/instahyre/.test(where)) return "Instahyre";
+  if (/naukri/.test(where)) return "Naukri";
+  if (/glassdoor/.test(where)) return "Glassdoor";
+  if (/indeed/.test(where)) return "Indeed";
+  return "Job board";
+}
+
 function identityFacts(candidate, stated, job = null) {
   const spec = [
     {
@@ -1825,7 +1840,7 @@ function identityFacts(candidate, stated, job = null) {
       // phone country code or a "Country of dialling code" control, and writing
       // "India" into a dialling-code box is worse than leaving it.
       tag: "country",
-      hint: /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)\s*[:*\-]?\s*$/i,
+      hint: /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)(?:\s+(?:country|nation))*\s*[:*\-]?\s*$/i,
       value: candidate?.country,
     },
     {
@@ -1917,10 +1932,13 @@ function identityFacts(candidate, stated, job = null) {
     {
       tag: "how you heard",
       // A factual account of where the application came from. The truthful
-      // answer is the board itself; claiming a referral or a recruiter would be
-      // a false statement to the employer.
+      // answer is the board the row was found on, and the board is a fact in
+      // the row - not a guess. "This job board" was the old hardcoded value and
+      // Greenhouse's <select> offers "LinkedIn" but not that phrase, so the
+      // question stayed empty and blocked a form that was otherwise complete.
       hint: /how\s+did\s+you\s+hear\s+about|how\s+you\s+(?:heard|found)\s+(?:about|this)|where\s+did\s+you\s+(?:hear|find)\s+(?:about|this)/i,
-      value: stated?.how_you_heard || "This job board",
+      value: stated?.how_you_heard || heardFromBoard(job),
+      fallbackLabels: ["Job board", "Job Board", "Other"],
     },
     {
       tag: "notice period",
@@ -2308,6 +2326,217 @@ function findResumePdf(company, title, dbPdfPath = "") {
   return null;
 }
 
+// ── Resume vs CV ────────────────────────────────────────────────────────────
+//
+// The operator's rule:
+//
+//   "if board asks for a resume --> then build it from the cv, ats tailor to
+//    the jd and the platform then verify it then upload it, if it asks for a
+//    cv then send the cv as is"
+//
+// So the upload control's own label decides which FILE is sent. A form asking
+// for a resume is answering a role-specific question and gets a resume built
+// from cv.md for this job description; a form asking for a CV is asking for the
+// candidate's own document and gets it byte for byte. Guessing from the
+// platform instead would get both wrong: Greenhouse hosts both wordings, and
+// so does every other board.
+
+/**
+ * The candidate's own CV, untouched.
+ *
+ * It is NOT cv.md and it is NOT output/resume.pdf: it is the file the operator
+ * maintains and updates, so it is resolved once and reported when missing
+ * rather than silently substituted. Order: an explicit override, then the
+ * profile, then the maintained location, then the repo's own render of cv.md.
+ */
+function findCanonicalCv(profile = null) {
+  const home = process.env.USERPROFILE || process.env.HOME || "";
+  const stated = [
+    process.env.PULSEOPS_CV_PDF,
+    profile?.candidate?.cv_pdf,
+    profile?.candidate?.canonical_cv,
+  ].map((v) => String(v || "").trim()).filter(Boolean);
+  const defaults = [
+    home ? path.join(home, "Documents", "Job stuff", "Avradeep-Majumder-cv.pdf") : "",
+    path.join(ROOT, "output", "Avradeep-Majumder-cv.pdf"),
+  ].filter(Boolean);
+  for (const raw of [...stated, ...defaults]) {
+    const p = path.isAbsolute(raw) ? raw : path.resolve(ROOT, raw);
+    try { if (fs.existsSync(p) && fs.statSync(p).isFile()) return p; } catch {}
+  }
+  return null;
+}
+
+/**
+ * Which document a file-upload control is asking for, from its own label.
+ *
+ * Only an explicit request for a CV sends the canonical CV; everything else is
+ * a resume. "Resume/CV" is the common Greenhouse wording and counts as a
+ * resume request, because it does ask for one and a tailored resume answers
+ * both halves of that label.
+ */
+function decideUploadKind(promptText) {
+  const text = String(promptText || "").toLowerCase().replace(/\s+/g, " ");
+  const asksResume = /\bresume\b|\bresumes\b|\br\u00e9sum\u00e9\b/.test(text);
+  const asksCv = /\bcv\b|\bcurriculum vitae\b|\bc\.v\.?(?=$|[\s,;:])/.test(text);
+  const evidence = String(promptText || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  if (asksResume) return { kind: "resume", evidence, because: "the control asks for a resume" };
+  if (asksCv) return { kind: "cv", evidence, because: "the control asks for a CV" };
+  // An unlabelled upload is treated as a resume: that is the document this
+  // pipeline exists to tailor, and it is still the candidate's own material.
+  return { kind: "resume", evidence, because: "no label named a document, so the role-specific resume is the safer default" };
+}
+
+/**
+ * Read the label of the upload control the page will actually use.
+ *
+ * The prompt usually lives on a wrapping field, a <label for=...>, or a
+ * heading in the upload box - never on the <input type="file"> itself, which
+ * is normally hidden behind a styled button.
+ */
+async function uploadPromptText(page, selectors) {
+  for (const sel of selectors || []) {
+    const input = page.locator(sel).first();
+    if (!(await input.count().catch(() => 0))) continue;
+    const text = await input.evaluate((el) => {
+      const bits = [
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("title") || "",
+        el.getAttribute("name") || "",
+        el.getAttribute("id") || "",
+        el.getAttribute("data-testid") || "",
+        el.getAttribute("accept") || "",
+      ];
+      if (el.id) {
+        const doc = el.ownerDocument;
+        for (const lab of doc.querySelectorAll("label")) {
+          if (lab.getAttribute("for") === el.id) bits.push(lab.textContent || "");
+        }
+      }
+      const wrappingLabel = el.closest("label");
+      if (wrappingLabel) bits.push(wrappingLabel.textContent || "");
+      const box = el.closest(
+        "fieldset, [class*='upload'], [class*='resume'], [class*='cv'], [class*='attach'], "
+        + "[class*='dropzone'], [data-testid*='upload'], [data-testid*='resume']",
+      );
+      if (box) bits.push((box.textContent || "").slice(0, 300));
+      // One level of parent catches a form group whose only prompt is a
+      // sibling heading, without dragging in the whole application.
+      if (!box && el.parentElement?.parentElement) {
+        bits.push((el.parentElement.parentElement.textContent || "").slice(0, 200));
+      }
+      return bits.join(" ").replace(/\s+/g, " ").trim();
+    }).catch(() => "");
+    if (text) return { selector: sel, text };
+  }
+  return { selector: null, text: "" };
+}
+
+/**
+ * A tailored PDF for this job, built from cv.md when none exists or the one on
+ * disk predates the CV the operator last edited.
+ *
+ * The builder is the same one the daily pipeline uses, so "tailored to the JD"
+ * means the stored bullet adjustments and tailored skills for this row, and
+ * "tailored to the platform" means its one-page layout profiles. The script
+ * verifies the output - real PDF, one page, candidate's name and email present
+ * - before reporting a path, so an unverified file is never uploaded.
+ */
+function ensureTailoredPdf(job) {
+  const existing = findResumePdf(job?.company, job?.title, job?.pdf_path);
+  let cvMtime = 0;
+  try { cvMtime = fs.statSync(path.join(ROOT, "cv.md")).mtimeMs; } catch { cvMtime = 0; }
+  // A usable existing resume is one that was rendered for THIS job: either the
+  // path the row itself records, or a file inside output/pdf/<folder>/CV.pdf.
+  // findResumePdf falls back to output/resume.pdf, which could belong to a
+  // different employer - the right thing to do there is build the correct one,
+  // not send a stranger's document.
+  const pdfRoot = path.resolve(ROOT, "output", "pdf").toLowerCase();
+  const recorded = job?.pdf_path ? path.resolve(ROOT, String(job.pdf_path)).toLowerCase() : "";
+  let relevant = false;
+  if (existing) {
+    const abs = path.resolve(existing).toLowerCase();
+    relevant = abs === recorded || path.dirname(path.dirname(abs)) === pdfRoot;
+  }
+  let fresh = false;
+  if (existing && relevant) {
+    try { fresh = !cvMtime || fs.statSync(existing).mtimeMs >= cvMtime; } catch { fresh = false; }
+  }
+  if (existing && relevant && fresh) {
+    console.log(`    [upload] tailored resume already rendered → ${path.basename(existing)}`);
+    return existing;
+  }
+  if (existing && relevant && !fresh) {
+    console.log(`    [upload] ${path.basename(existing)} predates cv.md — rebuilding it for this job`);
+  }
+  const helper = path.join(ROOT, "apps", "browser-apply", "tools", "build_resume_for_job.py");
+  if (!fs.existsSync(helper)) {
+    console.log(`    [upload] resume builder missing at ${path.relative(ROOT, helper)}`);
+    return existing || null;
+  }
+  const args = [helper];
+  if (job?.id) args.push("--job-id", String(job.id));
+  else args.push("--company", String(job?.company || ""), "--title", String(job?.title || ""));
+  try {
+    const out = execFileSync("python", args, {
+      cwd: ROOT,
+      encoding: "utf-8",
+      timeout: 240000,
+      windowsHide: true,
+      shell: false,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+    });
+    const payload = JSON.parse(String(out).trim().split(/\r?\n/).filter(Boolean).pop());
+    if (payload?.ok && payload?.pdf && fs.existsSync(payload.pdf)) {
+      const check = payload.verified || {};
+      console.log(`    [upload] built and verified a tailored resume → ${path.basename(payload.pdf)}`
+        + `${check.pages ? ` (${check.pages} page, ${check.bytes} bytes)` : ""}`);
+      return payload.pdf;
+    }
+    console.log(`    [upload] resume build rejected: ${String(payload?.error || "unknown").slice(0, 120)}`);
+  } catch (e) {
+    console.log(`    [upload] resume build failed: ${String(e.message || e).slice(0, 160)}`);
+  }
+  return existing || null;
+}
+
+/**
+ * Choose the file for the upload control actually on the page.
+ *
+ * Returns an absolute path, or null when nothing usable exists - in which case
+ * the caller reports a missing attachment rather than uploading the wrong
+ * document.
+ */
+async function resolveUploadPdf(page, job, profile, selectors) {
+  const prompt = await uploadPromptText(page, selectors);
+  const decision = decideUploadKind(prompt.text);
+  console.log(`    [upload] control asks for a ${decision.kind === "cv" ? "CV" : "resume"} `
+    + `(${decision.because}) — saw "${decision.evidence || prompt.selector || "no label"}"`);
+  if (decision.kind === "cv") {
+    const canonical = findCanonicalCv(profile);
+    if (canonical) {
+      console.log(`    [upload] sending the CV as it is → ${path.basename(canonical)}`);
+      return canonical;
+    }
+    console.log("    [upload] no canonical CV file found — falling back to the tailored resume");
+  } else {
+    const built = ensureTailoredPdf(job);
+    if (built) return built;
+    const canonical = findCanonicalCv(profile);
+    if (canonical) {
+      console.log("    [upload] no tailored resume available — sending the CV as it is");
+      return canonical;
+    }
+  }
+  const fallback = findResumePdf(job?.company, job?.title, job?.pdf_path);
+  if (fallback) {
+    console.log(`    [upload] falling back to ${path.basename(fallback)}`);
+    return fallback;
+  }
+  console.log("    [upload] no document could be chosen");
+  return null;
+}
+
 function inferATS(url) {
   const parsed = parseHttpUrl(url);
   if (!parsed) return "generic";
@@ -2572,6 +2801,21 @@ async function pickVisible(locator) {
   return locator.first();
 }
 
+/**
+ * react-select's nameless second input is not a field.
+ *
+ * It renders `<input class="…-requiredInput" style="pointer-events:none">`
+ * inside the same field, purely so the browser sees a native `required` flag on
+ * the real control. It has no menu and no value, so treating it as a control
+ * made combo() match a question that was already answered, open nothing, and
+ * leave the blur of that attempt on screen. Measured 2026-11-05, #143 Glean,
+ * where it was the "twin combobox" costing a pass per fill round.
+ */
+function isMirrorInput(locator) {
+  return locator.evaluate((el) => /requiredInput/.test(String(el.className || "")))
+    .catch(() => false);
+}
+
 // Consent banners sit over the form and swallow clicks. Dismissing the cookie
 // notice is not a legal agreement, so it is safe to clear automatically.
 async function dismissConsentBanners(page) {
@@ -2594,6 +2838,42 @@ async function dismissConsentBanners(page) {
     return true;
   }
   return false;
+}
+
+/**
+ * Close any open dropdown before a click that has to land.
+ *
+ * An open react-select menu puts a document-level mousedown handler in place
+ * while it is showing: the next mousedown anywhere on the page closes the menu
+ * and the click never reaches the element underneath. Measured 2026-11-05,
+ * #143 Glean: "[submit] clicked final Submit application" and then no request
+ * of any kind - no POST, no navigation, no validation error. The click only
+ * closed a menu that a failed combo() pass had left open, so the board never
+ * saw a submit and the run reported a refusal that never happened.
+ *
+ * Escape is the documented way to close a react-select; the synthetic
+ * mousedown on the body is the fallback for widgets that only listen for the
+ * raw event. Nothing here types, selects or agrees to anything.
+ */
+async function closeOpenDropdowns(page) {
+  const openCount = () => page.locator('[role="option"]:visible').count().catch(() => 0);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!(await openCount())) return true;
+    if (page.keyboard && typeof page.keyboard.press === "function") {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(180);
+      if (!(await openCount())) return true;
+    }
+    await page.evaluate(() => {
+      for (const type of ["mousedown", "mouseup", "click"]) {
+        document.body.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+    }).catch(() => {});
+    await page.waitForTimeout(180);
+  }
+  const left = await openCount();
+  if (left) console.log(`    [submit] a dropdown is still open (${left} option(s) visible)`);
+  return left === 0;
 }
 
 async function tryUpload(page, selectors, filePath, ats = null, originUrl = null, uploadHosts = null) {
@@ -2620,6 +2900,22 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
       try {
         await el.setInputFiles(filePath, { timeout: 5000 });
         console.log(`    [upload] ${sel} ← ${path.basename(filePath)}`);
+          // A board that carries the file inside the application itself says so
+          // in its own markup: Greenhouse's inline uploader is
+          //   <div class="file-upload" data-allow-s3="false">
+          // and such a form needs no separate object-storage host at all. Waiting
+          // four seconds for a host that was never going to be advertised, then
+          // warning that the CV "may not have attached", reported a healthy
+          // inline attachment as a failure - measured 2026-11-05, #143 Glean.
+          const inlineUpload = await el.evaluate((node) => {
+            const box = node.closest("[data-allow-s3]");
+            if (!box) return null;
+            return String(box.getAttribute("data-allow-s3") || "").toLowerCase() !== "true";
+          }).catch(() => null);
+          if (inlineUpload === true) {
+            console.log("    [upload] the board carries the file with the form (no separate upload host)");
+            return true;
+          }
           // The upload capability is only issued in RESPONSE to picking the
           // file, so the first POST to object storage necessarily happens
           // before the guard has learned the host - and is blocked. The ATS then
@@ -2667,6 +2963,36 @@ function requestFrameOrigin(request, page) {
   } catch {
     return parseHttpUrl(page.url?.());
   }
+}
+
+/**
+ * The ATS whose allowlist applies to THIS request.
+ *
+ * Read from the document that issued the request, not from the row that was
+ * scraped and not from the page object the guard was installed on. A LinkedIn
+ * row's Apply control can hand the form to Greenhouse in a new tab, and the
+ * guard installed on the LinkedIn page then sees Greenhouse's own requests
+ * while still holding a LinkedIn allowlist - so the form's runtime was refused
+ * and the page never hydrated:
+ *
+ *   [subresource-block] script GET .../job-boards.cdn.greenhouse.io/assets/root-…js
+ *
+ * That is not a cosmetic failure. Without the bundle no react-select opens,
+ * no client-side submit exists, and "Submit application" falls through to the
+ * inert server-rendered <form method="get">, reloading the page with every
+ * field empty. Measured 2026-11-05, #143 Glean.
+ *
+ * The frame's own URL is trustworthy here: it is where the document actually
+ * came from, so a third-party page cannot claim an ATS's allowlist.
+ */
+function servingAtsForRequest(request, page, fallback = "generic") {
+  let frameUrl = "";
+  try { frameUrl = request.frame?.()?.url?.() || ""; } catch { frameUrl = ""; }
+  for (const candidate of [frameUrl, page?.url?.() || ""]) {
+    const ats = inferATS(candidate);
+    if (ats && ats !== "generic") return ats;
+  }
+  return fallback || "generic";
 }
 
 /**
@@ -2973,6 +3299,21 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
     : createNavigationBoundary(typeof originUrl === "string" ? originUrl : page.url?.(), ats);
+  // The ATS that serves the page NOW, not the board the row was found on.
+  //
+  // A row scraped from LinkedIn hands its form to Greenhouse, and every
+  // allowlist below - the ATS's own runtime scripts, its read-only API, its
+  // application POST - has to follow the page on screen. Keeping the row's ATS
+  // here meant a LinkedIn row's Greenhouse form had its whole JS bundle
+  // refused:
+  //
+  //   [subresource-block] script GET .../job-boards.cdn.greenhouse.io/assets/root-…js
+  //
+  // so the page never hydrated. No dropdown could open, no client-side submit
+  // existed, and clicking "Submit application" fell through to the inert
+  // server-rendered <form method="get">, reloading the page with every field
+  // empty. Measured 2026-11-05, #143 Glean.
+  let servingAts = boundary.ats || ats || "generic";
   const pageContext = typeof page.context === "function" ? page.context() : null;
   // Use a context-level guard for isolated job contexts (it also covers fetch
   // from service workers/child frames); shared Edge contexts use a page-level
@@ -3009,7 +3350,7 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           let shortener = false;
           try { shortener = URL_SHORTENER_HOST.test(canonicalHost(new URL(requestUrl).hostname)); }
           catch { shortener = false; }
-          if (!shortener && !tryPinExternalApplyOrigin(boundary, requestUrl, ats)) {
+          if (!shortener && !tryPinExternalApplyOrigin(boundary, requestUrl, servingAts)) {
             console.log(`    [redirect-block] ${requestUrl}`);
             await route.abort("blockedbyclient");
             return;
@@ -3029,6 +3370,13 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           catch { hop = false; }
           if (!hop) pinNavigationOrigin(boundary, requestUrl);
         }
+        // The page that will now load is the one whose vendor allowlists apply.
+        const derived = inferATS(requestUrl);
+        if (derived && derived !== "generic" && derived !== servingAts) {
+          servingAts = derived;
+          boundary.ats = derived;
+          console.log(`    [ats] page is served by ${derived} — allowlists follow it`);
+        }
       } else {
         // While filling/uploading, permit only same-origin HTTP(S) resources.
         // This covers cross-origin iframes, form actions, fetch/XHR, and
@@ -3037,11 +3385,14 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           || parseHttpUrl(navigationPinnedOrigin(boundary));
         const requestParsed = parseHttpUrl(requestUrl);
         const blankFrame = /^about:blank(?:[#?].*)?$/i.test(String(requestUrl || ""));
-        const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, ats)
+        // Which vendor's allowlist applies to this request is decided by the
+        // document that issued it, not by the row's source board.
+        const requestAts = servingAtsForRequest(request, page, servingAts);
+        const trustedAsset = isAllowedAssetRequest(requestUrl, requestType, requestAts)
           || portalAssetHostAllowed(frameOrigin, requestParsed);
         const trustedPortalApi = portalApiHostAllowed(frameOrigin, requestParsed, requestMethod, requestType);
         const trustedReadOnlyApi = isAllowedReadOnlyApiRequest(
-          requestUrl, requestType, requestMethod, ats
+          requestUrl, requestType, requestMethod, requestAts
         );
         const trustedPresignedUpload = isAllowedPresignedUploadRequest(
           requestUrl, requestType, requestMethod, uploadHosts
@@ -3051,7 +3402,7 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
         // instruction. See FINGERPRINT_VENDOR_SUFFIXES for why this is fidelity
         // rather than evasion - and what it costs in privacy.
         const trustedFingerprintVendor = isFingerprintVendorHost(requestParsed);
-        const trustedAtsPost = isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, ats);
+        const trustedAtsPost = isAllowedAtsApplicationPost(requestUrl, requestType, requestMethod, requestAts);
         if (!blankFrame && !trustedAsset && !trustedReadOnlyApi && !trustedPresignedUpload
             && !trustedCaptchaToken && !trustedAtsPost && !trustedFingerprintVendor && !trustedPortalApi
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
@@ -3117,6 +3468,37 @@ const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
 const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:pastebin\.com|discord\.gg|wa\.me|bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
 const URL_SHORTENER_HOST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
 
+// A sign-in page is never an application page. Measured 2026-11-05, #1271
+// Vahan.ai: the LinkedIn Apply link went to forms.gle, which redirected to
+// accounts.google.com because that session was signed out. The hop was
+// approved as an "off-site apply host", the runner filled nothing, found no
+// Submit on Google's login screen, and recorded NeedsReview - which reads like
+// a broken application form rather than a session that needs a sign-in.
+// Refusing the pin says what actually happened instead.
+const AUTH_WALL_HOST = /^(?:accounts\.google\.com|accounts\.youtube\.com|login\.microsoftonline\.com|login\.live\.com|login\.yahoo\.com|appleid\.apple\.com|github\.com|gitlab\.com|auth0\.com|okta\.com|sso\.|signin\.|accounts\.)$/;
+const AUTH_WALL_SUFFIX = /(?:^|\.)(?:auth0\.com|okta\.com|onelogin\.com|duosecurity\.com|pingidentity\.com|workos\.com)$/;
+
+function isAuthWallHost(host) {
+  const h = canonicalHost(host);
+  if (!h) return false;
+  return AUTH_WALL_HOST.test(h) || AUTH_WALL_SUFFIX.test(h)
+    || /^(?:login|signin|sign-in|auth|sso|accounts)\./.test(h);
+}
+
+// A Google Form is a real application channel used by a lot of small India
+// startups, not an ATS, so it cannot be reached through any board's own host.
+// Only the /forms/ path is allowed; docs.google.com/docs or /drive is not an
+// application and stays refused.
+function isGoogleFormUrl(url) {
+  try {
+    const u = new URL(String(url));
+    return u.protocol === "https:" && canonicalHost(u.hostname) === "docs.google.com"
+      && /^\/forms\//.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
   if (!enabled) return false;
   if (!isNavigationBoundary(boundary)) return false;
@@ -3128,6 +3510,10 @@ function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EX
   // destination it resolves to, never the shortener itself.
   if (URL_SHORTENER_HOST.test(host)) return false;
   if (EXTERNAL_APPLY_HOST_DENYLIST.test(host)) return false;
+  // A sign-in wall is not a form. Denying the pin leaves the run reporting a
+  // redirect block, which is the truth, instead of NeedsReview on a login page.
+  if (isAuthWallHost(host)) return false;
+  if (host === "docs.google.com" && !isGoogleFormUrl(url.href)) return false;
   // Exactly one off-site hop is ever granted, and the pin never returns to the
   // ATS host, so a redirect chain still cannot walk further.
   if (boundary.externalApplyHost) return false;
@@ -3161,6 +3547,13 @@ async function navigateAllowed(page, target, ats, originUrl) {
   }
   if (!isAllowedNavigationUrl(page.url(), ats, boundary)) {
     if (tryPinExternalApplyOrigin(boundary, page.url(), ats)) {
+      // The off-site host is the page that will be filled from now on, so its
+      // vendor allowlists apply to it. Leaving the row's ATS in place here was
+      // the other half of the #143 failure: the guard pinned Greenhouse while
+      // still holding a LinkedIn allowlist, so Greenhouse's own runtime was
+      // refused and the form stayed inert.
+      const derived = inferATS(page.url());
+      if (derived && derived !== "generic") boundary.ats = derived;
       console.log(`    [external-apply] approved off-site apply host → ${canonicalHost(parseHttpUrl(page.url()).hostname)}`);
       return true;
     }
@@ -3177,7 +3570,22 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
     console.log("    [redirect-block] refusing to interact with a non-HTTPS or untrusted page");
     return { clicked: false, blocked: true, reason: "redirect" };
   }
-  const sels = ATS_SELECTORS[ats]?.applyBtn || ATS_SELECTORS.generic.applyBtn;
+  // The page in front of us is not always the board the row came from. A
+  // LinkedIn row whose Apply links out to Greenhouse lands on
+  // job-boards.greenhouse.io, and classifying that page's own "Apply" with
+  // LinkedIn's rules read it as the FINAL submission: measured 2026-11-05,
+  // #143 Glean logged "[submit] clicked final Apply", then filled the form, and
+  // returned without ever pressing "Submit application". A filled form that was
+  // never submitted is the worst outcome available - it looks like an
+  // application, costs a batch slot, and produces no receipt.
+  //
+  // So classify against the ATS that actually serves the page, and treat an
+  // off-site hop as an opener regardless: on the employer's own form an
+  // "Apply"-labelled control opens the form, it does not send it.
+  const liveAts = inferATS(currentUrl);
+  const effectiveAts = liveAts && liveAts !== "generic" ? liveAts : ats;
+  const hoppedOffBoard = effectiveAts !== ats;
+  const sels = ATS_SELECTORS[effectiveAts]?.applyBtn || ATS_SELECTORS.generic.applyBtn;
   /**
    * The first match in DOM order is not necessarily the control a person can
    * see. Hirist renders two Apply buttons and one is a hidden responsive
@@ -3231,7 +3639,8 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
       // On these ATS the job page's Apply control only opens the form. The
       // one-step heuristic cannot tell that apart from a real submit, so force
       // it to intermediate or the fields get filled *after* the "submission".
-      const forceIntermediate = APPLY_IS_ALWAYS_INTERMEDIATE.has(ats) && type !== "submit";
+      const forceIntermediate = (APPLY_IS_ALWAYS_INTERMEDIATE.has(effectiveAts) || hoppedOffBoard)
+        && type !== "submit";
       const classification = classifyApplyControl({
         label, href, selector: sel,
         oneStep: forceIntermediate ? false : oneStep,
@@ -4021,7 +4430,18 @@ function controlSignatureMatcher() {
       if (canSplit) marked.replaceWith(document.createTextNode(delim));
       clone.querySelectorAll(
         "[" + marker + "], input, textarea, select, [class*='control'], [class*='value'], [class*='menu'], "
-        + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox']",
+        + "[class*='indicator'], [class*='live'], [class*='placeholder'], [role='listbox'], "
+        // A react-select injects its own CSS into a <style> element INSIDE the
+        // widget, and textContent includes that CSS. On Greenhouse the nearest
+        // ancestor of "How did you hear about Glean?*" yielded
+        //   ".remix-css-1a0ro4n-requiredinput{opacity:0;pointer-events:none;...}"
+        // as its prompt text, so the walk stopped before it reached the label,
+        // the signature never contained the question, and no hint could match -
+        // the required field then blocked the submit. Measured 2026-11-05 with
+        // the same page at 0ms, 800ms and 2500ms: the label only appeared once
+        // the style node was gone from the tree at hydration. Style is not a
+        // prompt in any case, so it never belongs in the signature.
+        + "style, script, noscript, template, svg, link, meta",
       ).forEach((n) => n.remove());
       const text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
 
@@ -4070,9 +4490,29 @@ async function describeSubmitOutcome(page) {
     const text = (el) => String(el.innerText || "").replace(/\s+/g, " ").trim();
     const take = (sel, n) => [...document.querySelectorAll(sel)]
       .filter(visible).map(text).filter(Boolean).slice(0, n);
+    // Which fields the board itself is complaining about. A complaint is often
+    // only an aria-invalid flag plus a short "This field is required." line, so
+    // the field is what has to be named - the message alone says nothing about
+    // where to look.
+    const fieldLabel = (node) => {
+      const wrap = node.closest(".field-wrapper") || node.closest("[class*='phone-input']");
+      const label = wrap && wrap.querySelector("label");
+      return (label ? label.textContent : "").replace(/\s+/g, " ").trim().slice(0, 50);
+    };
+    const problems = [...document.querySelectorAll(
+      "[aria-invalid='true'], [class*='error'], [class*='Error'], [class*='invalid']",
+    )]
+      .filter(visible)
+      .map((node) => ({
+        field: fieldLabel(node) || node.id || node.getAttribute("name") || "",
+        text: text(node).slice(0, 70),
+      }))
+      .filter((entry) => entry.field || entry.text)
+      .slice(0, 8);
     return {
       heading: take("h1, h2, h3", 3),
       messages: take("[role='alert'], [role='status'], [class*='error'], [class*='Error'], [class*='invalid']", 6),
+      problems,
       captcha: Boolean(document.querySelector(
         "iframe[src*='recaptcha'], iframe[title*='recaptcha' i], [class*='recaptcha'], [data-sitekey]",
       )),
@@ -4463,11 +4903,97 @@ async function clickFinalControl(page, locator, label, options = {}) {
     return { allowed: false, clicked: false, blocked: last.reason, reason: last.reason };
   }
   try {
+    // An open dropdown owns the next mousedown and would eat this click, so
+    // close anything still showing before the control is pressed.
+    await closeOpenDropdowns(page);
     // Sticky headers can cover a long form's submit control; scroll it into
     // view and allow a longer budget before giving up.
     await locator.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-    await locator.click({ timeout: 15000 });
+    // Watch what the click actually does. A pointer click can reach a live
+    // control and still be a no-op - the menu that owns the next mousedown ate
+    // it, or the handler was replaced by a re-render between hit-testing and
+    // dispatch. Measured 2026-11-05, #143 Glean: "[submit] clicked final Submit
+    // application", then no write, no navigation, no validation error, and the
+    // run reported a refusal that never happened.
+    let writes = 0;
+    let submissionHost = "";
+    try { submissionHost = new URL(page.url()).host; } catch { submissionHost = ""; }
+    const countWrite = (request) => {
+      try {
+        if (String(request.method?.() || "GET").toUpperCase() === "GET") return;
+        // Analytics pings (snowplow and friends) are posted on every click, so
+        // only a write to the board's own host counts as the submit leaving.
+        if (new URL(request.url()).host !== submissionHost) return;
+        writes += 1;
+      } catch { /* ignore */ }
+    };
+    if (typeof page.on === "function") page.on("request", countWrite);
+    // Fingerprint what the page shows about its own state, so "did the click
+    // do anything" is decided by a change rather than by matching words. The
+    // first attempt at this matched /select/ against any element with an
+    // error-ish class, and Greenhouse's live region quotes the Country
+    // placeholder ("Country | Select a country"), so every dead click looked
+    // like a live one.
+    const submitFingerprint = () => page.evaluate(() => {
+      const shown = (node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      return {
+        url: location.href,
+        problems: [...document.querySelectorAll("[class*='error'], [role='alert'], [aria-invalid='true']")]
+          .filter(shown).length,
+        submitDisabled: [...document.querySelectorAll("button, input[type='submit']")]
+          .some((b) => /submit/i.test(`${b.textContent || ""} ${b.value || ""}`) && (b.disabled || b.getAttribute("aria-busy") === "true")),
+      };
+    }).catch(() => null);
+    const before = await submitFingerprint();
+    // Record what the pointer and the form actually do, in the page. Without
+    // this, a click that never reached the control and a click whose handler
+    // decided to do nothing are indistinguishable in the log.
+    await page.evaluate(() => {
+      window.__pulseSubmitTrace = { pointer: 0, submit: 0, label: "" };
+      document.addEventListener("click", (event) => {
+        const button = event.target?.closest?.("button, input[type='submit'], [role='button']");
+        if (!button) return;
+        window.__pulseSubmitTrace.pointer += 1;
+        window.__pulseSubmitTrace.label = String(button.textContent || button.value || "").trim().slice(0, 40);
+      }, true);
+      document.addEventListener("submit", () => { window.__pulseSubmitTrace.submit += 1; }, true);
+    }).catch(() => {});
+    try {
+      await locator.click({ timeout: 15000 });
+    } finally {
+      if (typeof page.off === "function") page.off("request", countWrite);
+    }
     console.log(`  [submit] clicked final ${label}`);
+    await page.waitForTimeout(1500);
+    const trace = await page.evaluate(() => window.__pulseSubmitTrace || null).catch(() => null);
+    const after = await submitFingerprint();
+    if (trace && trace.pointer === 0) {
+      console.log(`  [submit] the click on ${label} never reached a control (no pointer event arrived)`);
+    }
+    // One line, always: what the click was followed by. Without it a refused
+    // submit and a click that did nothing read identically in the log.
+    console.log(`  [submit] after the click: ${writes} write(s) to ${submissionHost || "the board"}, `
+      + `complaint nodes ${before?.problems ?? "?"} → ${after?.problems ?? "?"}, `
+      + `submit control ${after?.submitDisabled ? "" : "still "}enabled, `
+      + `pointer ${trace?.pointer ?? "?"} / submit ${trace?.submit ?? "?"} event(s)`);
+    const activated = writes > 0 || !before || !after
+      || after.url !== before.url
+      || after.problems !== before.problems
+      || (after.submitDisabled && !before.submitDisabled);
+    if (!activated) {
+      // Activating the control through the DOM is the same button, not a
+      // bypass: it runs the page's own handler, so anything it submits or
+      // complains about is the board's own verdict.
+      console.log(`  [submit] the click on ${label} produced no request and no complaint `
+        + `(${trace ? `${trace.pointer} pointer event(s) on "${trace.label}", ${trace.submit} submit event(s)` : "no trace"}) `
+        + `— activating the control directly`);
+      await locator.evaluate((el) => el.click()).catch(() => {});
+      await page.waitForTimeout(1500);
+    }
     return { allowed: true, clicked: true };
   } catch (e) {
     console.log(`  [submit] final ${label} click failed: ${String(e).slice(0, 100)}`);
@@ -4953,6 +5479,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     for (let i = 0; i < total && i < 16; i++) {
       const control = controls.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
+      if (await isMirrorInput(control)) continue;
       // Match on the question this control belongs to, never on surrounding
       // form text, which would make any pattern match any field.
       const signature = await control.evaluate(controlSignatureMatcher()).catch((e) => {
@@ -4980,10 +5507,23 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         // Counts as a match. Without this, a control that is matched and already
         // answered is reported as "no control matched" on the next pass, which is
         // the same conflation this branch exists to remove.
-        sawControl = true;
-        continue;
+        //
+        // And it RETURNS rather than continuing: Greenhouse renders the same
+        // question twice (a real control and a twin), so carrying on found the
+        // second, empty copy, opened its menu, failed to answer it and left that
+        // menu on screen. The next click - the submit - was then eaten by the
+        // open dropdown. Measured 2026-11-05, #143 Glean:
+        //   [combo] how did you hear: already answered "LinkedIn" — not overwriting
+        //   [combo] how did you hear: control matched but no option accepted ...
+        //   [submit] clicked final Submit application        (no request at all)
+        return already;
       }
-      const wanted = values[0] || "";
+      // Several acceptable answers, tried in order. A board's option list is its
+      // own vocabulary: Greenhouse offers "LinkedIn" but not "Job board", while
+      // another board offers "Job board" and nothing else. Taking only values[0]
+      // made the first alias the only one ever considered.
+      const wantedList = values.map((v) => String(v || "")).filter(Boolean);
+      const wanted = wantedList[0] || "";
       // Open the menu and try filtering by typing, but fall back to reading the
       // unfiltered list. Typing a prefix of the answer is wrong for Yes/No-style
       // widgets whose real option reads "Yes" or "I have read and agree" — the
@@ -4996,43 +5536,127 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const pickOption = async (texts) => {
         const lower = (t) => String(t).toLowerCase();
-        const w = lower(wanted);
-        const hit = texts.find((t) => lower(t) === w)
-          || texts.find((t) => lower(t).startsWith(w))
-          || texts.find((t) => new RegExp(`\\b${reEsc(wanted)}\\b`, "i").test(t))
-          // A dropdown offering exactly one option has no choice to make, so the
-          // configured wording cannot be a mismatch worth failing on. This is
-          // how the legal acknowledgements are written: one long option, not
-          // Yes/No. Selecting it is the only way to complete the field.
-          || (texts.length === 1 ? texts[0] : null);
-        if (!hit) return null;
-        if (texts.length === 1 && !new RegExp(`\\b${reEsc(wanted)}\\b`, "i").test(hit)) {
-          console.log(`    [combo] ${hintRe.source}: only one option offered, selecting it`);
+        for (const candidateText of wantedList) {
+          const w = lower(candidateText);
+          const hit = texts.find((t) => lower(t) === w)
+            || texts.find((t) => lower(t).startsWith(w))
+            || texts.find((t) => new RegExp(`\\b${reEsc(candidateText)}\\b`, "i").test(t))
+            // A dropdown offering exactly one option has no choice to make, so the
+            // configured wording cannot be a mismatch worth failing on. This is
+            // how the legal acknowledgements are written: one long option, not
+            // Yes/No. Selecting it is the only way to complete the field.
+            || (texts.length === 1 ? texts[0] : null);
+          if (!hit) continue;
+          if (texts.length === 1 && !new RegExp(`\\b${reEsc(candidateText)}\\b`, "i").test(hit)) {
+            console.log(`    [combo] ${hintRe.source}: only one option offered, selecting it`);
+          }
+          await page.locator(OPTION).filter({ hasText: hit }).first()
+            .click({ timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(500);
+          // Read the value back off the control. Clicking an option can miss, and
+          // logging a fill that did not land is how a wrong answer gets reported
+          // as a right one.
+          const landed = await control.evaluate((el) => {
+            const wrap = el.closest("[class*='select__control']")
+              || el.closest("[class*='select__container']")
+              || el.parentElement;
+            const value = wrap && wrap.querySelector("[class*='single-value']");
+            return value ? String(value.textContent || "").trim() : "";
+          }).catch(() => "");
+          if (landed) {
+            console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
+            return landed;
+          }
+          console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
         }
-        await page.locator(OPTION).filter({ hasText: hit }).first()
-          .click({ timeout: 4000 }).catch(() => {});
-        await page.waitForTimeout(500);
-        // Read the value back off the control. Clicking an option can miss, and
-        // logging a fill that did not land is how a wrong answer gets reported
-        // as a right one.
-        const landed = await control.evaluate((el) => {
-          const wrap = el.closest("[class*='select__control']")
-            || el.closest("[class*='select__container']")
-            || el.parentElement;
-          const value = wrap && wrap.querySelector("[class*='single-value']");
-          return value ? String(value.textContent || "").trim() : "";
-        }).catch(() => "");
-        if (landed) {
-          console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
-          return landed;
-        }
-        console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
         return null;
       };
 
-      await control.click({ timeout: 4000 }).catch(() => {});
-      await page.waitForTimeout(300);
-      if (page.keyboard && typeof page.keyboard.type === "function") {
+      // Open the menu. Clicking the combobox input is not enough on a
+      // react-select that renders that input as
+      //   .requiredinput{opacity:0;pointer-events:none;position:absolute}
+      // so the click lands on nothing, the menu never opens, and every attempt
+      // reads 0 options while the required question stays unanswered. Measured
+      // 2026-11-05 on #143 Glean (Greenhouse): "How did you hear about
+      // Glean?*" matched the hint but no option could ever be seen, and the
+      // submit was refused for that one field on every pass.
+      //
+      // Tried in order, cheapest and most reliable first:
+      //   1. focus the input and press ArrowDown - the documented way to open a
+      //      react-select, and it needs no pointer events at all
+      //   2. click the control itself, which works on ordinary comboboxes
+      //   3. click the wrapping .select__control, which is the element that
+      //      actually carries the open handler
+      //   4. dispatch mousedown on that wrapper, for widgets that only listen
+      //      for the raw event
+      const openMenu = async () => {
+        const optionCount = async () => page.locator(OPTION).count().catch(() => 0);
+        // A menu can render a few frames after the event that opened it, so poll
+        // briefly instead of testing once. A single fixed wait made a widget
+        // that took 400ms look broken.
+        const waitOptions = async (ms = 1500) => {
+          const deadline = Date.now() + ms;
+          do {
+            if (await optionCount()) return true;
+            await page.waitForTimeout(120);
+          } while (Date.now() < deadline);
+          return false;
+        };
+        // A menu left open by an earlier attempt would make step 1 meaningless
+        // and would also merge two option lists.
+        await pressEscape();
+        const focused = await control.focus({ timeout: 2000 }).then(() => true).catch(() => false);
+        if (page.keyboard && typeof page.keyboard.press === "function") {
+          await page.keyboard.press("ArrowDown").catch(() => {});
+        }
+        if (await waitOptions(1200)) return "keyboard";
+        await control.click({ timeout: 2500 }).catch(() => {});
+        if (await waitOptions(800)) return "click";
+        const box = await control.evaluate((el) => {
+          const wrap = el.closest("[class*='select__control']")
+            || el.closest("[class*='select__container']")
+            || el.closest("[class*='control']")
+            || el.parentElement;
+          if (!wrap) return null;
+          const r = wrap.getBoundingClientRect();
+          return r.width > 0 && r.height > 0
+            ? { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+            : null;
+        }).catch(() => null);
+        if (box) {
+          await page.mouse.click(box.x, box.y).catch(() => {});
+          if (await waitOptions(900)) return "wrapper-click";
+        }
+        const dispatched = await control.evaluate((el) => {
+          const wrap = el.closest("[class*='select__control']")
+            || el.closest("[class*='select__container']")
+            || el.closest("[class*='control']")
+            || el.parentElement;
+          if (!wrap) return false;
+          for (const type of ["mousedown", "mouseup", "click"]) {
+            wrap.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+          }
+          return true;
+        }).catch(() => false);
+        if (dispatched && await waitOptions(1200)) return "dispatch";
+        // Report which control this was: "some combobox would not open" is not
+        // actionable on a page with five of them.
+        const id = await control.evaluate(
+          (el) => el.id || el.getAttribute("aria-label") || el.getAttribute("name") || el.tagName,
+        ).catch(() => "?");
+        console.log(`    [combo] ${hintRe.source}: control "${String(id).slice(0, 40)}" matched but the menu `
+          + `would not open (focus ${focused ? "ok" : "failed"}; keyboard, click, wrapper-click and dispatch `
+          + `all produced no options)`);
+        return null;
+      };
+
+      const opened = await openMenu();
+      if (opened && opened !== "keyboard") {
+        console.log(`    [combo] ${hintRe.source}: menu opened via ${opened}`);
+      }
+      await page.waitForTimeout(150);
+      const typed = await control.fill(wanted.slice(0, 5)).then(() => true).catch(() => false);
+      if (!typed && page.keyboard && typeof page.keyboard.type === "function") {
         await page.keyboard.type(wanted.slice(0, 5), { delay: 45 }).catch(() => {});
       }
       await page.waitForTimeout(900);
@@ -5044,9 +5668,8 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
 
       if (!chosen) {
         // Re-open unfiltered and match against everything on offer.
-        await pressEscape();
-        await control.click({ timeout: 4000 }).catch(() => {});
-        await page.waitForTimeout(700);
+        await openMenu();
+        await page.waitForTimeout(250);
         texts = (await page.locator(OPTION).allInnerTexts().catch(() => []))
           .map((t) => String(t).replace(/\s+/g, " ").trim())
           .filter(Boolean);
@@ -5262,6 +5885,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       for (let i = 0; i < total && i < 40; i++) {
         const field = fields.nth(i);
         if (!(await field.isVisible().catch(() => false))) continue;
+        if (await isMirrorInput(field)) continue;
         // Never overwrite a value that is already there.
         if (String(await field.inputValue().catch(() => "")).trim()) continue;
         const signature = await field.evaluate(controlSignatureMatcher()).catch((e) => {
@@ -5304,8 +5928,30 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
             //   [answer] country: value did not stick (got "India +91")
           }
         }
-        const stillEmpty = !String(await field.inputValue().catch(() => "")).trim();
+        const committed = await field.evaluate((el) => {
+          if (el.getAttribute("role") !== "combobox") return null;
+          const wrap = el.closest("[class*='select__control']") || el.closest("[class*='select__container']");
+          if (!wrap) return null;
+          const v = wrap.querySelector("[class*='single-value']");
+          return v ? String(v.textContent || "").trim() : "";
+        }).catch(() => null);
+        if (committed !== null) {
+          // The typed text is not the answer: a react-select keeps it in the
+          // input while the committed value lives in .single-value. Reading raw
+          // inputValue() reported a typed-but-unselected value as a filled field
+          // - measured 2026-11-05, #143 Glean: "[fill] how you heard ->
+          // LinkedIn" while the board still counted "How did you hear about
+          // Glean?*" as empty.
+          landed = committed;
+        }
+        const stillEmpty = committed !== null
+          ? !committed
+          : !String(await field.inputValue().catch(() => "")).trim();
         if (!landed && stillEmpty) {
+          // Leave no half-answer behind: a typed value with nothing selected
+          // still reads to the board's validator as an empty required field,
+          // and to the next pass as text worth not overwriting.
+          if (committed !== null) await field.fill("").catch(() => {});
           console.log(`    [answer] ${tag}: value did not stick (nothing was accepted)`);
           continue;
         }
@@ -5324,6 +5970,68 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         if (once) return text;
       }
       if (filled) return firstLanded;
+
+    // A required question is often a native <select>, which is not an input and
+    // was therefore never inspected at all. Greenhouse asks "How did you hear
+    // about <Company>?*" that way, so the answer sat in the profile while the
+    // submit was refused for an empty required field - measured 2026-11-05,
+    // #143 Glean: the form was filled, "Submit application" was clicked, and the
+    // board came back "required fields still empty: How did you hear about
+    // Glean?*".
+    //
+    // Only an option that actually exists is picked. If the question offers
+    // "Job board" rather than the board's own name, that is what gets selected -
+    // it is still true, and it is the option the form will accept. No option is
+    // invented and a question this cannot answer is left for the log.
+    const selects = page.locator("select");
+    const selectTotal = await selects.count().catch(() => 0);
+    const aliasLabels = Array.isArray(options?.fallbackLabels) ? options.fallbackLabels : [];
+    const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (let i = 0; i < selectTotal && i < 20; i++) {
+      const control = selects.nth(i);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      const signature = await control.evaluate(controlSignatureMatcher()).catch(() => "");
+      if (!hintRe.test(String(signature))) continue;
+      const current = await control.evaluate((el) => {
+        const opt = el.options?.[el.selectedIndex];
+        return { value: String(el.value || ""), label: String(opt?.textContent || "").trim() };
+      }).catch(() => ({ value: "", label: "" }));
+      // A placeholder is not an answer: "Please select..." still leaves the
+      // question unanswered to the board's own validator.
+      const placeholder = !current.value || /^(?:please|select|choose|--)/i.test(current.label);
+      if (!placeholder) continue;
+      const labels = await control.evaluate((el) => [...el.options]
+        .map((o) => ({ value: String(o.value || ""), label: String(o.textContent || "").trim() }))
+        .filter((o) => o.label && !/^(?:please\s*select|select|choose|--)/i.test(o.label)))
+        .catch(() => []);
+      if (!labels.length) continue;
+      const text = resolve ? String(resolve(signature) ?? "").trim() : fallback;
+      const wanted = [text, ...aliasLabels].map(norm).filter(Boolean);
+      let choice = null;
+      for (const want of wanted) {
+        choice = labels.find((o) => norm(o.label) === want)
+          || labels.find((o) => norm(o.label).startsWith(want))
+          || labels.find((o) => new RegExp(`\\b${escapeRe(want)}\\b`).test(norm(o.label)));
+        if (choice) break;
+      }
+      if (!choice) {
+        console.log(`    [answer] ${tag}: select offers no option for "${text.slice(0, 30)}" (${labels.map((o) => o.label).join(" | ").slice(0, 90)})`);
+        continue;
+      }
+      await control.selectOption({ label: choice.label }).catch(() => {});
+      await page.waitForTimeout(150);
+      const landed = await control.evaluate((el) => String(el.options?.[el.selectedIndex]?.textContent || "").trim()).catch(() => "");
+      if (!landed || landed !== choice.label) {
+        console.log(`    [answer] ${tag}: select did not take "${choice.label.slice(0, 30)}"`);
+        continue;
+      }
+      console.log(`    [fill] ${tag} -> "${choice.label.slice(0, 40)}" (select)`);
+      filled += 1;
+      firstLanded = firstLanded || choice.label;
+      if (once) return choice.label;
+    }
+    if (filled) return firstLanded;
     console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
@@ -5338,8 +6046,26 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // A dialling-code control is now excluded outright, so the phone fact owns it
   // and this owns "where are you located".
   await combo(
-    /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)\s*[:*\-]?\s*$/i,
+    // The bare alternative allows the word to appear more than once: the
+    // signature is the control's own attributes followed by its prompt, so a
+    // field whose id is "country" and whose label is "Country" signs as
+    //   "country    country"
+    // and an anchored single-word alternative refused it. That is Greenhouse's
+    // phone dialling-code select, and leaving it empty is what made the board
+    // answer a fully-filled application with "Select a country" — measured
+    // 2026-11-05, #143 Glean: every other field was filled and the submit was
+    // refused for this one control, four complaint nodes, all "Country".
+    /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)(?:\s+(?:country|nation))*\s*[:*\-]?\s*$/i,
     [String(candidate?.country || profile?.candidate?.country || "India").trim() || "India"],
+  );
+  // The same question is a native <select> on Greenhouse and a react-select on
+  // others, so both paths answer it. Without the combo path a custom dropdown
+  // stayed empty and blocked the submit just like the <select> did.
+  const heardStated = profile?.candidate?.application_answers || {};
+  const heardValue = String(heardStated?.how_you_heard || heardFromBoard(job)).trim();
+  await combo(
+    /how\s+did\s+you\s+hear|how\s+you\s+(?:heard|found)|where\s+did\s+you\s+(?:hear|find)/i,
+    [heardValue, "Job board", "Job Board", "Other"],
   );
   if (ACCEPT_TERMS) {
     // A stated willingness to work in-person is a commitment about the
@@ -5430,6 +6156,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       await answerQuestion(fact.hint, fact.value, fact.tag, {
         once: fact.once === true,
         resolve: fact.byField,
+        fallbackLabels: fact.fallbackLabels,
       });
     }
     const commitments = [
@@ -6094,6 +6821,42 @@ async function processJob(browser, job, profile, runtime = {}) {
     return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
   }
 
+  // Every document load and every outgoing write, logged as it happens.
+  //
+  // Without this, "the board refused the submit" was an inference: the guard
+  // only logs the requests it BLOCKS, so a submit that was allowed and answered
+  // with a validation error looked exactly like a click that did nothing at all.
+  // Measured 2026-11-05, #143 Glean: the log showed "[submit] clicked final
+  // Submit application" and then no other line, and there was no way to tell
+  // which of the two had happened. Form posts and navigations are few, so this
+  // stays quiet.
+  if (typeof page.on === "function") {
+    page.on("request", (request) => {
+      try {
+        const method = String(request.method?.() || "GET").toUpperCase();
+        const type = String(request.resourceType?.() || "");
+        const isDocument = type === "document";
+        if (!isDocument && method === "GET") return;
+        if (type === "image" || type === "ping" || type === "preflight") return;
+        const label = isDocument ? "nav" : "write";
+        console.log(`    [net] ${label} ${method} ${type || "document"} ${String(request.url()).slice(0, 120)}`);
+      } catch { /* a dead request object is not worth a warning */ }
+    });
+    // The status of the same requests. A submit that the board answers with
+    // 200-and-an-error reads very differently from one that is accepted, and
+    // the difference decides Verified vs NeedsVerification.
+    page.on("response", (response) => {
+      try {
+        const request = response.request?.();
+        const method = String(request?.method?.() || "GET").toUpperCase();
+        const type = String(request?.resourceType?.() || "");
+        if (!(type === "document" || method !== "GET")) return;
+        if (type === "image" || type === "ping" || type === "preflight") return;
+        console.log(`    [net] ${response.status()} ${method} ${type || "document"} ${String(response.url()).slice(0, 100)}`);
+      } catch { /* ignore */ }
+    });
+  }
+
   try {
     console.log(`  [nav] goto ${url.slice(0,90)}`);
     if (!(await navigateAllowed(page, url, ats, navBoundary))) {
@@ -6649,7 +7412,12 @@ async function processJob(browser, job, profile, runtime = {}) {
         return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
       }
     }
-    const uploaded = await tryUpload(page, ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume, resumePdf, ats, navBoundary, uploadHosts);
+    const uploadSelectors = ATS_SELECTORS[ats]?.fields?.resume || ATS_SELECTORS.generic.fields.resume;
+    // Which document is sent is decided by the control's own label, not by the
+    // board: a form asking for a resume gets the JD-tailored build, a form
+    // asking for a CV gets the candidate's CV untouched.
+    const uploadPdf = await resolveUploadPdf(page, job, profile, uploadSelectors);
+    const uploaded = await tryUpload(page, uploadSelectors, uploadPdf, ats, navBoundary, uploadHosts);
 
     // A resume upload usually triggers a server-side parse that reveals the
     // real form only minutes later (e.g. Shine "Reading Your Resume"). Fields
@@ -7351,6 +8119,11 @@ async function processJob(browser, job, profile, runtime = {}) {
       if (outcome) {
         if (outcome.heading.length) console.log(`  [page] heading → ${outcome.heading.join(" | ").slice(0, 140)}`);
         if (outcome.messages.length) console.log(`  [page] message → ${outcome.messages.join(" | ").slice(0, 400)}`);
+        if (outcome.problems?.length) {
+          console.log(`  [page] complaints → ${outcome.problems
+            .map((p) => `${p.field || "?"}${p.text && p.text !== p.field ? `: ${p.text}` : ""}`)
+            .join(" | ").slice(0, 400)}`);
+        }
         if (outcome.captcha) console.log("  [page] a captcha widget is present on the page");
         if (outcome.stillOnForm) console.log("  [page] still showing the application form (not accepted)");
         console.log(`  [page] text → ${String(outcome.body || "").slice(0, 320)}`);
@@ -8297,6 +9070,8 @@ export {
   isAllowedInitialJobUrl,
   isAllowedNavigationUrl,
   isStrictTargetRole,
+  isAuthWallHost,
+  isGoogleFormUrl,
   isSubmissionControlLabel,
   isAshbyJobListing,
   isGreenhouseJobListing,
@@ -8321,6 +9096,10 @@ export {
   readAcceptanceByAts,
   candidateFirstName,
   candidateLastName,
+  heardFromBoard,
+  decideUploadKind,
+  findCanonicalCv,
+  servingAtsForRequest,
   portalAssetHostAllowed,
   portalApiHostAllowed,
   placeAliases,

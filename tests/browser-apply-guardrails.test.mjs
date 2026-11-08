@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 
 import {
   attachPreparedRuntime,
@@ -13,6 +14,9 @@ import {
   clickFinalControl,
   finalSubmissionAllowed,
   findResumePdf,
+  findCanonicalCv,
+  servingAtsForRequest,
+  decideUploadKind,
   inferATS,
   installNavigationGuard,
   isAllowedInitialJobUrl,
@@ -24,6 +28,8 @@ import {
   isAllowedCaptchaTokenRequest,
   isAllowedAtsApplicationPost,
   isAllowedNavigationUrl,
+  isAuthWallHost,
+  isGoogleFormUrl,
   isBlacklistedJob,
   identityFacts,
   jobDescriptionFor,
@@ -31,6 +37,7 @@ import {
   rankByAcceptance,
   candidateFirstName,
   candidateLastName,
+  heardFromBoard,
   portalAssetHostAllowed,
   portalApiHostAllowed,
   placeAliases,
@@ -750,8 +757,14 @@ test("plain identity facts are answered from the profile, absent facts are not i
     identityFacts({ experience_years: 1 }, {}).find((f) => f.tag === "years of experience").value,
     "1 year",
   );
-  // "How did you hear about X" is answered truthfully as the board, never as a referral.
-  assert.equal(richByTag["how you heard"], "This job board");
+  // "How did you hear about X" is answered truthfully as the board the row came
+  // from. This fixture passes no job, so the honest generic answer is "Job board";
+  // a stated answer always wins over it.
+  assert.equal(richByTag["how you heard"], "Job board");
+  assert.equal(
+    identityFacts({}, {}, { source: "LinkedIn" }).find((f) => f.tag === "how you heard").value,
+    "LinkedIn",
+  );
   assert.equal(identityFacts({}, { how_you_heard: "A colleague" }).find((f) => f.tag === "how you heard").value, "A colleague");
 
   // A notice period is a duration and a start date is a date. They used to be
@@ -1341,6 +1354,46 @@ test("navigation trust uses exact hosts/origins and pins after a service crossin
   assert.equal(isAllowedNavigationUrl("https://job-boards.greenhouse.io/form", "lever", boundary), false);
 });
 
+test("a sign-in page is never an approved off-site application host", () => {
+  // Measured 2026-11-05, #1271 Vahan.ai: the Apply link went to forms.gle,
+  // which redirected to accounts.google.com because that session was signed
+  // out. The hop was approved as an off-site apply host, nothing was filled,
+  // and the row was recorded NeedsReview - which says "broken form", not
+  // "sign in". The pin is what has to refuse it.
+  for (const host of [
+    "accounts.google.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "acme.okta.com",
+    "sso.example.com",
+    "signin.example.com",
+    "accounts.example.com",
+  ]) {
+    assert.equal(isAuthWallHost(host), true, `${host} must be refused as a form`);
+  }
+  for (const host of ["job-boards.greenhouse.io", "omnissa.wd501.myworkdayjobs.com", "docs.google.com"]) {
+    assert.equal(isAuthWallHost(host), false, `${host} is not a sign-in wall`);
+  }
+
+  const boundary = createNavigationBoundary("https://www.linkedin.com/jobs/view/4484071621/", "linkedin");
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://accounts.google.com/v3/signin/identifier?continue=x", "linkedin", true), false);
+  assert.equal(boundary.externalApplyHost, undefined);
+  // The real employer form is still reachable afterwards: one refused hop must
+  // not consume the single off-site slot.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://job-boards.greenhouse.io/acme/jobs/1", "linkedin", true), true);
+});
+
+test("a Google Form is an application form, a Google Doc is not", () => {  assert.equal(isGoogleFormUrl("https://docs.google.com/forms/d/e/1FAIpQLSd/viewform"), true);
+  assert.equal(isGoogleFormUrl("https://docs.google.com/forms/d/e/1FAIpQLSd/viewform?usp=sf_link"), true);
+  assert.equal(isGoogleFormUrl("https://docs.google.com/document/d/1abc/edit"), false);
+  assert.equal(isGoogleFormUrl("http://docs.google.com/forms/d/e/1abc/viewform"), false);
+
+  const boundary = createNavigationBoundary("https://www.linkedin.com/jobs/view/1/", "linkedin");
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://docs.google.com/document/d/1abc/edit", "linkedin", true), false);
+  const forms = createNavigationBoundary("https://www.linkedin.com/jobs/view/2/", "linkedin");
+  assert.equal(tryPinExternalApplyOrigin(forms, "https://docs.google.com/forms/d/e/1abc/viewform", "linkedin", true), true);
+});
+
 test("vendor form data and the resume upload ticket are readable", () => {
   // Without these the Greenhouse form renders without labels and cannot
   // attach a CV at all.
@@ -1559,6 +1612,19 @@ test("the location country is answered, and a phone dialling code is not", () =>
   ]) {
     assert.equal(country.hint.test(q), false, `must not match: ${q}`);
   }
+
+  // A control signs as its own attributes followed by its prompt, so a field
+  // whose id is "country" and whose label is "Country" signs as
+  //   "country    country"
+  // The anchored bare alternative used to allow the word exactly once, so that
+  // signature matched nothing and the field stayed empty. Measured 2026-11-05
+  // on #143 Glean: every other field was filled and Greenhouse refused the
+  // submit with "Select a country", four complaint nodes all reading "Country".
+  assert.ok(country.hint.test("country    country"), "the id+label signature must match");
+  assert.ok(country.hint.test("Country\nCountry"), "whitespace of any kind between repeats");
+  // Repetition must not open the door to a dialling code.
+  assert.equal(country.hint.test("country code    country code"), false);
+  assert.equal(country.hint.test("country    country code"), false);
 
   // The prefixes matter: `\blocat\b` can never match "located", because the
   // trailing boundary needs a non-word character and `e` is a word character.
@@ -2422,4 +2488,86 @@ test("clickFinalControl rechecks pause immediately before the final click", asyn
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("how you heard names the board the row came from, never a referral", () => {
+  // GitHub Greenhouse asks this as a required <select>. "This job board" was
+  // hardcoded, is not one of the options, and left the field empty - which is
+  // what refused a filled Glean application on 2026-11-05.
+  assert.equal(heardFromBoard({ source: "LinkedIn", link: "https://www.linkedin.com/jobs/view/1/" }), "LinkedIn");
+  assert.equal(heardFromBoard({ source: "Wellfound India (Backend)" }), "Wellfound");
+  assert.equal(heardFromBoard({ source: "Hirist (Backend Development)" }), "Hirist");
+  assert.equal(heardFromBoard({ source: "Instahyre" }), "Instahyre");
+  assert.equal(heardFromBoard({ source: "Naukri" }), "Naukri");
+  // Nothing recognisable, or no row at all: the generic truth is that a job
+  // board was involved - not a referral, a recruiter or an employee.
+  assert.equal(heardFromBoard({ source: "YC Combinator (Work at a Startup)" }), "Job board");
+  assert.equal(heardFromBoard(null), "Job board");
+});
+
+test("the upload control's own label decides between a tailored resume and the plain CV", () => {
+  // The operator's rule: "if board asks for a resume then build it from the cv,
+  // ats tailor to the jd and the platform ... if it asks for a cv then send the
+  // cv as is". The label decides, never the platform - Greenhouse hosts both
+  // wordings.
+  assert.equal(decideUploadKind("Resume/CV").kind, "resume");
+  assert.equal(decideUploadKind("Upload your resume").kind, "resume");
+  assert.equal(decideUploadKind("Attach resume (PDF)").kind, "resume");
+  assert.equal(decideUploadKind("Updated résumé").kind, "resume");
+  assert.equal(decideUploadKind("Upload your CV").kind, "cv");
+  assert.equal(decideUploadKind("Attach CV *").kind, "cv");
+  assert.equal(decideUploadKind("Curriculum Vitae").kind, "cv");
+  assert.equal(decideUploadKind("Upload your c.v.").kind, "cv");
+  // Nothing named: the tailored resume is the safer default, and it is still
+  // the candidate's own material.
+  assert.equal(decideUploadKind("").kind, "resume");
+  assert.equal(decideUploadKind("Upload a document").kind, "resume");
+});
+
+test("the canonical CV is resolved from an explicit path before any default", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pulseops-canonical-"));
+  const stated = path.join(dir, "My-CV.pdf");
+  fs.writeFileSync(stated, "%PDF-1.4\n% test\n");
+  const previous = process.env.PULSEOPS_CV_PDF;
+  process.env.PULSEOPS_CV_PDF = stated;
+  try {
+    assert.equal(findCanonicalCv(), stated);
+    // A stated path that does not exist must not be returned as if it did.
+    process.env.PULSEOPS_CV_PDF = path.join(dir, "missing.pdf");
+    const resolved = findCanonicalCv();
+    assert.notEqual(resolved, process.env.PULSEOPS_CV_PDF);
+  } finally {
+    if (previous === undefined) delete process.env.PULSEOPS_CV_PDF;
+    else process.env.PULSEOPS_CV_PDF = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a request's allowlist follows the document that issued it, not the row's board", () => {
+  // A LinkedIn row whose Apply control hands the form to Greenhouse: the guard
+  // is installed while the LinkedIn page is open, so the row's ATS is still
+  // "linkedin" when Greenhouse's bundle arrives. Judging the request by the
+  // frame that issued it is what lets the form hydrate at all.
+  const greenhouseRequest = {
+    frame: () => ({ url: () => "https://job-boards.greenhouse.io/gleanwork/jobs/4006731005" }),
+  };
+  const linkedInPage = { url: () => "https://www.linkedin.com/jobs/view/4195254610/" };
+  assert.equal(servingAtsForRequest(greenhouseRequest, linkedInPage, "linkedin"), "greenhouse");
+
+  // A request from the board itself still resolves to the board.
+  const linkedInRequest = {
+    frame: () => ({ url: () => "https://www.linkedin.com/jobs/view/4195254610/" }),
+  };
+  assert.equal(servingAtsForRequest(linkedInRequest, linkedInPage, "linkedin"), "linkedin");
+
+  // An unrecognised document falls back to whatever the caller already had,
+  // never to a vendor allowlist.
+  const unknownRequest = { frame: () => ({ url: () => "https://careers.example.org/apply" }) };
+  assert.equal(servingAtsForRequest(unknownRequest, { url: () => "https://careers.example.org/" }, "linkedin"), "linkedin");
+  assert.equal(servingAtsForRequest({ frame: () => ({ url: () => "" }) }, { url: () => "" }), "generic");
+
+  // The Greenhouse runtime host is allowed under Greenhouse and refused under
+  // a LinkedIn allowlist - the exact mismatch that left #143's form inert.
+  assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root-B3B4RIJc.js", "script", "greenhouse"), true);
+  assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root-B3B4RIJc.js", "script", "linkedin"), false);
 });
