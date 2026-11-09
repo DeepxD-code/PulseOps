@@ -68,7 +68,12 @@ def main() -> int:
             if not row:
                 skipped += 1; continue
             company, title, _prev = row
-            cur.execute("UPDATE jobs SET status = ?, processed_at = ? WHERE id = ?", ("verified", now, int(jid)))
+            # "Verified" is the jobs.status spelling everywhere else (apply.mjs,
+            # the resume builder, the pipeline). This tool wrote "verified" for
+            # 159 rows, so a case-sensitive reader - db_manager.get_jobs_by_status,
+            # next_targets.py - silently saw none of them. outcomes.stage stays
+            # lowercase; that table's vocabulary is its own.
+            cur.execute("UPDATE jobs SET status = ?, processed_at = ? WHERE id = ?", ("Verified", now, int(jid)))
             cur.execute("DELETE FROM outcomes WHERE job_id = ? AND stage = ?", (int(jid), "verified"))
             cur.execute(
                 "INSERT INTO outcomes (job_id, company, title, stage, notes, recorded_at, prep_sent)"
@@ -100,7 +105,7 @@ def main() -> int:
         return 1
     _, title, company, status = row
 
-    cur.execute("UPDATE jobs SET status = 'verified', processed_at = ? WHERE id = ?", (now, args.job_id))
+    cur.execute("UPDATE jobs SET status = 'Verified', processed_at = ? WHERE id = ?", (now, args.job_id))
 
     # Replace any prior outcome for this job so the row count stays one-per-job
     # and a stale needs-verification cannot sit beside a verified.

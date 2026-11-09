@@ -83,3 +83,20 @@ def test_save_job_preserves_applying_claim_marker_and_timestamp(temp_db):
     assert row["processed_at"] == marker
     assert row["title"] == "Backend Intern"
     assert row["score"] == 99
+
+
+def test_get_jobs_by_status_reads_a_status_whatever_its_case(temp_db):
+    # record_instahyre_submit.py wrote "verified" for 159 one-click Instahyre
+    # applications while every other writer used "Verified". A case-sensitive
+    # IN() therefore reported 58 verified rows out of 217, and next_targets.py
+    # (WHERE status='Evaluated') could not see the three lowercase ones at all.
+    # A status is a value, not a spelling, so the read has to match either.
+    temp_db.save_job(title="Backend Intern", company="Oolka", link="https://x/1", source="Instahyre", status="verified")
+    temp_db.save_job(title="Backend Intern", company="Acme", link="https://x/2", source="LinkedIn", status="Verified")
+    temp_db.save_job(title="Backend Intern", company="Vercel", link="https://x/3", source="LinkedIn", status="evaluated")
+
+    verified = {row["company"] for row in temp_db.get_jobs_by_status(["Verified"])}
+    assert verified == {"Oolka", "Acme"}
+    assert [row["company"] for row in temp_db.get_jobs_by_status(["Evaluated"])] == ["Vercel"]
+    # And a caller asking in lower case still gets both spellings of Verified.
+    assert len(temp_db.get_jobs_by_status(["verified"])) == 2

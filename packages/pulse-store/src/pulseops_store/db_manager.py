@@ -672,10 +672,14 @@ def get_jobs_by_status(statuses: list[str], limit: int = 200) -> list[dict]:
     conn = get_connection()
     try:
         placeholders = ", ".join("?" for _ in statuses)
+        # Case-insensitive: the canonical spelling is "Evaluated"/"Verified", but
+        # one tool wrote lowercase for 159 rows and a case-sensitive IN() read
+        # them as missing rather than as the wrong case. A status is a value, not
+        # a string with a spelling contract.
         rows = conn.execute(
-            f"SELECT * FROM jobs WHERE status IN ({placeholders}) "
+            f"SELECT * FROM jobs WHERE LOWER(status) IN ({placeholders}) "
             f"ORDER BY processed_at DESC LIMIT ?",
-            (*statuses, limit),
+            (*[str(s).strip().lower() for s in statuses], limit),
         ).fetchall()
         return _rows(rows)
     except sqlite3.Error as e:
