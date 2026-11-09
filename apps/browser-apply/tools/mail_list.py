@@ -165,16 +165,24 @@ def main() -> int:
         pat = re.compile(args.grep, re.I)
         rows = [r for r in rows if pat.search(r["from"]) or pat.search(r["subject"])]
 
+    # --find narrows the listing itself. It used to run only after the list was
+    # printed, so `--find glean` showed 25 unrelated messages above the matches
+    # and read as "the inbox is full of Glean mail" - the opposite of its job.
+    if args.find:
+        pat = re.compile(args.find, re.I)
+        rows = [r for r in rows if pat.search(r["from"]) or pat.search(r["subject"])]
+
     for i, r in enumerate(rows):
         print(f"[{i}] {r['date']}  {r['from'][:52]:<52}  {r['subject'][:88]}")
 
     if args.show is not None:
-        # Index into `rows`, not `ids`: --grep filters them, so the printed [i]
-        # and the raw fetch list stop agreeing.
+        # Index into `rows`, not `ids`: --grep/--find filter them, so the printed
+        # [i] and the raw fetch list stop agreeing. The message's own Message-ID
+        # is what the header pass recorded, so fetch by that.
         if args.show >= len(rows):
             print(f"index {args.show} out of range (have {len(rows)})", file=sys.stderr)
             return 1
-        typ, raw = client.fetch(ids[args.show], "(RFC822)")
+        typ, raw = client.fetch(rows[args.show]["mid"], "(RFC822)")
         if typ == "OK" and raw and isinstance(raw[0], tuple):
             msg = email.message_from_bytes(raw[0][1])
             print("\n" + "=" * 78)
@@ -185,10 +193,7 @@ def main() -> int:
     # Positional indices go stale the moment new mail lands mid-listing, so
     # anything addressed by content goes through here instead.
     if args.find:
-        pat = re.compile(args.find, re.I)
         for r in rows:
-            if not (pat.search(r["from"]) or pat.search(r["subject"])):
-                continue
             typ, raw = client.fetch(r["mid"], "(RFC822)")
             if typ != "OK" or not raw or not isinstance(raw[0], tuple):
                 continue
