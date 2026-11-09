@@ -1519,6 +1519,38 @@ function yearsOfExperience(candidate) {
   return `${n} year${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * "How many years of ... experience do you have?"
+ *
+ * The qualifier between "years of" and "experience" is the board's own words
+ * and there can be several of them: "How many years of professional backend
+ * software engineering experience do you have?" (GitLab, 2026-11-09) matched
+ * nothing, because the pattern allowed at most one qualifier and only three
+ * fixed ones. The field stayed empty and the submit was refused with everything
+ * else filled.
+ *
+ * The negative lookahead keeps it away from questions that name a technology:
+ * "How many years of professional, production experience do you have writing Go
+ * (Golang) or Ruby?" is not answerable from total experience, and answering it
+ * with 0.2 years would be a false statement about a language the CV never
+ * claims. Those are left for the human, which is visible as [answer-missing].
+ */
+const YEARS_OF_EXPERIENCE_QUESTION = /^(?![\s\S]*\b(?:writing|programming|coding|developing)\b)[\s\S]*(?:how\s+many\s+years\s+of\s+(?:[a-z,/+&-]+\s+){0,6}?experience|years\s+of\s+experience|total\s+experience)/i;
+
+/**
+ * "Are you subject to any employment agreements / post-employment
+ * restrictions ...?" - the same class of representation as a non-compete, and
+ * answered from `application_answers.current_non_compete`.
+ *
+ * GitLab (8916232002, 2026-11-09) words it with "employment agreements and/or
+ * post-employment restrictions", which shares no keyword with the classic
+ * "non-compete, non-solicitation or non-disclosure" form, so the one legal
+ * question on the form the profile could answer stayed empty. The yes/no opener
+ * is still required, which is what keeps Scale AI's noun-phrase "position for
+ * which you are applying?" from being answered with "No".
+ */
+const NON_COMPETE_QUESTION = /^(?=[\s\S]*\b(?:(?:are|do|is|will|have|were|was)\s+you|(?:is|are)\s+there)\b)(?=[\s\S]*(?:non[-\s]?compete|non[-\s]?solicitation|non[-\s]?disclosure|bound\s+by\s+any\s+agreements?|any\s+agreements?\s+with\s+a\s+(?:current|former|previous)|employment\s+agreements?|post[-\s]?employment\s+restrictions?|restrict(?:ed|ing)?\s+(?:your\s+)?(?:ability|employment|work)))/i;
+
 function workAuthorisation(stated) {
   const needsSponsorship = String(stated?.requires_visa_sponsorship ?? "").trim().toLowerCase();
   if (needsSponsorship === "yes" || needsSponsorship === "true") return "No";
@@ -1845,7 +1877,7 @@ function identityFacts(candidate, stated, job = null) {
     },
     {
       tag: "years of experience",
-      hint: /how\s+many\s+years\s+of\s+(?:industry\s+|relevant\s+|professional\s+)?experience|years\s+of\s+experience|total\s+experience/i,
+      hint: YEARS_OF_EXPERIENCE_QUESTION,
       value: yearsOfExperience(candidate),
     },
     {
@@ -1996,7 +2028,7 @@ function identityFacts(candidate, stated, job = null) {
 // Left unset in the profile, the fact is dropped by the filter below and
 // the question stays pending rather than being guessed at.
       tag: "non-compete",
-      hint: /^(?=[\s\S]*\b(?:(?:are|do|is|will|have|were|was)\s+you|(?:is|are)\s+there)\b)(?=[\s\S]*(?:non[-\s]?compete|non[-\s]?solicitation|non[-\s]?disclosure|bound\s+by\s+any\s+agreements?|any\s+agreements?\s+with\s+a\s+(?:current|former|previous)|restrict(?:ed|ing)?\s+(?:your\s+)?(?:ability|employment|work)))/i,
+      hint: NON_COMPETE_QUESTION,
       value: stated?.current_non_compete,
       // NOT `once`. Greenhouse renders each question twice - a text input and
       // a react-select for the same field - and filling only the first left the
@@ -5179,6 +5211,90 @@ function experienceBandFor(question, options, years) {
   return null;
 }
 
+/**
+ * "How many years of professional, production experience do you have writing
+ * Go (Golang) or Ruby?" - a question scoped to named technologies.
+ *
+ * Total experience cannot answer it, and putting 0.2 years there would claim
+ * experience in a language cv.md never mentions. Two truthful answers exist and
+ * which one applies is decided by the CV, not by the posting:
+ *
+ *   - a technology the profile lists  -> the same band the general question gets
+ *   - nothing the profile lists       -> "None", when the board offers it
+ *
+ * Anything else - no recognisable technology, or no matching option - is left
+ * for the human. Measured on GitLab 8916232002, 2026-11-09, where this was the
+ * last of four questions still blocking an otherwise complete form.
+ */
+function skillYearsOption(texts, question, profile, years) {
+  const text = String(question || "");
+  if (!/(?:years?[\s\S]{0,80}experience|experience[\s\S]{0,80}years?)/i.test(text)) return "";
+  if (!Number.isFinite(years)) return "";
+  const m = text.match(/\b(?:writing|using)\s+([^?.]{2,60})/i);
+  if (!m) return "";
+  const named = m[1]
+    .replace(/\([^)]*\)/g, " ")
+    .split(/\s*(?:,|\/|\bor\b|\band\b)\s*/i)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 1 && t.split(/\s+/).length <= 3);
+  if (!named.length) return "";
+  const known = [];
+  for (const list of [profile?.domain?.core_skills, profile?.domain?.adjacent_skills]) {
+    for (const skill of Array.isArray(list) ? list : []) {
+      known.push(String(skill).trim().toLowerCase());
+    }
+  }
+  const anyKnown = named.some((tech) => known.some(
+    (k) => k && (tech === k || tech.startsWith(`${k} `) || k.startsWith(`${tech} `)),
+  ));
+  if (anyKnown) {
+    // "None" is not a band for a technology he does have: experienceBandFor
+    // reads it as 0-to-0.999 years and would answer "None" for 0.2 years of
+    // Python. Only the numeric bands are eligible here.
+    const bands = (Array.isArray(texts) ? texts : [])
+      .filter((t) => !/^(?:none|no experience|nil|n\/a)\b/i.test(String(t).trim()));
+    return experienceBandFor("total experience", bands, years);
+  }
+  return (Array.isArray(texts) ? texts : [])
+    .find((t) => /^(?:none|no experience|nil|n\/a|0)\b/i.test(String(t).trim())) || "";
+}
+
+/**
+ * Pick the "I can relocate to <city>" option of a presence question.
+ *
+ * Indian boards ask this as a dropdown rather than a yes/no:
+ *
+ *   This role requires candidate to be present in Bengaluru, what best describe
+ *   your situation *
+ *     "I'm looking for remote opportunity only"
+ *     "Currently in Bangalore"
+ *     "I'm elsewhere but can relocate to Bangalore"
+ *
+ * (Measured on GitLab 8916232002, 2026-11-09.) Selecting the relocate option is
+ * a commitment about where the candidate will live, so it is only chosen when
+ * the option names a city in application_answers.relocation_cities - compared
+ * through placeAliases, so Bengaluru and Bangalore are the same city - and never
+ * when it names the city he already lives in.
+ */
+function relocationOption(texts, candidate, stated) {
+  const accepted = new Set();
+  for (const city of String(stated?.relocation_cities || "").split(",")) {
+    for (const alias of placeAliases(city.trim())) accepted.add(alias);
+  }
+  if (!accepted.size) return "";
+  const here = placeAliases(candidate?.current_location || "");
+  for (const text of Array.isArray(texts) ? texts : []) {
+    const m = String(text).match(/relocat\w*\s+(?:to|in)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+    if (!m) continue;
+    const city = m[1].trim().toLowerCase();
+    const alias = [...accepted].find((a) => a && (city.startsWith(a) || a.startsWith(city)));
+    if (!alias) continue;
+    if ([...here].some((h) => h && (city.startsWith(h) || h.startsWith(city)))) continue;
+    return String(text);
+  }
+  return "";
+}
+
 async function answerFactualRadioQuestions(page, candidate) {
   // Questions about the candidate's own history that no CV field can be turned
   // into an answer mechanically. Each is answered only when the operator has
@@ -5463,7 +5579,11 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       await page.keyboard.press("Escape").catch(() => {});
     }
   };
-  const combo = async (hintRe, values) => {
+  const combo = async (hintRe, values, options = {}) => {
+    const pick = typeof options?.pick === "function" ? options.pick : null;
+    // A caller that knows what the question IS can name it in the log; a raw
+    // regex source is unreadable for the questions answered from option lists.
+    const label = String(options?.label || "").trim() || hintRe.source;
     const controls = page.locator('[role="combobox"]');
     const total = await controls.count().catch(() => 0);
     if (typeof controls.nth !== "function") return null;
@@ -5503,7 +5623,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         return value ? String(value.textContent || "").trim() : "";
       }).catch(() => "");
       if (already) {
-        console.log(`    [combo] ${hintRe.source}: already answered "${already.slice(0, 30)}" — not overwriting`);
+        console.log(`    [combo] ${label}: already answered "${already.slice(0, 30)}" — not overwriting`);
         // Counts as a match. Without this, a control that is matched and already
         // answered is reported as "no control matched" on the next pass, which is
         // the same conflation this branch exists to remove.
@@ -5536,7 +5656,15 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const pickOption = async (texts) => {
         const lower = (t) => String(t).toLowerCase();
-        for (const candidateText of wantedList) {
+        // Some answers only exist in the board's own vocabulary, and the right
+        // one is a function of the option list rather than of profile text: an
+        // experience BAND ("Intern / Fresher", "Less than 5 Years") and a
+        // "can relocate to <city>" option are both chosen by reading what is on
+        // offer. The caller supplies that decision and it is tried first, with
+        // the shown options as its only input.
+        const computed = pick ? String(pick(texts, signature) || "").trim() : "";
+        const candidates = [computed, ...wantedList].filter(Boolean);
+        for (const candidateText of candidates) {
           const w = lower(candidateText);
           const hit = texts.find((t) => lower(t) === w)
             || texts.find((t) => lower(t).startsWith(w))
@@ -5564,7 +5692,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
             return value ? String(value.textContent || "").trim() : "";
           }).catch(() => "");
           if (landed) {
-            console.log(`    [fill] ${hintRe.source} → "${landed.slice(0, 40)}"`);
+            console.log(`    [fill] ${label} → "${landed.slice(0, 40)}"`);
             return landed;
           }
           console.log(`    [combo] ${hintRe.source}: clicked "${hit.slice(0, 30)}" but nothing was selected`);
@@ -6158,6 +6286,49 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         resolve: fact.byField,
         fallbackLabels: fact.fallbackLabels,
       });
+    }
+    // Two questions exist only as dropdowns whose answers can only be chosen
+    // from the board's own option list, so no profile string can answer them:
+    // an experience BAND ("Intern / Fresher", "Less than 5 Years") and a
+    // "can relocate to <city>" option. Both pick from what is on offer and stay
+    // silent when the list offers nothing the profile supports - measured
+    // 2026-11-09 on GitLab 8916232002, where these two of four questions were
+    // the only ones left empty on an otherwise complete form.
+    const experienceYears = Number.parseFloat(String(candidate?.experience_years ?? ""));
+    if (Number.isFinite(experienceYears) && experienceYears >= 0) {
+      await combo(YEARS_OF_EXPERIENCE_QUESTION, [], {
+        label: "years of experience",
+        pick: (texts) => experienceBandFor("total experience", texts, experienceYears),
+      });
+      // A question scoped to named technologies gets its own answer, decided by
+      // whether the CV lists that technology - run after the general band so the
+      // plain question is already answered and is not touched again.
+      await combo(
+        /how\s+many\s+years|years\s+of\s+experience|years?\s+of\s+[\w\s,]{0,40}experience/i,
+        [],
+        {
+          label: "skill-scoped years",
+          pick: (texts, signature) => skillYearsOption(texts, signature, profile, experienceYears),
+        },
+      );
+    }
+    await combo(
+      /present\s+in|what\s+best\s+describe|your\s+situation/i,
+      [],
+      {
+        label: "relocation",
+        pick: (texts) => relocationOption(texts, candidate, stated),
+      },
+    );
+    // The non-compete representation reaches the fact list only as a text
+    // input, and Greenhouse renders it as a Yes/No react-select (measured on
+    // GitLab 8916232002: "[answer] non-compete: value did not stick (nothing was
+    // accepted)" on every pass). The legal answer is in the profile, so it is
+    // given to the dropdown and to a radio pair too.
+    const nonCompete = String(stated?.current_non_compete ?? "").trim();
+    if (nonCompete) {
+      const picked = await combo(NON_COMPETE_QUESTION, [nonCompete], { label: "non-compete" });
+      if (!picked) await radio(NON_COMPETE_QUESTION, [nonCompete], "non-compete");
     }
     const commitments = [
       { key: "ever_interviewed_here", hint: /ever (?:been )?interviewed|interviewed (?:here|before|previously|with|at)|previous(?:ly)? interview|applied (?:here|before|previously)|have\s+you\s+(?:ever\s+)?(?:interviewed|spoken|applied)|in\s+the\s+past/i, tag: "prior interview history" },
@@ -9104,6 +9275,9 @@ export {
   portalApiHostAllowed,
   placeAliases,
   experienceBandFor,
+  relocationOption,
+  skillYearsOption,
+  YEARS_OF_EXPERIENCE_QUESTION,
   relocationPicks,
   availabilityDate,
   salaryAnswer,

@@ -28,6 +28,29 @@ The upload control's own label decides which document is sent:
 tailored resume answers both halves. Nothing is ever uploaded without a label
 check first, and an unlabelled upload defaults to the tailored resume.
 
+## Screening questions
+
+Facts come from `config/profile.yml`. A question is answered only when the
+profile actually holds the answer; anything else is left blank and named in the
+log as `[answer-missing]`, then collected in `output/pending-questions.json`.
+
+Two shapes cannot be answered with a string at all, because the answer is chosen
+from the board's own option list:
+
+- **Years of experience as a band.** Greenhouse offers
+  `Intern / Fresher`, `Less than 5 Years`, `5-8 Years`, `Above 8+ Years` rather
+  than a number. The band is picked so that it contains
+  `candidate.experience_years` (`experienceBandFor`). A question scoped to a
+  technology ("…writing Go (Golang) or Ruby?") is answered differently
+  (`skillYearsOption`): the band when `config/profile.yml` lists that technology,
+  `None` when it lists none of them and the board offers it, and nothing at all
+  when it cannot tell — so it never claims a language the CV does not have.
+- **Presence questions.** "This role requires candidate to be present in
+  Bengaluru, what best describe your situation?" offers a "can relocate to
+  Bangalore" option. That option is only selected for a city listed in
+  `application_answers.relocation_cities`, and never for the city he already
+  lives in (`relocationOption`).
+
 ## LinkedIn outreach (`linkedin_outreach.mjs`)
 
 For each company: searches LinkedIn → opens `/people/` → picks up to 2 members

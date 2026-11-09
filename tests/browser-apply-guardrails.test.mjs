@@ -42,6 +42,9 @@ import {
   portalApiHostAllowed,
   placeAliases,
   experienceBandFor,
+  relocationOption,
+  skillYearsOption,
+  YEARS_OF_EXPERIENCE_QUESTION,
   relocationPicks,
   availabilityDate,
   salaryAnswer,
@@ -852,6 +855,10 @@ test("plain identity facts are answered from the profile, absent facts are not i
     "are you bound by any agreements with a current or former employer that may restrict your ability to work for us?",
     "do you have any non-compete obligations?",
     "are you subject to any agreements that restrict your employment?",
+    // GitLab, 2026-11-09. No keyword the earlier phrasings had: it says
+    // "employment agreements" and "post-employment restrictions", so the one
+    // question on that form the profile could answer stayed empty.
+    "Are you subject to any employment agreements and/or post-employment restrictions with your current employer or a past employer?*",
   ];
   for (const p of phrasings) {
     assert.ok(nonCompete.hint.test(p), `non-compete hint must match: ${p}`);
@@ -1009,6 +1016,82 @@ test("screening radios are answered from stated facts, never guessed", () => {
   // A question that is not about years must never consume a band.
   assert.equal(experienceBandFor("Are you currently living in Bangalore?", bands, 0.2), null);
   assert.equal(experienceBandFor(q, bands, Number.NaN), null);
+});
+
+test("questions whose answers only exist in the board's option list", () => {
+  // Measured on GitLab 8916232002, 2026-11-09. Four required questions, all
+  // react-selects; the form was refused with "This field is required." on the
+  // ones no profile string could answer.
+  //
+  // "How many years of professional backend software engineering experience do
+  // you have?" offers bands, not a number:
+  const bands = ["Intern / Fresher", "Less than 5 Years", "5-8 Years", "Above 8+ Years"];
+  assert.equal(experienceBandFor("total experience", bands, 0.2), "Intern / Fresher");
+
+  // The years question is recognised whatever qualifiers the board inserts...
+  for (const q of [
+    "How many years of professional backend software engineering experience do you have?*",
+    "How many years of relevant experience do you have?",
+    "Years of experience",
+    "What is your total experience?",
+  ]) {
+    assert.ok(YEARS_OF_EXPERIENCE_QUESTION.test(q), `must match: ${q}`);
+  }
+  // ...but a question scoped to a technology is NOT answerable from total
+  // experience. GitLab asks "How many years of professional, production
+  // experience do you have writing Go (Golang) or Ruby?" and the CV claims
+  // neither language: answering 0.2 years would be a false statement.
+  for (const q of [
+    "How many years of professional, production experience do you have writing Go (Golang) or Ruby? *",
+    "How many years of programming experience do you have in C?",
+  ]) {
+    assert.equal(YEARS_OF_EXPERIENCE_QUESTION.test(q), false, `must not match: ${q}`);
+  }
+
+  // "This role requires candidate to be present in Bengaluru, what best
+  // describe your situation *" - the relocate option commits him to living
+  // there, so it is only chosen for a city he listed.
+  const stated = { relocation_cities: "Bengaluru, Hyderabad, Pune, Chennai, NCR" };
+  const candidate = { current_location: "Greater Noida, Uttar Pradesh" };
+  const gitlabOptions = [
+    "I'm looking for remote opportunity only",
+    "Currently in Bangalore",
+    "I'm elsewhere but can relocate to Bangalore",
+  ];
+  assert.equal(
+    relocationOption(gitlabOptions, candidate, stated),
+    "I'm elsewhere but can relocate to Bangalore",
+    "Bangalore is Bengaluru, and it is on his list",
+  );
+  // A city he never agreed to is left untouched, and so is a city he already
+  // lives in - "can relocate to Noida" is not a truthful answer for a Noida
+  // resident, the truthful option is that he is already there.
+  assert.equal(
+    relocationOption(["I'm elsewhere but can relocate to Kochi"], candidate, stated),
+    "",
+  );
+  assert.equal(
+    relocationOption(["I'm elsewhere but can relocate to Noida"], candidate, stated),
+    "",
+  );
+  assert.equal(relocationOption(gitlabOptions, candidate, {}), "");
+  assert.equal(relocationOption([], candidate, stated), "");
+
+  // The tech-scoped years question is not the general one. GitLab's options are
+  // ["None", "Less than 1 year", "1-3 Years", "3-6 Years", "6+ Years"] and the
+  // CV lists neither Go nor Ruby, so the truthful answer is "None" - not 0.2
+  // years, which would claim experience in a language he has never written.
+  const skillProfile = { domain: { core_skills: ["Python", "C++"], adjacent_skills: ["AWS", "PostgreSQL"] } };
+  const goOptions = ["None", "Less than 1 year", "1-3 Years", "3-6 Years", "6+ Years"];
+  const goQ = "How many years of professional, production experience do you have writing Go (Golang) or Ruby? *";
+  assert.equal(skillYearsOption(goOptions, goQ, skillProfile, 0.2), "None");
+  // A technology the CV does list takes the band that contains his 0.2 years.
+  const pyQ = "How many years of experience do you have writing Python?";
+  assert.equal(skillYearsOption(goOptions, pyQ, skillProfile, 0.2), "Less than 1 year");
+  // Prose that names no technology is left alone, and so is a question that is
+  // not about years at all.
+  assert.equal(skillYearsOption(goOptions, "How many years have you worked using our platform?", skillProfile, 0.2), "");
+  assert.equal(skillYearsOption(goOptions, "Do you enjoy writing Go?", skillProfile, 0.2), "");
 });
 
 test("relocation checkbox groups are answered only from a stated city list", () => {
