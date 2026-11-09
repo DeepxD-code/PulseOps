@@ -80,10 +80,17 @@ function monthlyInrFromText(text) {
  * Should this posting be skipped for stating a salary below the floor?
  * Returns { skip, monthly }. `skip` is true only when a figure was found AND
  * it is under the threshold.
+ *
+ * Zero is not a low salary, it is the absence of one: boards that have not
+ * filled in a pay field render "₹0 per month" (or a range starting at 0), and
+ * reading that as "pays nothing" skipped #1319 Nudge on 2026-11-09 - a
+ * Bengaluru backend internship whose LinkedIn page carries no pay statement at
+ * all. Treat a zero as undisclosed, which the filter already never skips.
  */
 function statedSalaryTooLow(text, minimumMonthlyInr = MIN_MONTHLY_INR) {
   const monthly = monthlyInrFromText(text);
   if (monthly === null) return { skip: false, monthly: null };
+  if (monthly <= 0) return { skip: false, monthly };
   return { skip: monthly < minimumMonthlyInr, monthly };
 }
 

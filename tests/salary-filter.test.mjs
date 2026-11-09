@@ -37,6 +37,19 @@ test("an acceptable stated salary is kept, and the floor itself counts as accept
   assert.equal(statedSalaryTooLow("10k pm").monthly, MIN_MONTHLY_INR);
 });
 
+test("a zero salary figure means undisclosed, not unpaid", () => {
+  // Boards render an empty pay field as zero. Reading that as "under the floor"
+  // skipped #1319 Nudge (Bengaluru backend internship, no pay stated) on
+  // 2026-11-09.
+  for (const text of [
+    "Salary: ₹0 per month",
+    "0 per month",
+    "Backend Intern 0 - 1 yrs Bangalore — monthly",
+  ]) {
+    assert.equal(statedSalaryTooLow(text).skip, false, text);
+  }
+});
+
 test("a role with no stated salary is never skipped", () => {
   for (const text of [
     "Great backend role, competitive salary",

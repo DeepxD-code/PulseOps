@@ -35,9 +35,7 @@ profile actually holds the answer; anything else is left blank and named in the
 log as `[answer-missing]`, then collected in `output/pending-questions.json`.
 
 Two shapes cannot be answered with a string at all, because the answer is chosen
-from the board's own option list:
-
-- **Years of experience as a band.** Greenhouse offers
+from the board's own option list:- **Years of experience as a band.** Greenhouse offers
   `Intern / Fresher`, `Less than 5 Years`, `5-8 Years`, `Above 8+ Years` rather
   than a number. The band is picked so that it contains
   `candidate.experience_years` (`experienceBandFor`). A question scoped to a
@@ -50,6 +48,39 @@ from the board's own option list:
   Bangalore" option. That option is only selected for a city listed in
   `application_answers.relocation_cities`, and never for the city he already
   lives in (`relocationOption`).
+- **Availability bands.** "Available to start (a notice period)" offers
+  `Available immediately`, `Available within 2-4 weeks`, `Available within
+  1-2 months`. The stated notice period is read in days and the narrowest band
+  containing it is chosen (`noticeBandFor`).
+- **Place-of-residence options.** "What is your current place of residence?
+  (choose one of the options)" lists cities. The option naming
+  `candidate.current_location` is selected — an exact match before a prefix one,
+  so "Delhi" is not answered with "New Delhi" when both are offered — and a list
+  without his city is left blank rather than approximated.
+
+A job details page whose only control is "Apply for this job" is *not* a
+rendered form: the run waits for real fields before filling, then clicks the
+opener (Keka did this in reverse and recorded a click on the opener as the
+submission). The same rule keeps a hop that already landed on an `/apply` route
+from re-clicking that form's own submit.
+
+### Keka's two gates
+
+Keka (`*.keka.com`) puts the form one click behind "Apply for this job" and then
+asks for things no profile can answer by itself:
+
+- **An image captcha** (`#captcha` plus a 120×40 picture). It cannot be read
+  honestly by a program, and it never disappears while the page stays on the
+  form, so the vendor-widget wait would expire. With `--headed --otp-pause` the
+  run fills everything, prints `[handoff] type the captcha…`, and submits as soon
+  as the box holds a value. Without those flags the row is recorded for a human.
+- **A candidate-consent checkbox that is not marked `required`** but is the
+  switch that enables "Apply Now". Under `--accept-terms` the run ticks a consent
+  it recognises (terms/privacy/consent, never marketing) once the button is
+  actually disabled, then re-reads the button.
+
+`firstAmount()` supplies the bare number for a `*.amount` control, whose currency
+and "Monthly" period are separate controls on the same row.
 
 ## LinkedIn outreach (`linkedin_outreach.mjs`)
 

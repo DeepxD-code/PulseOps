@@ -44,10 +44,14 @@ import {
   experienceBandFor,
   relocationOption,
   skillYearsOption,
+  noticeDays,
+  noticeBandFor,
+  isApplicationSurfaceControl,
   YEARS_OF_EXPERIENCE_QUESTION,
   relocationPicks,
   availabilityDate,
   salaryAnswer,
+  firstAmount,
   salaryInLacs,
   isFingerprintVendorHost,
   finalGuardAction,
@@ -395,7 +399,13 @@ test("Lever company boards are rejected but role listings are allowed", () => {
 test("application surface waits until real form controls render", async () => {
   let calls = 0;
   const page = {
-    evaluate: async () => calls++ >= 2,
+    // The probe reports visible entry fields and visible control labels; the
+    // readiness rule (a field, or a submit/continue control that is not an Apply
+    // opener) is applied in Node so it can be tested on its own.
+    evaluate: async () => {
+      calls += 1;
+      return calls >= 3 ? { fields: 1, labels: [] } : { fields: 0, labels: [] };
+    },
     waitForTimeout: async () => {},
   };
   assert.equal(await waitForApplicationSurface(page, 5000), true);
@@ -409,12 +419,30 @@ test("application surface does not treat stale loader copy as readiness", async 
   const page = {
     evaluate: async () => {
       calls += 1;
-      return true; // controls present on the first poll
+      return { fields: 1, labels: [] }; // controls present on the first poll
     },
     waitForTimeout: async () => {},
   };
   assert.equal(await waitForApplicationSurface(page, 5000), true);
   assert.equal(calls, 1);
+});
+
+test("an Apply opener alone is not an open application form", async () => {
+  // Keka's job details page: one visible "Apply for this job" button, no fields.
+  // Treating that as readiness made #1319 fill nothing and record the click on
+  // the opener as its submission.
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return calls >= 2
+        ? { fields: 0, labels: ["Apply for this job", "Submit application"] }
+        : { fields: 0, labels: ["Apply for this job"] };
+    },
+    waitForTimeout: async () => {},
+  };
+  assert.equal(await waitForApplicationSurface(page, 5000), true);
+  assert.equal(calls, 2, "the opener must not satisfy the first poll");
 });
 
 test("CAPTCHA is fail-closed instead of falling through", async () => {
@@ -712,6 +740,16 @@ test("salary is answered in the unit the question asked for", () => {
   const fact = identityFacts({}, stated).find((f) => f.tag === "desired salary");
   assert.equal(typeof fact.byField, "function");
   assert.equal(fact.byField("desired salary per month"), "INR 35,000 - 45,000 per month");
+  // A `*.amount` control is the numeric half of an amount + currency + "Monthly"
+  // row, so it gets the number, not the sentence. Keka renders exactly this
+  // (expectedSalary.amount, #1319, 2026-11-09).
+  assert.equal(
+    salaryAnswer(stated, "expected salary * expectedsalary expectedsalary.amount monthly"),
+    "35000",
+  );
+  assert.equal(firstAmount("INR 35,000 - 45,000 per month"), "35000");
+  assert.equal(firstAmount("INR 8,40,000 - 10,80,000 per annum"), "840000");
+  assert.equal(firstAmount(""), "");
 });
 
 test("plain identity facts are answered from the profile, absent facts are not invented", () => {
@@ -769,6 +807,12 @@ test("plain identity facts are answered from the profile, absent facts are not i
     "LinkedIn",
   );
   assert.equal(identityFacts({}, { how_you_heard: "A colleague" }).find((f) => f.tag === "how you heard").value, "A colleague");
+  // A day-count availability control is the notice period in days, and a gender
+  // dropdown is only answered when the operator stated it.
+  assert.equal(richByTag["availability days"], "30");
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "availability days"), false);
+  assert.equal(identityFacts({}, { gender: "Male" }).find((f) => f.tag === "gender").value, "Male");
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "gender"), false);
 
   // A notice period is a duration and a start date is a date. They used to be
   // the same fact, so Hirist's mandatory "What is your Notice Period?" box was
@@ -1016,6 +1060,48 @@ test("screening radios are answered from stated facts, never guessed", () => {
   // A question that is not about years must never consume a band.
   assert.equal(experienceBandFor("Are you currently living in Bangalore?", bands, 0.2), null);
   assert.equal(experienceBandFor(q, bands, Number.NaN), null);
+});
+
+test("the stated notice period is rendered in the board's own availability bands", () => {
+  // Zema's Deel form (#1320, 2026-11-09): "Available to start (a notice period)
+  // *" as a radio group; Apply stays disabled until it is answered. The profile
+  // states "30 days", so this is transcription in the board's vocabulary.
+  const options = [
+    "Available immediately",
+    "Available within 2-4 weeks",
+    "Available within 1-2 months",
+    "Available within 2-3 months",
+  ];
+  assert.equal(noticeDays({ notice_period: "30 days" }), 30);
+  assert.equal(noticeDays({ notice_period: "2 weeks" }), 14);
+  assert.equal(noticeDays({ notice_period: "Immediate" }), 0);
+  assert.equal(noticeDays({}), null);
+  assert.equal(noticeDays({ notice_period: "as discussed" }), null);
+
+  assert.equal(noticeBandFor("Available to start (a notice period) *", options, 30), "Available within 1-2 months");
+  assert.equal(noticeBandFor("Available to start (a notice period) *", options, 0), "Available immediately");
+  assert.equal(noticeBandFor("Available to start (a notice period) *", options, 14), "Available within 2-4 weeks");
+  // A question that is not about availability gets nothing, whatever the options say.
+  assert.equal(noticeBandFor("How many years of experience do you have?", options, 30), "");
+  assert.equal(noticeBandFor("Available to start (a notice period) *", options, Number.NaN), "");
+});
+
+test("the control that opens a form is not evidence that the form is open", () => {
+  // Keka's job details page (nudge.keka.com/careers/jobdetails/94986, measured
+  // 2026-11-09) has one visible control, "Apply for this job", and no fields.
+  // It used to satisfy the "application surface has rendered" check because its
+  // label contains "apply", so #1319 filled nothing, clicked that same button
+  // when it looked for Submit, and landed at NeedsVerification.
+  assert.equal(isApplicationSurfaceControl("Apply for this job"), false);
+  assert.equal(isApplicationSurfaceControl("Apply"), false);
+  assert.equal(isApplicationSurfaceControl("Apply Now"), false, "Keka's real submit lives inside an open form");
+  assert.equal(isApplicationSurfaceControl("Easy Apply"), false);
+
+  // A form that is genuinely open says one of these.
+  for (const label of ["Submit application", "Submit", "Send application", "Continue", "Next"]) {
+    assert.equal(isApplicationSurfaceControl(label), true, `must count as a surface: ${label}`);
+  }
+  assert.equal(isApplicationSurfaceControl(""), false);
 });
 
 test("questions whose answers only exist in the board's option list", () => {

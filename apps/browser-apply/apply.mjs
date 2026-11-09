@@ -193,6 +193,10 @@ const ATS_ALLOWED_HOSTS = Object.freeze({
   indeed: ["indeed.com", "www.indeed.com"],
   glassdoor: ["glassdoor.com", "www.glassdoor.com", "glassdoor.co.in", "glassdoor.co.uk"],
   jobhai: ["jobhai.com", "www.jobhai.com"],
+  // Keka hosts each employer on its own subdomain (nudge.keka.com), so the
+  // classification is a suffix rule and the exact-host navigation list cannot
+  // enumerate tenants; a direct keka row is admitted by its own origin.
+  keka: ["keka.com"],
   yc: ["workatastartup.com", "www.workatastartup.com", "ycombinator.com", "www.ycombinator.com"],
   generic: [],
 });
@@ -546,6 +550,12 @@ const ATS_ASSET_HOSTS = Object.freeze({
   // app never bootstraps and the page sits on a spinner forever, with no form
   // and no buttons to find.
   ashby: ["cdn.ashbyhq.com", "cdn.ashbyprd.com"],
+  // Keka's careers pages are jQuery apps served from its own CDN. Without these
+  // scripts the page still renders, but the click handlers do not exist: the
+  // "Apply for this job" button on a job details page did nothing at all
+  // (nudge.keka.com #1319, measured 2026-11-09) while the same click navigated
+  // in a plain browser.
+  keka: ["cdn.keka.com"],
   workday: ["assets.ctfassets.net"],
 });
 // Vendor CDNs that host an ATS's application runtime under their own domain
@@ -1621,7 +1631,7 @@ function salaryInLacs(value) {
 
 function salaryAnswer(stated, signature) {
   const sig = String(signature || "");
-  const perMonth = /\b(?:per|a|\/)\s*month|monthly|month\s*[-–]?\s*\??\s*$/i.test(sig)
+  const perMonth = /\b(?:per|a|\/)\s*month|monthly|month\s*[--]?\s*\??\s*$/i.test(sig)
     || /\bmonth\b/i.test(sig);
   const perAnnum = /\b(?:per|a|\/)\s*(?:annum|year)|annually|annual|lpa|lakh\s*per\s*annum|\bctc\b/i.test(sig);
   let value = "";
@@ -1631,7 +1641,21 @@ function salaryAnswer(stated, signature) {
   // was given in, and say the unit so it cannot be misread.
   else value = String(stated?.desired_salary_monthly ?? stated?.desired_salary_annual ?? "").trim();
   // "in Lacs" / "LPA" asks for the number in lacs, whatever the profile states.
-  return /\blacs?\b|\blakhs?\b|\blpa\b/i.test(sig) ? salaryInLacs(value) : value;
+  if (/\blacs?\b|\blakhs?\b|\blpa\b/i.test(sig)) return salaryInLacs(value);
+  // A `*.amount` control is the numeric half of an amount+currency+period group:
+  // the currency and "Monthly" are separate controls on the same row, so the
+  // number is the only thing this box wants. Writing the prose
+  // "INR 35,000 - 45,000 per month" into it would put a sentence in a numeric
+  // field. The lower bound is the operator's own floor, not a new figure.
+  // Keka renders exactly this shape (expectedSalary.amount, #1319, 2026-11-09).
+  if (/\.amount\b|\bamount\b/i.test(sig)) return firstAmount(value);
+  return value;
+}
+
+/** The first number in a stated salary, as digits: "INR 35,000 - 45,000" -> "35000". */
+function firstAmount(value) {
+  const m = String(value || "").match(/(\d[\d,]*(?:\.\d+)?)/);
+  return m ? m[1].replace(/,/g, "") : "";
 }
 
 /**
@@ -1727,7 +1751,12 @@ function identityFacts(candidate, stated, job = null) {
     },
     {
       tag: "phone number",
-      hint: /phone(?:\s*(?:number|no\.?|#))?|mobile(?:\s*(?:number|no\.?))?|contact\s*number|telephone/i,
+      // A dialling-code control is not the number. Keka renders the country code
+      // as a separate select whose name is `mobilePhone.countryCode`; the phone
+      // fact matched it, tried to select "6289050278" from a list of "+93 +355
+      // …", and logged a failure while the number box itself was answered by the
+      // field list (#1319, 2026-11-09).
+      hint: /^(?![\s\S]*\b(?:country\s*code|dial(?:ling)?\s*code|isd\s*code)\b)[\s\S]*(?:phone(?:\s*(?:number|no\.?|#))?|mobile(?:\s*(?:number|no\.?))?|contact\s+number|telephone)/i,
       value: candidate?.phone,
     },
     {
@@ -1940,7 +1969,7 @@ function identityFacts(candidate, stated, job = null) {
       // in the expected/desired form: "current CTC" is a different question (and
       // for this candidate the answer is zero) so a bare \bctc\b here would
       // quote an expected figure as a current one.
-      hint: /(?:expected|desired|required)\s+(?:ctc|package|salary|compensation)|salary\s+(?:range|expectation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)|ctc\s+expectation/i,
+      hint: /(?:expected|desired|required)\s*(?:ctc|package|salary|compensation)|salary\s+(?:range|expectation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)|ctc\s+expectation/i,
       // Resolved per control: a board asking "per month" and one asking
       // "per annum" need different numbers, and the same profile cannot
       // answer both with one string.
@@ -1952,7 +1981,7 @@ function identityFacts(candidate, stated, job = null) {
       // states it: current_company is "Not currently employed", so there is no
       // current package to report and 0 is the truthful answer. If the candidate
       // were employed this resolves to nothing rather than inventing a figure.
-      hint: /current\s+(?:ctc|package|annual\s+compensation)|present\s+(?:ctc|package|salary)|current\s+annual\s+salary/i,
+      hint: /current\s*(?:ctc|package|annual\s*compensation|salary)|present\s*(?:ctc|package|salary)|current\s*annual\s*salary/i,
       // Only a stated employment status settles this. An empty profile gets
       // nothing rather than a "0" that claims the candidate earns nothing.
       value: (() => {
@@ -1995,6 +2024,30 @@ function identityFacts(candidate, stated, job = null) {
       // Every separator in this pattern is now `[-\s]?`.
       hint: /earliest\s+(?:you\s+would\s+want|availability|date)|available\s+(?:to\s+start|from)|start[-\s]?date|date[-\s]?(?:you|available|can)|when\s+(?:can|could)\s+you\s+start|desired\s+start|pick[-\s]?(?:a\s+)?date|select[-\s]?(?:a\s+)?date|choose[-\s]?(?:a\s+)?date/i,
       value: availabilityDate(candidate),
+    },
+    {
+      tag: "availability days",
+      // "Available To Join (in days) *" is a NUMBER of days, not a date and not
+      // the prose "30 days". Keka renders it as <input type="number">, which the
+      // field locator did not even include, and the date rule above does not
+      // match "available to join" - so the required field stayed empty and the
+      // whole form's Apply Now button stayed disabled (#1319, 2026-11-09).
+      // noticeDays() reads the operator's own "30 days" and returns 30; a notice
+      // period the profile does not state produces nothing rather than a guess.
+      hint: /available\s+to\s+join|joining\s+(?:in|within)\s+\d+\s*days|availability\s*\(?\s*in\s*days\s*\)?|notice\s+period\s*\(?\s*in\s*days\s*\)?/i,
+      value: (() => {
+        const days = noticeDays(candidate);
+        return Number.isFinite(days) ? String(days) : "";
+      })(),
+    },
+    {
+      tag: "gender",
+      // A mandatory dropdown on Keka's careers form. It is a fact only the
+      // candidate can state, so it lives in application_answers and is never
+      // inferred; with no configured value the select is left untouched and the
+      // required field is reported instead of being guessed at.
+      hint: /\bgender\b/i,
+      value: String(stated?.gender ?? "").trim(),
     },
     {
       // Two phrasings reach this, and the second one was unhandled for 13
@@ -2608,6 +2661,11 @@ function inferATS(url) {
   if (looksLike("indeed")) return "indeed";
   if (looksLike("glassdoor")) return "glassdoor";
   if (looksLike("jobhai")) return "jobhai";
+  // Keka serves each employer from its own subdomain, so this is a suffix
+  // match on keka.com: nudge.keka.com is a Keka careers page. Its form cannot
+  // render without cdn.keka.com's jQuery bundle, which only the keka asset
+  // allowlist admits.
+  if (looksLike("keka")) return "keka";
   if (looksLike("yc")) return "yc";
   return "generic";
 }
@@ -2648,6 +2706,20 @@ const ATS_SELECTORS = {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[name="mobile"]', 'input[type="tel"]'], resume: ['input[type="file"]'],
     },
     submitBtn: ['button:has-text("Submit")']
+  },
+  // Keka. A job details page (/careers/jobdetails/<id>) has one control, "Apply
+  // for this job", which opens /careers/applyjob/<id>; the form there submits
+  // with "Apply Now". Measured on nudge.keka.com/94986, 2026-11-09.
+  keka: {
+    applyBtn: ['button:has-text("Apply for this job")', 'button:has-text("Apply")', 'a:has-text("Apply")'],
+    fields: {
+      firstName: ['#firstName', 'input[name="firstName"]'],
+      lastName: ['#lastName', 'input[name="lastName"]'],
+      email: ['#email', 'input[name="email"]', 'input[type="email"]'],
+      phone: ['#mobilePhone\\.number', 'input[name="mobilePhone.number"]', 'input[type="tel"]'],
+      resume: ['#resume-upload', 'input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Apply Now")', 'button[type="submit"]']
   },
   yc: {
     applyBtn: ['a:has-text("Apply")', 'button:has-text("Apply")', 'a[href*="/apply"]'],
@@ -3455,6 +3527,27 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
   return boundary;
 }
 
+/**
+ * A control whose label says "start the application", not "send it".
+ *
+ * Keka's job details page (nudge.keka.com/careers/jobdetails/94986, measured
+ * 2026-11-09) carries exactly one visible control, "Apply for this job", and no
+ * fields. The readiness check below used to accept any visible submit|apply|
+ * continue|next control as "the form has rendered", so it declared that page
+ * ready; the run then filled zero fields, found the same button when it looked
+ * for Submit, clicked it, and recorded NeedsVerification — on a page whose real
+ * form was one click away.
+ *
+ * A form that is genuinely open says "Submit application", "Send application",
+ * "Continue" or "Next". A control that says "Apply" is the door to the form.
+ */
+function isApplicationSurfaceControl(label) {
+  const text = String(label || "").trim();
+  if (!text) return false;
+  if (/\bapply\b/i.test(text)) return false;
+  return /\b(?:submit|send application|continue|next)\b/i.test(text);
+}
+
 async function waitForApplicationSurface(page, timeoutMs = 30000) {
   if (!page || typeof page.evaluate !== "function") return true;
   const deadline = Date.now() + Math.max(1000, timeoutMs);
@@ -3462,8 +3555,9 @@ async function waitForApplicationSurface(page, timeoutMs = 30000) {
   while (Date.now() < deadline) {
     // Readiness is the presence of real form controls. Loader copy such as
     // "Reading Your Resume" stays in the DOM after parsing finishes, so text
-    // matching alone would block forever.
-    const ready = await page.evaluate(() => {
+    // matching alone would block forever. The labels are judged in Node so the
+    // rule stays one implementation and stays testable.
+    const probe = await page.evaluate(() => {
       const visible = (el) => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -3471,12 +3565,11 @@ async function waitForApplicationSurface(page, timeoutMs = 30000) {
       };
       const entry = [...document.querySelectorAll("input, textarea, select")].filter(visible)
         .filter((el) => !/hidden|submit|button|file|checkbox|radio/i.test(`${el.type || ""}`));
-      if (entry.length) return true;
-      return [...document.querySelectorAll("button, a, [role='button']")].filter(visible).some((el) => {
-        const label = ((el.innerText || el.value || "") || "").trim();
-        return /\b(?:submit|apply|send application|continue|next)\b/i.test(label);
-      });
-    }).catch(() => false);
+      const labels = [...document.querySelectorAll("button, a, [role='button']")].filter(visible)
+        .map((el) => ((el.innerText || el.value || "") || "").trim());
+      return { fields: entry.length, labels };
+    }).catch(() => ({ fields: 0, labels: [] }));
+    const ready = probe.fields > 0 || (probe.labels || []).some(isApplicationSurfaceControl);
     if (ready) return true;
     if (polls % 15 === 0) console.log("    [wait] waiting for the application form to render…");
     polls += 1;
@@ -4403,8 +4496,27 @@ function rankByAcceptance(rows, acceptance) {
  */
 function controlSignatureMatcher() {
   return (el) => {
+      // A <label for="id"> is the canonical name of a field, and it is often the
+      // ONLY place the question is written. Keka's salary inputs sit in a
+      // `div.validation` next to a currency widget, and the nearest ancestor that
+      // yields any text is the widget row - "INR Monthly" - so the walk stopped
+      // there and the signature read
+      //   "expectedsalary expectedsalary.amount monthly"
+      // instead of "Expected Salary *". The required field then blocked the
+      // submit while the answer sat in the profile (nudge.keka.com #1319,
+      // 2026-11-09). Reading the label directly is cheaper and more exact than
+      // climbing further, and it cannot pick up a neighbouring question.
       const own = [
         el.getAttribute("aria-label") || "",
+        (() => {
+          if (typeof document === "undefined" || !el.id) return "";
+          try {
+            const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+            return label ? String(label.textContent || "") : "";
+          } catch {
+            return "";
+          }
+        })(),
         el.getAttribute("id") || "",
         el.getAttribute("name") || "",
         // Placeholder is included because it is frequently the ONLY prompt a
@@ -4631,10 +4743,11 @@ async function describeEmptyEntryFields(page) {
  * operator flag. Marketing opt-ins and unrelated boxes are never touched, and
  * every acceptance is logged so the action is auditable.
  */
-async function acceptRequiredTerms(page) {
+async function acceptRequiredTerms(page, options = {}) {
   if (!ACCEPT_TERMS) return [];
   if (!page || typeof page.evaluate !== "function") return [];
-  const accepted = await page.evaluate(() => {
+  const includeOptional = options?.includeOptional === true;
+  const accepted = await page.evaluate((alsoOptional) => {
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
@@ -4648,7 +4761,11 @@ async function acceptRequiredTerms(page) {
       const required = el.required
         || el.getAttribute("aria-required") === "true"
         || /\brequired\b/i.test(String(el.className || ""));
-      if (!required) return;
+      // `alsoOptional` is only set when the final button is ALREADY disabled:
+      // Keka's candidate-consent box is not marked required, yet it is the
+      // switch that enables "Apply Now" (measured 2026-11-09, #1319). It must
+      // still read as a consent, and marketing opt-ins stay untouched.
+      if (!required && !alsoOptional) return;
       const label = el.getAttribute("aria-label")
         || (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent)
         || (el.closest("label")?.textContent)
@@ -4901,7 +5018,26 @@ async function clickFinalControl(page, locator, label, options = {}) {
     }
     return { allowed: false, clicked: false, blocked: first.reason, reason: first.reason };
   }
-  if (await hasCaptcha(page)) {
+  // An operator-authorised terms acceptance must land before the final click,
+  // otherwise required-field validation silently swallows the submission. It
+  // runs before the captcha handoff so the operator sees a form whose button is
+  // already enabled while they type the characters.
+  if (ACCEPT_TERMS) await acceptRequiredTerms(page).catch(() => []);
+  // A consent box that is NOT marked required can still be the switch that
+  // enables the final button — Keka's candidate-consent box is exactly that: the
+  // form validates, the captcha is typed, and "Apply Now" stays disabled until
+  // it is ticked (#1319, measured 2026-11-09). Retry only while the button is
+  // actually disabled, and only under --accept-terms.
+  if (ACCEPT_TERMS && (await locator.isDisabled().catch(() => false))) {
+    const extra = await acceptRequiredTerms(page, { includeOptional: true }).catch(() => []);
+    if (extra.length) console.log("  [terms-accepted] that consent box was what kept the final button disabled");
+  }
+
+  const typedCaptcha = await waitForOperatorCaptcha(page);
+  if (typedCaptcha.present && !typedCaptcha.entered) {
+    return { allowed: true, clicked: false, captcha: true };
+  }
+  if (!typedCaptcha.present && (await hasCaptcha(page))) {
     console.log(`  [captcha] final ${label} is blocked until verification disappears`);
     if (!(await waitForCaptchaResolution(page))) {
       return { allowed: true, clicked: false, captcha: true };
@@ -4910,9 +5046,6 @@ async function clickFinalControl(page, locator, label, options = {}) {
   if (!locator || (await locator.count().catch(() => 0)) === 0) {
     return { allowed: true, clicked: false };
   }
-  // An operator-authorised terms acceptance must land before the final click,
-  // otherwise required-field validation silently swallows the submission.
-  if (ACCEPT_TERMS) await acceptRequiredTerms(page).catch(() => []);
 
   const disabled = await locator.isDisabled().catch(() => true);
   if (disabled) {
@@ -5113,6 +5246,57 @@ async function hasCaptcha(page) {
   }
 }
 
+/**
+ * A typed image captcha is a different shape from the vendor widgets above.
+ *
+ * Greenhouse/Ashby gate the submit with an invisible reCAPTCHA, so waiting for a
+ * badge to disappear is the right move. Keka instead shows a 120x40 picture and
+ * a required text box (#captcha, measured 2026-11-09, nudge.keka.com). The
+ * picture cannot be read honestly by a program, and it never disappears while
+ * the page stays on the form, so the vendor probe's wait would simply expire.
+ *
+ * The run therefore fills everything else, tells the operator to type the
+ * characters in the visible window, and continues as soon as the box holds a
+ * value. Nothing is guessed and no third-party solving service is involved.
+ */
+async function waitForOperatorCaptcha(page) {
+  let input = null;
+  try {
+    input = page.locator('input[id*="captcha" i], input[name*="captcha" i]').first();
+    if (!(await input.count().catch(() => 0))) return { present: false, entered: false };
+    if (!(await input.isVisible().catch(() => false))) return { present: false, entered: false };
+    // A "captcha" input with no picture is not this shape (a honeypot or a
+    // hidden vendor field). Requiring the image keeps the handoff honest.
+    const image = page.locator('img[alt*="captcha" i]').first();
+    if (!(await image.count().catch(() => 0))) return { present: false, entered: false };
+  } catch {
+    return { present: false, entered: false };
+  }
+  if (String(await input.inputValue().catch(() => "")).trim()) {
+    return { present: true, entered: true };
+  }
+  if (DRY_RUN) {
+    console.log("  [captcha] an image captcha must be typed by hand before this form can be submitted");
+    return { present: true, entered: false };
+  }
+  if (!(HEADED && OTP_PAUSE)) {
+    console.log("  [captcha] an image captcha must be typed by hand; this run is not pausing for it"
+      + " (needs --headed --otp-pause)");
+    return { present: true, entered: false };
+  }
+  console.log(`  [handoff] type the captcha shown in the browser window; waiting up to ${Math.round(OTP_PAUSE_MS / 1000)}s…`);
+  const deadline = Date.now() + OTP_PAUSE_MS;
+  while (Date.now() < deadline) {
+    if (String(await input.inputValue().catch(() => "")).trim()) {
+      console.log("  [handoff] captcha entered — submitting the completed form");
+      return { present: true, entered: true };
+    }
+    await page.waitForTimeout(1000).catch(() => new Promise((resolve) => setTimeout(resolve, 1000)));
+  }
+  console.log("  [captcha] no captcha was entered before the wait ended");
+  return { present: true, entered: false };
+}
+
 async function waitForCaptchaResolution(page) {
   try {
     if (!(await hasCaptcha(page))) return true;
@@ -5295,6 +5479,89 @@ function relocationOption(texts, candidate, stated) {
   return "";
 }
 
+/**
+ * The stated notice period in days, or null when it says nothing usable.
+ *
+ * "30 days" is the operator's. Only an explicit day/week/month count is read,
+ * and "immediate" is zero; anything else is refused rather than defaulted, the
+ * same rule availabilityDate follows.
+ */
+function noticeDays(candidate) {
+  const raw = String(candidate?.notice_period ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (/immediate/.test(raw)) return 0;
+  const m = raw.match(/(\d+)\s*(day|week|month)/);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 0 || n > 365) return null;
+  return n * (m[2] === "week" ? 7 : m[2] === "month" ? 30 : 1);
+}
+
+/** Read one availability option as a day range, or null when it states none. */
+function availabilityRange(text) {
+  const t = String(text || "").toLowerCase();
+  if (/immediate|right\s+away|asap/.test(t)) return [0, 0];
+  let m = t.match(/(\d+)\s*(?:-|to|–)\s*(\d+)\s*(day|week|month)/);
+  if (m) {
+    const unit = m[3] === "week" ? 7 : m[3] === "month" ? 30 : 1;
+    return [Number(m[1]) * unit, Number(m[2]) * unit];
+  }
+  m = t.match(/less\s+than\s+(\d+)\s*(day|week|month)/);
+  if (m) {
+    const unit = m[2] === "week" ? 7 : m[2] === "month" ? 30 : 1;
+    return [0, Number(m[1]) * unit - 0.5];
+  }
+  m = t.match(/(?:more|over)\s+than\s+(\d+)\s*(day|week|month)|(\d+)\s*(day|week|month)s?\s*\+/);
+  if (m) {
+    const n = m[1] || m[3];
+    const unitName = m[2] || m[4];
+    const unit = unitName === "week" ? 7 : unitName === "month" ? 30 : 1;
+    return [Number(n) * unit + 0.5, Number.POSITIVE_INFINITY];
+  }
+  m = t.match(/(\d+)\s*(day|week|month)/);
+  if (m) {
+    const unit = m[2] === "week" ? 7 : m[2] === "month" ? 30 : 1;
+    const n = Number(m[1]) * unit;
+    // "within 2-4 weeks" is a range above; a bare "within 30 days" is a ceiling.
+    return /within|upto|up to|under|≤/.test(t) ? [0, n + 0.5] : [n, n];
+  }
+  return null;
+}
+
+/**
+ * Pick the availability band that contains the stated notice period.
+ *
+ * Zema's Deel form (jobs.deel.com, #1320, 2026-11-09) asks "Available to start
+ * (a notice period) *" as a radio group - "Available immediately", "Available
+ * within 2-4 weeks", "Available within 1-2 months" - and the whole form's Apply
+ * button stays disabled until it is answered. The profile states the notice
+ * period, so the answer is a fact rendered in the board's own bands rather than
+ * a commitment invented for the form.
+ *
+ * Narrowest containing band wins, and a question that is not about availability
+ * gets nothing.
+ */
+function noticeBandFor(question, options, days) {
+  if (!/available\s+to\s+(?:start|join)|notice\s+period|how\s+soon\s+can\s+you|joining\s+(?:time|date)|earliest\s+(?:start|joining)/i.test(String(question))) {
+    return "";
+  }
+  if (!Number.isFinite(days) || days < 0) return "";
+  let best = null;
+  let bestWidth = Number.POSITIVE_INFINITY;
+  for (const option of Array.isArray(options) ? options : []) {
+    const range = availabilityRange(option);
+    if (!range) continue;
+    const [lo, hi] = range;
+    if (days < lo || days > hi) continue;
+    const width = hi - lo;
+    if (width < bestWidth) {
+      best = String(option);
+      bestWidth = width;
+    }
+  }
+  return best || "";
+}
+
 async function answerFactualRadioQuestions(page, candidate) {
   // Questions about the candidate's own history that no CV field can be turned
   // into an answer mechanically. Each is answered only when the operator has
@@ -5344,18 +5611,42 @@ async function answerFactualRadioQuestions(page, candidate) {
       const aliases = placeAliases(candidate?.current_location);
       answer = aliases.has(target) ? "Yes" : "No";
       from = `current_location (${candidate?.current_location || "unset"})`;
+    } else if (/current\s+(?:place\s+of\s+residence|city|location|address)|place\s+of\s+residence|city\s+of\s+residence|which\s+city\s+(?:are\s+you|do\s+you)/i.test(questionClause)) {
+      // "What is your current place of residence? (choose one of the options)"
+      // is transcription, not a preference: the option naming where he lives is
+      // a fact from the profile. An exact city match wins over a prefix so
+      // "Delhi" is not answered with "New Delhi" when both are offered, and a
+      // list that does not contain his city is left blank and named.
+      const aliases = [...placeAliases(candidate?.current_location || "")].filter(Boolean);
+      const opts = group.options.map((opt) => String(opt).trim());
+      const exact = opts.find((opt) => aliases.includes(opt.toLowerCase()));
+      const hit = exact || opts.find((opt) => {
+        const o = opt.toLowerCase();
+        return aliases.some((a) => o.startsWith(`${a} `) || o.startsWith(`${a},`) || o.startsWith(`${a}(`));
+      });
+      if (hit) {
+        answer = hit;
+        from = `current_location (${candidate?.current_location || "unset"})`;
+      }
     } else {
-      const years = Number.parseFloat(String(candidate?.experience_years ?? ""));
-      const band = experienceBandFor(question, group.options, years);
-      if (band) {
-        answer = band;
-        from = `experience_years (${years})`;
+      const days = noticeDays(candidate);
+      const availability = noticeBandFor(question, group.options, days);
+      if (availability) {
+        answer = availability;
+        from = `notice_period (${days} days)`;
       } else {
-        const statedMatch = statedQuestions.find((item) => item.hint.test(question));
-        const value = statedMatch ? String(stated[statedMatch.key] ?? "").trim() : "";
-        if (value) {
-          answer = value;
-          from = `application_answers.${statedMatch.key}`;
+        const years = Number.parseFloat(String(candidate?.experience_years ?? ""));
+        const band = experienceBandFor(question, group.options, years);
+        if (band) {
+          answer = band;
+          from = `experience_years (${years})`;
+        } else {
+          const statedMatch = statedQuestions.find((item) => item.hint.test(question));
+          const value = statedMatch ? String(stated[statedMatch.key] ?? "").trim() : "";
+          if (value) {
+            answer = value;
+            from = `application_answers.${statedMatch.key}`;
+          }
         }
       }
     }
@@ -5518,9 +5809,14 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   const lastName = rest.join(" ") || "User";
   // After an approved off-site hop the page is a corporate careers site, so the
   // originating ATS field set (e.g. LinkedIn's) no longer describes it. Use the
-  // generic set, which covers split first/last name fields.
+  // ATS that actually serves the page when it is one this repo knows (Keka's
+  // form is firstName/lastName/email/mobilePhone, not LinkedIn's), and the
+  // generic set - which covers split first/last name fields - otherwise.
   const onExternalHost = onExternalAts(originUrl);
-  const effectiveAts = onExternalHost ? "generic" : ats;
+  const liveAts = inferATS(currentUrl);
+  const effectiveAts = onExternalHost
+    ? (liveAts && liveAts !== "generic" ? liveAts : "generic")
+    : ats;
   const sels = ATS_SELECTORS[effectiveAts]?.fields || ATS_SELECTORS.generic.fields;
 
   // Try name fields (split or combined)
@@ -6005,7 +6301,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       const fields = page.locator(
         'input:not([type]), input[type="text"], input[type="url"], input[type="tel"], '
         + 'input[type="email"], input[type="search"], input[type="date"], '
-        + 'input[type="datetime-local"], textarea',
+        + 'input[type="datetime-local"], input[type="number"], textarea',
       );
       const total = await fields.count().catch(() => 0);
       let filled = 0;
@@ -7112,7 +7408,14 @@ async function processJob(browser, job, profile, runtime = {}) {
     // the originating ATS selectors no longer exist. Re-detect with the
     // generic set (e.g. "Apply for this role"). The hop itself already counts
     // as a click, so this must not depend on that flag.
-    if (!applyNavigation.blocked && onExternalAts(navBoundary)) {
+    //
+    // Only when the hop has NOT already landed on the form. Some careers sites
+    // link straight to an /apply route (Keka: /careers/applyjob/<id>) and its
+    // form carries its own "Apply Now" button; re-detecting there would find
+    // that button and click it as an opener, i.e. press an application submit on
+    // an empty form.
+    if (!applyNavigation.blocked && onExternalAts(navBoundary)
+        && !(await pageHasOneStepApplicationForm(page))) {
       const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
       if (retry.clicked) applyNavigation = retry;
     }
@@ -9277,10 +9580,14 @@ export {
   experienceBandFor,
   relocationOption,
   skillYearsOption,
+  noticeDays,
+  noticeBandFor,
   YEARS_OF_EXPERIENCE_QUESTION,
+  isApplicationSurfaceControl,
   relocationPicks,
   availabilityDate,
   salaryAnswer,
+  firstAmount,
   salaryInLacs,
   isFingerprintVendorHost,
   finalGuardAction,

@@ -23,6 +23,12 @@ candidate:
     # never inferred from the CV: the CV lists AKS Intelligent Systems LLP,
     # which ended 01 July 2026 and is therefore not a current employer.
     current_company: 'Not currently employed'
+    # Mandatory dropdown on Keka's careers form (and a few similar portals).
+    # Stated by the operator on 2026-11-09 rather than inferred from anything:
+    # it is a fact about the candidate, and a wrong value on a legal form is
+    # worse than an unanswered question. Remove the key to leave it blank and
+    # let the form stop at the human.
+    gender: 'Male'
     # Transcribed from cv.md, the candidate's own document: the Experience
     # section reads "Software Trainee Intern | AKS Intelligent Systems LLP |
     # 01 May 2026 - 01 July 2026". Never inferred from a job posting.
