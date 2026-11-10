@@ -5376,6 +5376,20 @@ const APPLY_INTERSTITIAL_LABEL =
   /^(?:continue\s+applying|continue\s+to\s+(?:the\s+)?(?:application|company(?:\s+site)?|employer(?:\s+site)?|external(?:\s+site)?)|proceed\s+to\s+(?:the\s+)?(?:application|company(?:\s+site)?))\b/i;
 
 /**
+ * The forward control inside a board's own application wizard.
+ *
+ * LinkedIn Easy Apply is a 5-page wizard whose only advance control is "Next",
+ * becoming "Review" and then a separate "Submit application". Matching it by
+ * name alone is not enough: a profile-edit overlay that opens during the run
+ * ("Dismiss | Save | Delete experience | Add work experience | Back | Next")
+ * carries the same label, so the walk drove the wrong dialog for the rest of
+ * its steps (#1033 Heads Up For Tails, 2026-11-10). The caller additionally
+ * scopes this to the wizard's own container; the set stays exact so "Back",
+ * "Save", "Add work experience" and any submission label can never match.
+ */
+const EASY_APPLY_STEP_NAME = /^(?:next|review|review\s+your\s+application|continue\s+to\s+next\s+step)$/i;
+
+/**
  * Step through a board's safety/warning dialog on the way to the form.
  * Returns true when a control was clicked, so the caller re-checks for the
  * form rather than treating the dialog as the end of the flow.
@@ -9048,39 +9062,89 @@ async function processJob(browser, job, profile, runtime = {}) {
     // LinkedIn Easy Apply is a wizard: Next (x N) → Review → Submit application.
     //
     // The modal has no role="dialog". Measured 2026-11-03 on a live India posting:
-    // the wizard renders in a plain <footer> whose button reads "Next" with no
+    // the wizard rendered in a plain <footer> whose button reads "Next" with no
     // aria-label, so the old `div[role='dialog'] button:has-text('Next')` selector
     // matched nothing - the walk never advanced, no Submit was ever on screen, and
     // the row recorded NeedsReview. Four of eight rows in one measured batch died
     // this way. LinkedIn holds 54 of the 55 India-located pending rows, so this
     // was the most expensive selector in the file.
+    //
+    // Pinning it to <footer> only moved the problem, and so did matching the
+    // name alone. #1033 (Heads Up For Tails, 2026-11-10) clicked "Next" eight
+    // times and ended on a *profile edit* overlay - "Dismiss | Save | Delete
+    // experience | Add work experience | Back | Next" - because that overlay
+    // carries its own Back/Next pair. Driving the wrong dialog is worse than not
+    // driving one: it edits the candidate's profile and still never submits.
+    //
+    // So the step control is scope-bound: only inside the smallest container
+    // that holds the wizard's own header ("Apply to <company>") and its
+    // "N/M pages" progress, and only when its accessible name is exactly
+    // "Next" / "Review" / "Review your application" / "Continue to next step".
+    // A step that does not advance twice in a row stops the walk instead of
+    // clicking into whatever opened on top of it.
     if (ats === "linkedin" && !DRY_RUN) {
-      const advance = page.locator([
-        "footer button:has-text('Next')",
-        "footer button:has-text('Review')",
-        "button[aria-label='Continue to next step']",
-        "button[aria-label='Review your application']",
-      ].join(", "));
+      const stepName = EASY_APPLY_STEP_NAME;
+      const locateStep = () => page.evaluate(([nameSrc]) => {
+        const exact = new RegExp(`^(?:${nameSrc})$`, "i");
+        const flat = (el) => (el.innerText || "").replace(/\s+/g, " ").trim();
+        document.querySelectorAll("[data-pulseops-step]").forEach((el) => el.removeAttribute("data-pulseops-step"));
+        const scopes = [...document.querySelectorAll("div, section, aside, form")]
+          .filter((el) => {
+            const t = flat(el);
+            return t.length > 0 && t.length < 12000
+              && /\bApply to\s+\S/.test(t) && /\b\d+\s*\/\s*\d+\s+pages?\b/i.test(t);
+          })
+          .sort((a, b) => flat(a).length - flat(b).length);
+        const scope = scopes[0];
+        if (!scope) return { found: false, key: "", label: "" };
+        const buttons = [...scope.querySelectorAll("button")].filter((b) => {
+          const label = (b.getAttribute("aria-label") || flat(b) || "").trim();
+          return exact.test(label) && !b.disabled && b.offsetParent !== null;
+        });
+        if (!buttons.length) return { found: false, key: "", label: "" };
+        const button = buttons[0];
+        button.setAttribute("data-pulseops-step", "1");
+        const heading = (scope.querySelector("h2, h3, [data-test-modal-header]") || {}).innerText || "";
+        const progress = (/\b\d+\s*\/\s*\d+\s+pages?\b/i.exec(flat(scope)) || [""])[0];
+        return {
+          found: true,
+          key: `${heading.replace(/\s+/g, " ").trim()}|${progress}`,
+          label: (button.getAttribute("aria-label") || flat(button) || "").trim().slice(0, 30),
+        };
+      }, [stepName.source]).catch(() => ({ found: false, key: "", label: "" }));
+
+      let previousKey = "";
+      let stalls = 0;
       for (let step = 0; step < 8; step++) {
         if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
           if (!sharedCtx) await context.close();
           return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
         }
-        const visible = page.locator([
-          "footer button:has-text('Next'):visible",
-          "footer button:has-text('Review'):visible",
-          "button[aria-label='Continue to next step']:visible",
-          "button[aria-label='Review your application']:visible",
-        ].join(", "));
-        if ((await visible.count()) === 0) break;
+        const found = await locateStep();
+        if (!found.found) break;
         // Fill the current step first: LinkedIn keeps Next enabled while required
         // fields are empty, so clicking it just leaves the same step on screen.
         await fillCommonFields(page, ats, profile, job, navBoundary);
-        const next = visible.first();
-        const label = ((await next.innerText().catch(() => "")) || "").trim().slice(0, 30);
-        console.log(`  [easy-apply] step ${step + 1}: clicking "${label}"`);
-        await next.click({ timeout: 8000 }).catch(() => {});
-        await page.waitForTimeout(2000);
+        console.log(`  [easy-apply] step ${step + 1}: clicking "${found.label}"`);
+        await page.locator("[data-pulseops-step]").first().click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(2500);
+        const after = await locateStep();
+        if (after.key && after.key === found.key && after.key !== previousKey) {
+          stalls = 1;
+        } else if (after.key && after.key === found.key) {
+          stalls += 1;
+        } else {
+          stalls = 0;
+        }
+        previousKey = after.key;
+        if (stalls >= 2) {
+          const blocker = await page.evaluate(() => {
+            const el = document.querySelector(".artdeco-inline-feedback--error, [role='alert'], .artdeco-inline-feedback__message");
+            return (el?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160);
+          }).catch(() => "");
+          console.log(`  [easy-apply] step stalled at "${found.key || "unknown"}"${blocker ? ` — page says: ${blocker}` : ""}`);
+          break;
+        }
       }
     }
 
@@ -10267,6 +10331,7 @@ export {
   isEssayFieldHint,
   UPLOAD_BUTTON_LABEL,
   APPLY_INTERSTITIAL_LABEL,
+  EASY_APPLY_STEP_NAME,
   statedOptionIndex,
   isSubmissionLandingUrl,
   pageIsClosed,

@@ -2536,6 +2536,31 @@ test("a stated answer is matched to the option that says it, and never to a look
   assert.equal(statedOptionIndex("No.", ["Yes", "No."]), 1);
 });
 
+test("a wizard step is only Next/Review, never a profile-edit control", async () => {
+  // #1033 (Heads Up For Tails, 2026-11-10) clicked "Next" eight times and ended
+  // on a profile edit overlay carrying "Back | Next | Save | Add work
+  // experience". Scoping happens in the DOM walk; the label set must at least
+  // never admit the overlay's own controls.
+  const { EASY_APPLY_STEP_NAME } = await import("../apps/browser-apply/apply.mjs");
+
+  for (const label of ["Next", "Review", "Review your application", "Continue to next step"]) {
+    assert.ok(EASY_APPLY_STEP_NAME.test(label), `"${label}" advances the wizard`);
+  }
+
+  for (const label of [
+    "Back",
+    "Save",
+    "Dismiss",
+    "Add work experience",
+    "Delete experience",
+    "Submit application",
+    "Submit",
+    "Easy Apply",
+  ]) {
+    assert.ok(!EASY_APPLY_STEP_NAME.test(label), `"${label}" is not a wizard step`);
+  }
+});
+
 test("a board's safety dialog is stepped through, never a submission", async () => {
   // LinkedIn answers an Apply click with "Job search safety reminder" offering
   // "Review job post" and "Continue applying". Nothing navigates and no form
