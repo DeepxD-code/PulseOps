@@ -80,6 +80,24 @@ candidate:
     # kilometres is claimed, because nobody measured one.
     location_distance: 'I am not local - I live in Greater Noida, Uttar Pradesh. I am willing to relocate to Navi Mumbai at my own expense for this role.'
 
+    # --- 2026-11-10: the compliance block that eight YES/NO questions on
+    # PayPal's Eightfold form (#1322) turned into a blocker. All three are
+    # statements only the candidate can make, given by the operator directly.
+    #
+    # The five PayPal conflict-of-interest questions - a board seat or interest
+    # in a competitor, a family relationship with an employee, being a
+    # government official, a relative being one, and a referral from a known
+    # merchant/partner - all receive this one stated answer.
+    conflict_of_interest: 'No'
+    # The voluntary self-identification section (India). "No, I don't have a
+    # disability" is the operator's stated choice, not the decline option.
+    disability_disclosure: "No, I don't have a disability"
+    # Which board the operator actually found the role on. Eightfold's separate
+    # "Job Board*" radio lists only sourcing vendors (Glassdoor, Indeed, HireEZ,
+    # Moseeker, RiseSmart, Zhiphin), so a row sourced from LinkedIn has no
+    # honest option there and the radio is left blank on purpose.
+    job_board_source: 'LinkedIn'
+
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
     # statements, not inferences. technical_skills_self summarises cv.md and

@@ -2081,6 +2081,42 @@ test("current compensation and the distance question come from stated answers", 
   }
 });
 
+test("the compliance block is answered only from a stated answer", () => {
+  // #1322 PayPal (Eightfold, 2026-11-10) refused the submit on eight YES/NO
+  // questions and left the required Email box empty. The representations are
+  // the operator's to make, so they live in application_answers and are never
+  // inferred; the email selector list simply did not cover Eightfold's markup.
+  const stated = {
+    conflict_of_interest: "No",
+    disability_disclosure: "No, I don't have a disability",
+  };
+  const facts = identityFacts({}, stated);
+  const conflict = facts.find((f) => f.tag === "conflict of interest");
+  const disability = facts.find((f) => f.tag === "disability disclosure");
+  assert.equal(conflict.value, "No");
+  assert.equal(disability.value, "No, I don't have a disability");
+
+  // The exact question text PayPal renders. Every one of the five must reach
+  // the same stated answer, or the form stays blocked.
+  for (const q of [
+    "Do you or your spouse have, or plan to have, a role on a board, advisory group, management team, or any business interest in a company or organisation that competes, or could be perceived to compete, with PayPal? *",
+    "Do you have a family relationship (including spouse, partner, parent, grandparent, child, sibling, in-law, aunt, uncle) or close personal relationship (close friendship or relationship) with an employee of the PayPal group of companies? *",
+    "Are you a current Government Official/TA Government Official is an officer or employee of any government, of any department, agency, or instrumentality of a Government? *",
+    "Do you have a family relationship (including spouse, partner, parent, grandparent, child, sibling, in-law, aunt, uncle) or close personal relationship (close friendship or relationship) with a Government Official? *",
+    "To the best of your knowledge, are you referred to as an existing / potential known merchant, or are you an existing or potential Third Party? *",
+  ]) {
+    assert.ok(conflict.hint.test(q), `conflict hint must match: ${q.slice(0, 60)}`);
+  }
+  assert.equal(conflict.hint.test("What is your current compensation?"), false);
+  assert.equal(disability.hint.test("Do you have a disability?"), true);
+  assert.equal(disability.hint.test("Which city do you live in?"), false);
+
+  // With nothing stated neither fact carries an answer, so neither is written.
+  const bare = identityFacts({}, {});
+  assert.equal(bare.find((f) => f.tag === "conflict of interest")?.value ?? "", "");
+  assert.equal(bare.find((f) => f.tag === "disability disclosure")?.value ?? "", "");
+});
+
 test("why-interested is grounded in the posting, or left to the human", () => {
   // "Why are you interested in <company>?" is required free text on several Ashby
   // boards and was blocking the submit. It is not a fact about the candidate and

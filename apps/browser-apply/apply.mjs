@@ -2278,6 +2278,27 @@ function identityFacts(candidate, stated, job = null, profile = null) {
       value: String(stated?.gender ?? "").trim(),
     },
     {
+      tag: "disability disclosure",
+      // The voluntary self-identification block on Eightfold boards, where the
+      // operator chose "No, I don't have a disability" (2026-11-10, #1322
+      // PayPal). Only ever used where the form names the question; nothing is
+      // inferred from anything else.
+      hint: /disabilit\w*|differently\s+abled|voluntary\s+self[- ]identification/i,
+      value: String(stated?.disability_disclosure ?? "").trim(),
+    },
+    {
+      tag: "conflict of interest",
+      // PayPal's five conflict-of-interest representations - a board seat or an
+      // interest in a competitor, a family relationship with an employee, being
+      // a government official, a relative being one, and a referral from a known
+      // merchant or partner. The operator stated one answer for all five
+      // (2026-11-10). The hint stays narrow to those shapes so an unrelated
+      // question that merely mentions a family does not inherit a legal
+      // representation.
+      hint: /(?:board|advisory\s+group)[\s\S]{0,220}?(?:compete|competitor|interest)|family\s+relationship|government\s+official|known\s+merchant|referred\s+to[\s\S]{0,160}?(?:merchant|partner)|(?:spouse|relative)[\s\S]{0,120}?(?:employee|employer|board|interest)/i,
+      value: String(stated?.conflict_of_interest ?? "").trim(),
+    },
+    {
       // Two phrasings reach this, and the second one was unhandled for 13
       // submissions. The classic form asks "Are you subject to a non-compete,
       // non-solicitation or non-disclosure agreement...?" but several boards
@@ -3080,8 +3101,13 @@ const ATS_SELECTORS = {
       name: ['input[name="name"]', '#name', 'input[autocomplete="name"]', 'input[placeholder*="Full name"]'],
       firstName: ['input[name="firstName"]', 'input[name="first_name"]', 'input[name="firstname"]', 'input[autocomplete="given-name"]', 'input[id*="first-name" i]', 'input[placeholder*="irst name"]'],
       lastName: ['input[name="lastName"]', 'input[name="last_name"]', 'input[name="lastname"]', 'input[autocomplete="family-name"]', 'input[id*="last-name" i]', 'input[placeholder*="ast name"]'],
-      email: ['input[type="email"]', 'input[name="email"]', '#email'],
-      phone: ['input[type="tel"]', 'input[name="phone"]'],
+      // Eightfold (paypal.eightfold.ai, #1322, 2026-11-10) renders its contact
+      // inputs with a hashed id and no name, so none of the three original
+      // selectors matched and the required Email box submitted empty. The extra
+      // fallbacks all read the same fact off the profile, so they can only ever
+      // write the candidate's own address and number.
+      email: ['input[type="email"]', 'input[name="email"]', '#email', 'input[autocomplete="email"]', 'input[aria-label*="email" i]', 'input[id*="email" i]', 'input[name*="email" i]'],
+      phone: ['input[type="tel"]', 'input[name="phone"]', 'input[autocomplete="tel"]', 'input[aria-label*="phone" i]', 'input[id*="phone" i]', 'input[name*="phone" i]'],
       resume: ['input[type="file"]'],
     },
     submitBtn: ['button:has-text("Submit")', 'button[type="submit"]', 'button:has-text("Apply")']
