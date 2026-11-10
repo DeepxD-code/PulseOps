@@ -82,6 +82,29 @@ asks for things no profile can answer by itself:
 `firstAmount()` supplies the bare number for a `*.amount` control, whose currency
 and "Monthly" period are separate controls on the same row.
 
+### Questions only the candidate can answer
+
+Three of the questions Indian boards ask most often are judgements or
+representations, never derivable facts, so they live in
+`application_answers` and are used only where the profile states them:
+
+- **A per-skill years figure** (`skill_years`) answers "How many years of
+  hands-on experience do you have with Java in a professional environment?". It
+  is never the total: `skillScopedQuestion()` makes the general
+  `years of experience` fact stand down on any question naming a technology, so
+  a language the CV does not claim stays blank instead of inheriting 0.2 years
+  (#1320 Zema, 2026-11-10).
+- **A 1–10 self-rating** (`skill_ratings`) answers "Rate your proficiency in
+  Java (1 = beginner, 10 = expert)". Skills are matched however the board spells
+  them — "Spring Boot" and "SpringBoot" are one skill — and `MySQL` is not `SQL`.
+- **The current package** (`current_compensation`) wins over the figure derived
+  from `current_company`, because "Internship stipend only" says more than `0`.
+
+The Zema wording *"How far do you live from &lt;office&gt;? … are you willing to
+relocate at your own expense?"* is answered by `location_distance` with the
+stated sentence: where he actually lives, and what he has agreed to do. No
+distance in kilometres is claimed, because none was measured.
+
 ### What counts as a confirmation
 
 A click is never a submission on its own. The row is only recorded `Verified`

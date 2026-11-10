@@ -197,6 +197,10 @@ const ATS_ALLOWED_HOSTS = Object.freeze({
   // classification is a suffix rule and the exact-host navigation list cannot
   // enumerate tenants; a direct keka row is admitted by its own origin.
   keka: ["keka.com"],
+  // UKG Pro Recruiting (formerly UltiPro) serves an employer's whole job board
+  // from one host, with the posting, the apply form and the confirmation all as
+  // routes of its single-page app.
+  ultipro: ["recruiting.ultipro.com"],
   yc: ["workatastartup.com", "www.workatastartup.com", "ycombinator.com", "www.ycombinator.com"],
   generic: [],
 });
@@ -556,6 +560,11 @@ const ATS_ASSET_HOSTS = Object.freeze({
   // (nudge.keka.com #1319, measured 2026-11-09) while the same click navigated
   // in a plain browser.
   keka: ["cdn.keka.com"],
+  // UKG Pro Recruiting is one React app whose runtime lives on two CDN
+  // hostnames. With every script blocked the page painted nothing at all — a
+  // 7 KB white screenshot with no form and no apply control (#1019 Park Place
+  // Technologies, measured 2026-11-10).
+  ultipro: ["rec-cdn-prod.cdn.ultipro.com", "ignite.cdn.ultipro.com"],
   workday: ["assets.ctfassets.net"],
 });
 // Vendor CDNs that host an ATS's application runtime under their own domain
@@ -1555,6 +1564,116 @@ function yearsOfExperience(candidate) {
 }
 
 /**
+ * A skill name as a matcher, so the same technology is recognised however the
+ * board spells it. "Spring Boot" and "SpringBoot" are one skill, and a question
+ * asks it in running prose: "rate your proficiency in Java(1 = beginner, 10 =
+ * expert)". Non-alphanumerics are flattened on the question's side, and the
+ * skill's own words are joined with an optional gap, so both spellings meet.
+ *
+ * Word boundaries matter: `\bsql\b` must not fire on "MySQL" or "PostgreSQL",
+ * which are different technologies and would get an answer the candidate never
+ * gave.
+ */
+function skillPattern(skill) {
+  const words = String(skill || "")
+    .toLowerCase()
+    .split(/[^a-z0-9+#.]+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return null;
+  return new RegExp(`\\b${words.join("\\s*")}\\b`, "i");
+}
+
+function mentionsSkill(text, skill) {
+  const pattern = skillPattern(skill);
+  if (!pattern) return false;
+  const flat = String(text || "").replace(/[^a-z0-9+#.]+/gi, " ");
+  return pattern.test(flat);
+}
+
+/**
+ * Read a stated per-skill fact, whichever of the two shapes it was written in.
+ *
+ * The profile is hand-edited, so both a mapping and a list of "Skill: value"
+ * strings are accepted; neither is inferred from anything. Longest name first,
+ * so "Spring Boot" is chosen before a stray "Boot" and "PostgreSQL" before
+ * "SQL" if both were ever stated.
+ */
+function statedSkillEntries(map) {
+  const out = [];
+  const push = (skill, value) => {
+    const name = String(skill || "").trim();
+    const text = String(value ?? "").trim();
+    if (name && text) out.push({ skill: name, value: text });
+  };
+  if (Array.isArray(map)) {
+    for (const item of map) {
+      const match = String(item ?? "").match(/^\s*([^:=]+?)\s*[:=]\s*(.+?)\s*$/);
+      if (match) push(match[1], match[2]);
+    }
+  } else if (map && typeof map === "object") {
+    for (const [skill, value] of Object.entries(map)) push(skill, value);
+  }
+  return out.sort((a, b) => b.skill.length - a.skill.length);
+}
+
+/**
+ * "Rate your proficiency in Java (1 = beginner, 10 = expert)".
+ *
+ * A self-rating is a judgement about the candidate, so it is only ever taken
+ * from a figure he stated, and only on a control whose own words ask for a
+ * rating and name that skill. Nothing is derived from the CV or the years
+ * figure: turning experience into a 1-10 score would be inventing the answer.
+ */
+function skillRatingFor(stated, signature) {
+  const entries = statedSkillEntries(stated?.skill_ratings);
+  if (!entries.length) return "";
+  const text = String(signature || "");
+  if (!/\b(?:rat(?:e|ing)|proficiency|\bscore\b)|out\s+of\s+(?:5|10)|\b1\s*[-–=]\s*(?:5|10)\b/i.test(text)) return "";
+  const hit = entries.find((entry) => mentionsSkill(text, entry.skill));
+  return hit ? hit.value : "";
+}
+
+/**
+ * "How many years of hands-on experience do you have with Java in a
+ * professional environment?" (#1320 Zema, 2026-11-10).
+ *
+ * A technology-scoped years question is never total experience, so it is only
+ * answered from a stated per-skill figure. With none stated it stays empty and
+ * is reported as [answer-missing] rather than borrowing 0.2 years for a
+ * language the CV may not claim.
+ */
+function skillYearsFor(stated, signature) {
+  const entries = statedSkillEntries(stated?.skill_years);
+  if (!entries.length) return "";
+  const text = String(signature || "");
+  if (!/\byears?\b/i.test(text)) return "";
+  const hit = entries.find((entry) => mentionsSkill(text, entry.skill));
+  return hit ? hit.value : "";
+}
+
+/**
+ * Does this question name a technology at all?
+ *
+ * Used to keep the total-experience fact away from any question scoped to one
+ * skill. It counts every skill the profile claims - the ones with a stated
+ * figure plus the ones in `domain.core_skills`/`adjacent_skills` - because the
+ * point is not whether an answer exists but that the total is the wrong answer.
+ */
+function skillScopedQuestion(stated, profile, signature) {
+  const text = String(signature || "");
+  if (!text) return false;
+  const skills = [
+    ...statedSkillEntries(stated?.skill_years).map((entry) => entry.skill),
+    ...statedSkillEntries(stated?.skill_ratings).map((entry) => entry.skill),
+  ];
+  for (const list of [profile?.domain?.core_skills, profile?.domain?.adjacent_skills]) {
+    for (const skill of Array.isArray(list) ? list : []) skills.push(String(skill));
+  }
+  return skills.some((skill) => mentionsSkill(text, skill));
+}
+
+/**
  * "How many years of ... experience do you have?"
  *
  * The qualifier between "years of" and "experience" is the board's own words
@@ -1693,8 +1812,8 @@ function firstAmount(value) {
  * at its limit, and the real essay question was left empty (#1320, 2026-11-10).
  *
  * So a box only counts when its own words ask for prose AND nothing in them asks
- * for a number, a rate, or a contact detail. `hint` is the flattened label,
- * placeholder, name, id, aria-label and surrounding block text.
+ * for a number, a rate, a contact detail or a measurable fact. `hint` is the
+ * signature `controlSignatureMatcher()` produces for that control.
  */
 function isEssayFieldHint(hint) {
   const text = String(hint || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -1704,6 +1823,12 @@ function isEssayFieldHint(hint) {
   if (/\b(?:salary|compensation|ctc|remuneration|package|amount|currency|inr|usd|lpa|lakhs?)\b/.test(text)) return false;
   if (/\b(?:number|digits|numeric|phone|mobile|telephone|email|e-mail|address|pin\s*code|postal)\b/.test(text)) return false;
   if (/\b(?:years?|months?|rate|rating|score|percentage|notice\s*period|availability)\b/.test(text)) return false;
+  // A question about a measurable fact is not an essay even when it contains
+  // "why" or "describe": Deel's "How far do you live from Seawolves … Mumbai? If
+  // you are not local, why do you look to move and are you willing to relocate
+  // at your own expense?" is answered with a distance, not with a generic
+  // paragraph about the candidate.
+  if (/\b(?:how\s+(?:far|long|many|much)|distance|commute|relocat\w*)\b/.test(text)) return false;
   // Prose asks: why us, tell us about yourself, describe, motivation, cover letter,
   // or a word/character target ("200-400 words").
   return /\bwhy\b|tell\s+us|describe|about\s+(?:you|yourself)|cover\s+letter|motivat|interested\s+in|anything\s+else|additional\s+information|\d{2,4}\s*[-–]\s*\d{2,4}\s*(?:words?|characters?|chars?)/i.test(text);
@@ -1767,7 +1892,7 @@ function heardFromBoard(row) {
   return "Job board";
 }
 
-function identityFacts(candidate, stated, job = null) {
+function identityFacts(candidate, stated, job = null, profile = null) {
   const spec = [
     {
       tag: "legal name",
@@ -1959,6 +2084,29 @@ function identityFacts(candidate, stated, job = null) {
       tag: "years of experience",
       hint: YEARS_OF_EXPERIENCE_QUESTION,
       value: yearsOfExperience(candidate),
+      // A question scoped to one technology is not the total, whatever it says
+      // about "hands-on" or "professional" (#1320 Zema, 2026-11-10). It is left
+      // to the per-skill fact below, which answers only from a stated figure.
+      notWhen: (signature) => skillScopedQuestion(stated, profile, signature),
+    },
+    {
+      tag: "skill years",
+      // "How many years of hands-on experience do you have with Java in a
+      // professional environment?" - answered from application_answers
+      // .skill_years and nothing else.
+      hint: /years?[\s\S]{0,120}?experience|experience[\s\S]{0,80}?years?/i,
+      byField: (signature) => skillYearsFor(stated, signature),
+      // Absent unless a per-skill figure is actually stated: a byField fact with
+      // nothing to resolve from would otherwise be advertised on every form.
+      enabled: () => statedSkillEntries(stated?.skill_years).length > 0,
+    },
+    {
+      tag: "skill rating",
+      // "Rate your proficiency in Java (1 = beginner, 10 = expert)" - a stated
+      // 1-10 figure per skill, never derived.
+      hint: /\brat(?:e|ing)\b|proficiency|out\s+of\s+(?:5|10)|\b1\s*[-–=]\s*(?:5|10)\b/i,
+      byField: (signature) => skillRatingFor(stated, signature),
+      enabled: () => statedSkillEntries(stated?.skill_ratings).length > 0,
     },
     {
       tag: "work authorisation",
@@ -2020,7 +2168,7 @@ function identityFacts(candidate, stated, job = null) {
       // in the expected/desired form: "current CTC" is a different question (and
       // for this candidate the answer is zero) so a bare \bctc\b here would
       // quote an expected figure as a current one.
-      hint: /(?:expected|desired|required)\s*(?:ctc|package|salary|compensation)|salary\s+(?:range|expectation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)|ctc\s+expectation/i,
+      hint: /(?:expected|desired|required)\s*(?:[a-z]+\s+){0,3}(?:ctc|package|salary|compensation)|salary\s+(?:range|expectation)|compensation\s+expectation|salary\s+you\s+(?:are\s+)?(?:looking|expect|expecting)|ctc\s+expectation/i,
       // Resolved per control: a board asking "per month" and one asking
       // "per annum" need different numbers, and the same profile cannot
       // answer both with one string.
@@ -2033,13 +2181,30 @@ function identityFacts(candidate, stated, job = null) {
       // current package to report and 0 is the truthful answer. If the candidate
       // were employed this resolves to nothing rather than inventing a figure.
       hint: /current\s*(?:ctc|package|annual\s*compensation|salary)|present\s*(?:ctc|package|salary)|current\s*annual\s*salary/i,
+      // A stated current compensation is the operator's own words and wins over
+      // the derived figure: he answered "Internship stipend only" (2026-11-10),
+      // which says more, and more truthfully, than a bare 0.
       // Only a stated employment status settles this. An empty profile gets
       // nothing rather than a "0" that claims the candidate earns nothing.
       value: (() => {
+        const statedPay = String(stated?.current_compensation ?? "").trim();
+        if (statedPay) return statedPay;
         const company = String(stated?.current_company ?? "").trim();
         if (!company) return "";
         return /not currently employed|unemployed|no current employer/i.test(company) ? "0" : "";
       })(),
+    },
+    {
+      tag: "distance from office",
+      // "How far do you live from Seawoods Grand Central Tower 1, Mumbai, India?
+      // If you are not local, why do you look to move and are you willing to
+      // relocate at your own expense?" (#1320 Zema). The question asks for a
+      // measurable fact - distance and a relocation commitment - so it is not an
+      // essay and no generic paragraph answers it. The stated note says where he
+      // lives and what he has agreed to do, and claims no distance in kilometres
+      // that nobody measured.
+      hint: /how\s+far\s+do\s+you\s+live|how\s+far\s+(?:away\s+)?from\s+(?:the\s+)?(?:office|site|workplace)|distance\s+(?:from|to)\s+(?:the\s+)?(?:office|site|workplace|campus)/i,
+      value: String(stated?.location_distance ?? "").trim(),
     },
     {
       tag: "how you heard",
@@ -2164,7 +2329,16 @@ function identityFacts(candidate, stated, job = null) {
       // assert a false legal status on the second one.
       once: fact.once === true,
       needsJob: fact.needsJob === true,
+      // A per-control veto: the fact's hint can match a question it must not
+      // answer. The years fact is the case - "how many years with Java" matches
+      // the general pattern and is still not total experience.
+      notWhen: typeof fact.notWhen === "function" ? fact.notWhen : null,
+      // A fact that only exists when the operator stated something for it.
+      enabled: typeof fact.enabled === "function" ? fact.enabled : null,
     }))
+    // A fact with no stated answer behind it is dropped, so it is never
+    // advertised on a form it could not answer.
+    .filter((fact) => (fact.enabled ? fact.enabled() : true))
     // A byField fact is kept even when its value is empty, because the value
     // depends on which control it lands on - that is how one salary answer
     // serves both a per-month and a per-annum question.
@@ -2717,6 +2891,10 @@ function inferATS(url) {
   // render without cdn.keka.com's jQuery bundle, which only the keka asset
   // allowlist admits.
   if (looksLike("keka")) return "keka";
+  // UKG Pro Recruiting: the employer's board is a route of recruiting.ultipro.com
+  // (`/PAR1035PPTL/JobBoard/<id>/OpportunityDetail?opportunityId=…`), and its
+  // apply form is the `OpportunityApply` route of the same host.
+  if (looksLike("ultipro")) return "ultipro";
   if (looksLike("yc")) return "yc";
   return "generic";
 }
@@ -2778,6 +2956,31 @@ const ATS_SELECTORS = {
       name: ['input[name="name"]'], email: ['input[type="email"]'], resume: ['input[type="file"]'],
     },
     submitBtn: ['button:not([disabled]):has-text("Send")', 'button:has-text("Send")', 'button:has-text("Submit")', 'button:has-text("Apply")']
+  },
+  // UKG Pro Recruiting. The posting route is `OpportunityDetail` and its "Apply
+  // Now" control opens the form route `OpportunityApply?opportunityId=<id>`;
+  // the form submits from that route. Field names are the vendor's own
+  // (`candidateFirstName`, `candidateLastName`, …), with the generic set as the
+  // fallback so a renamed field still gets filled.
+  ultipro: {
+    applyBtn: [
+      'a:has-text("Apply Now")',
+      'button:has-text("Apply Now")',
+      'a:has-text("Apply")',
+      'button:has-text("Apply")',
+    ],
+    fields: {
+      firstName: ['input[name="candidateFirstName"]', 'input[id*="FirstName" i]', 'input[name*="firstName" i]'],
+      lastName: ['input[name="candidateLastName"]', 'input[id*="LastName" i]', 'input[name*="lastName" i]'],
+      email: ['input[name="candidateEmail"]', 'input[type="email"]', 'input[id*="Email" i]'],
+      phone: ['input[name="candidatePhone"]', 'input[type="tel"]', 'input[id*="Phone" i]'],
+      resume: ['input[type="file"]'],
+    },
+    submitBtn: [
+      'button:has-text("Submit Application")',
+      'button:has-text("Submit")',
+      'button[type="submit"]',
+    ]
   },
   greenhouse: {
     applyBtn: ['a#apply_button', 'a[data-mapped-click="apply"]', 'a:has-text("Apply")', 'button:has-text("Apply")'],
@@ -3265,6 +3468,12 @@ const PORTAL_API_HOSTS = Object.freeze({
   "www.hirist.tech": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
   "hirist.com": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
   "www.hirist.com": ["gladiator.hirist.tech", "assessmentapi.hirist.tech"],
+  // Deel serves its guest application form from jobs.deel.com but every lookup
+  // and every upload capability comes from its own API host. Measured
+  // 2026-11-10, #1320 Zema: the country/state lookups and the upload-request
+  // POST were all blocked, so the dropdowns stayed empty, the CV was never
+  // attached, and the form could not be submitted at all.
+  "jobs.deel.com": ["api-prod.letsdeel.com"],
 });
 
 /**
@@ -3291,6 +3500,11 @@ const PORTAL_API_POST_PATHS = Object.freeze({
   // /v1/questionResponse is the form recording the answer we just typed into
   // it; with it blocked the page renders but Next never advances.
   "assessmentapi.hirist.tech": ["/v1/login", "/v1/questionResponse"],
+  // Deel's guest application namespace on its own API host: the upload-request
+  // capability (#1320) and the application submit both live here. Pinned to the
+  // namespace rather than the host, so no other Deel endpoint becomes writable,
+  // and the submit itself is still gated by the final-action check at the click.
+  "api-prod.letsdeel.com": ["/deelapi/guest/ats/"],
 });
 
 function portalApiHostAllowed(pageOrigin, url, method, requestType) {
@@ -3310,6 +3524,9 @@ function portalApiHostAllowed(pageOrigin, url, method, requestType) {
   const verb = String(method || "GET").toUpperCase();
   if (verb === "GET" || verb === "HEAD") return true;
   if (!["xhr", "fetch"].includes(type)) return false;
+  // A listed path is writable by POST only. Without this the path allowance
+  // covered every other verb too, including DELETE.
+  if (verb !== "POST") return false;
   const paths = PORTAL_API_POST_PATHS[host];
   if (paths && paths.some((prefix) => url.pathname.startsWith(prefix))) return true;
   // The form's own submission, pinned to exact paths and to a numeric jobcode.
@@ -4674,7 +4891,26 @@ function controlSignatureMatcher() {
       // preceding text keeps the part ADJACENT to this control, which is the
       // part that belongs to it, instead of discarding it entirely.
       question = [firstQuestion(before), after.length <= 120 ? after : firstQuestion(after)].filter(Boolean).join(" ").trim();
-      if (question) break;
+      // A character counter and a widget's own placeholder are the nearest text
+      // to a control while saying nothing about the question. Deel renders both
+      // ("Your answer" above the box, "0/500" below it), so the walk stopped one
+      // ancestor too early on every application question and seven required
+      // fields looked like controls with no prompt at all — no hint could match
+      // them, and "Apply" could never enable (#1320 Zema, 2026-11-10).
+      const said = question.replace(/\s+/g, " ").trim();
+      // "Your answer" and a character counter are the widget's own furniture, not
+      // the question: Deel prints both directly above and below every box, so the
+      // nearest ancestor yielding text is "Your answer 0/500" and the real prompt
+      // ("Desired Base Salary (please specify amount and currency) *") sits one
+      // level higher (#1320 Zema, 2026-11-10). Judge what is left after the
+      // furniture is removed.
+      const substance = said
+        .replace(/your answer/gi, " ")
+        .replace(/\d+\s*\/\s*\d+/g, " ")
+        .replace(/[^a-z]+/gi, " ")
+        .trim();
+      if ((substance.match(/[a-z]/gi) || []).length >= 4) break;
+      question = "";
     }
     return `${own} ${question}`.trim().toLowerCase();
   };
@@ -5926,16 +6162,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     for (let i = 0; i < seen; i++) {
       const box = boxes.nth(i);
       if (!(await box.isVisible?.().catch(() => false))) continue;
-      const hint = await box.evaluate((el) => {
-        const norm = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-        const holder = el.closest("label")
-          || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null);
-        const block = el.closest("fieldset, section, form > div, div") || el.parentElement;
-        return [
-          norm(el.placeholder), norm(el.name), norm(el.id), norm(el.getAttribute("aria-label")),
-          norm(holder?.innerText), norm(block?.innerText).slice(0, 200),
-        ].filter(Boolean).join(" | ");
-      }).catch(() => "");
+      const hint = await box.evaluate(controlSignatureMatcher()).catch(() => "");
       if (!isEssayFieldHint(hint)) {
         if (hint) console.log(`    [essay-skip] not an essay field: ${hint.slice(0, 70)}`);
         continue;
@@ -6415,6 +6642,8 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           return "";
         });
         if (!hintRe.test(String(signature))) continue;
+        // A fact can veto its own hint on a specific control...
+        if (typeof options?.notWhen === "function" && options.notWhen(String(signature))) continue;
         // A per-control fact resolves its value from THIS control's own text,
         // which is how one salary answer serves both a per-month and a
         // per-annum question.
@@ -6569,7 +6798,14 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     await combo(
       /\b(?:dial(?:ling)?\s*code|country\s*code|isd\s*code|country\s*prefix)\b/i,
       [dialCode, "India", "India (+91)"],
-      { label: "dial code" },
+      {
+        label: "dial code",
+        // Boards write the option their own way: Deel prints "IN +91" beside 243
+        // others, so neither "+91" nor "India" matches by label and word-boundary
+        // matching cannot see a "+". Choose the option that CONTAINS the stated
+        // code, which is the one fact this question is about.
+        pick: (texts) => texts.find((t) => String(t).replace(/\s+/g, "").includes(dialCode.replace(/\s+/g, ""))),
+      },
     );
   }
   // The location country, NOT a phone's dialling code. The hint requires a
@@ -6686,7 +6922,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     const stated = profile?.candidate?.application_answers || {};
 
     const answeredOnce = new Set();
-    for (const fact of identityFacts(candidate, stated, job)) {
+    for (const fact of identityFacts(candidate, stated, job, profile)) {
       // `once` facts stop after the first matching control; the rest fill every
       // match, because a form may ask the same fact more than once. A fact with
       // byField resolves its value from each control's own signature.
@@ -6694,6 +6930,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         once: fact.once === true,
         resolve: fact.byField,
         fallbackLabels: fact.fallbackLabels,
+        notWhen: fact.notWhen,
       });
     }
     // Two questions exist only as dropdowns whose answers can only be chosen
@@ -7427,9 +7664,12 @@ async function processJob(browser, job, profile, runtime = {}) {
       //   ashbyhq-infra-prd-main-app-uploaded-files-us-east-1.s3.amazonaws.com
       // Because only the Greenhouse operation names were matched, that POST was
       // blocked - so every Ashby application went out with NO CV attached.
-      // Both are the ATS naming its own upload target, so both are harvested
+      // Deel mints the same capability at
+      //   POST api-prod.letsdeel.com/deelapi/guest/ats/application_form_upload_requests
+      // and without it the CV never attached on #1320 (2026-11-10).
+      // All are the ATS naming its own upload target, so all are harvested
       // from the ATS's own response. Nothing is guessed or wildcarded.
-      if (!/presigned_fields|presigned_attributes|ApiCreateFileUploadHandle/i.test(href)) return;
+      if (!/presigned_fields|presigned_attributes|ApiCreateFileUploadHandle|application_form_upload_requests/i.test(href)) return;
       response.text().then((body) => {
         try {
           const added = collectPresignedUploadHosts(JSON.parse(body), uploadHosts);
@@ -9758,6 +9998,10 @@ export {
   isAllowedReadOnlyApiRequest,
   isBlacklistedJob,
   identityFacts,
+  skillRatingFor,
+  skillYearsFor,
+  skillScopedQuestion,
+  statedSkillEntries,
   jobDescriptionFor,
   whyInterested,
   rankByAcceptance,

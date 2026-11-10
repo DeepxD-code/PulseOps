@@ -32,6 +32,9 @@ import {
   isGoogleFormUrl,
   isBlacklistedJob,
   identityFacts,
+  skillRatingFor,
+  skillYearsFor,
+  skillScopedQuestion,
   jobDescriptionFor,
   whyInterested,
   rankByAcceptance,
@@ -1041,6 +1044,25 @@ test("a portal's own API host feeds the page, but only the calls it needs", () =
   assert.equal(portalApiHostAllowed("https://www.instahyre.com", u("https://gladiator.hirist.tech/job/detail/1/"), "GET", "xhr"), false);
 });
 
+test("Deel's guest form may read its own lookups and write only in its ats namespace", () => {
+  const u = (s) => new URL(s);
+  // Measured 2026-11-10, #1320 Zema: the form is served from jobs.deel.com but
+  // country/state lookups, the upload-request capability and the submit all go
+  // to Deel's own API host. Every one was blocked, so the dropdowns were empty,
+  // the CV never attached, and "Apply" could not become enabled.
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/lookups?documents[]=countries&ver=2"), "GET", "fetch"), true);
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/deelapi/form_builder/guest/preset/states"), "GET", "fetch"), true);
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/deelapi/guest/ats/application_form_upload_requests"), "POST", "fetch"), true);
+
+  // Only that namespace is writable, only as an XHR, and only from Deel's page.
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/deelapi/organizations/1"), "POST", "fetch"), false);
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/deelapi/guest/ats/application_form_upload_requests"), "DELETE", "fetch"), false);
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com", u("https://api-prod.letsdeel.com/deelapi/guest/ats/application_form_upload_requests"), "POST", "script"), false);
+  assert.equal(portalApiHostAllowed("https://evil.example", u("https://api-prod.letsdeel.com/deelapi/guest/ats/application_form_upload_requests"), "POST", "fetch"), false);
+  // A different Deel tenant page gets nothing from this allowance.
+  assert.equal(portalApiHostAllowed("https://jobs.deel.com.evil.example", u("https://api-prod.letsdeel.com/lookups"), "GET", "fetch"), false);
+});
+
 test("screening radios are answered from stated facts, never guessed", () => {
   // "Are you currently living in Bangalore?" - answered from where he actually
   // lives, with the NCR cities treated as the one place they are.
@@ -1243,6 +1265,30 @@ test("ATS inference and redirect allowlists are host based", () => {
   assert.equal(isAllowedInitialJobUrl("https://jobs.lever.co/example/1"), true);
   assert.equal(isAllowedInitialJobUrl("http://jobs.lever.co/example/1"), false);
   assert.equal(isAllowedNavigationUrl("http://jobs.lever.co/form", "lever", "https://jobs.lever.co/example/1"), false);
+});
+
+test("UKG Pro Recruiting is a known ATS whose own CDN may serve its app", () => {
+  // Measured 2026-11-10, #1019 Park Place Technologies: the posting page is a
+  // route of recruiting.ultipro.com, its runtime is on two CDN hostnames of its
+  // own, and with the scripts blocked the page painted nothing at all.
+  const posting = "https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/e104637a-c3c6-4682-96d2-d7cc2662dc13/OpportunityDetail?opportunityId=8a3e";
+  const form = "https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/e104637a-c3c6-4682-96d2-d7cc2662dc13/OpportunityApply?opportunityId=8a3e";
+  assert.equal(inferATS(posting), "ultipro");
+  assert.equal(inferATS(form), "ultipro");
+  assert.equal(isAllowedInitialJobUrl(posting), true);
+  // The apply route is the same host, so the opener has somewhere allowed to go.
+  assert.equal(isAllowedNavigationUrl(form, "ultipro", posting), true);
+
+  // Its declared asset hosts may serve scripts; a lookalike may not.
+  assert.equal(isAllowedAssetRequest("https://rec-cdn-prod.cdn.ultipro.com/rec-web/3cc6/siteBundle.js", "script", "ultipro"), true);
+  assert.equal(isAllowedAssetRequest("https://ignite.cdn.ultipro.com/dls-cdn/ignite/v7.18.0/ignite.js", "script", "ultipro"), true);
+  assert.equal(isAllowedAssetRequest("https://cdn.ultipro.evil.example/siteBundle.js", "script", "ultipro"), false);
+  assert.equal(isAllowedAssetRequest("https://rec-cdn-prod.cdn.ultipro.com/rec-web/x.js", "script", "linkedin"), false);
+
+  // Another employer's board is a different host, and a URL that merely mentions
+  // ultipro is not one.
+  assert.equal(inferATS("https://evil.example/?next=recruiting.ultipro.com"), "generic");
+  assert.equal(inferATS("https://recruiting.ultipro.com.evil.example/JobBoard/1/OpportunityDetail"), "generic");
 });
 
 test("HTTP job URLs are rejected before a browser or page is opened", async () => {
@@ -1931,6 +1977,84 @@ test("a first-name control is answered from the name on file", () => {
   // No name at all means no fact, rather than an invented one.
   const none = identityFacts({}, {});
   assert.equal(none.some((f) => f.tag === "preferred first name"), false);
+});
+
+test("a per-skill years figure answers only its own technology, never the total", () => {
+  // #1320 Zema (Deel, 2026-11-10) asks "How many years of hands-on experience do
+  // you have with Java in a professional environment?". It matched the
+  // total-experience fact, so the answer to a question about one language was
+  // the candidate's whole 0.2 years - true by accident here and false for any
+  // technology the CV never claims.
+  const stated = {
+    skill_years: { Java: "Under 1 year" },
+    skill_ratings: { Java: 8, "Spring Boot": 7, SQL: 8, Hibernate: 6 },
+  };
+  const javaYears = "how many years of hands-on experience do you have with java in a professional environment? *";
+  assert.equal(skillYearsFor(stated, javaYears), "Under 1 year");
+  // A technology with no stated figure is left for the human.
+  assert.equal(skillYearsFor(stated, "How many years of experience do you have with C++?"), "");
+  // MySQL and PostgreSQL are not SQL.
+  assert.equal(skillYearsFor({ skill_years: { SQL: "1 year" } }, "How many years of experience do you have with MySQL?"), "");
+  assert.equal(skillYearsFor({ skill_years: { SQL: "1 year" } }, "How many years of experience with SQL?"), "1 year");
+  // A question that is not about years is not this fact's business.
+  assert.equal(skillYearsFor(stated, "Do you know Java?"), "");
+
+  // "SpringBoot" and "Spring Boot" are one skill.
+  const rating = "rate your proficiency in springboot(1 = beginner, 10 = expert)";
+  assert.equal(skillRatingFor(stated, rating), "7");
+  assert.equal(skillRatingFor(stated, "rate your proficiency in java(1 = beginner, 10 = expert)"), "8");
+  // A rating is only given where the control asks for one, and only when stated.
+  assert.equal(skillRatingFor(stated, "How many years of Java experience do you have?"), "");
+  assert.equal(skillRatingFor({}, "rate your java proficiency"), "");
+
+  // The total-experience fact stands down on any technology-scoped question,
+  // including technologies that have no stated figure of their own.
+  const profile = { domain: { core_skills: ["Python", "C++"], adjacent_skills: ["Linux"] } };
+  assert.equal(skillScopedQuestion(stated, profile, javaYears), true);
+  assert.equal(skillScopedQuestion(stated, profile, "How many years of experience do you have with Python?"), true);
+  assert.equal(skillScopedQuestion(stated, profile, "How many years of professional backend experience do you have?"), false);
+
+  // ...and identityFacts wires that up: the Java question is answered with the
+  // stated figure while the generic question still gets the total.
+  const facts = identityFacts({ experience_years: 0.2 }, stated, null, profile);
+  const yearsFact = facts.find((f) => f.tag === "years of experience");
+  assert.equal(yearsFact.value, "0.2 years");
+  assert.equal(yearsFact.notWhen(javaYears), true);
+  assert.equal(yearsFact.notWhen("How many years of professional backend experience do you have?"), false);
+  assert.equal(facts.find((f) => f.tag === "skill years").byField(javaYears), "Under 1 year");
+  assert.equal(facts.find((f) => f.tag === "skill rating").byField(rating), "7");
+  // With nothing stated there is no fact at all, rather than an empty one.
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "skill years"), false);
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "skill rating"), false);
+});
+
+test("current compensation and the distance question come from stated answers", () => {
+  // The operator answered "Internship stipend only" on 2026-11-10, which says
+  // more, and more truthfully, than the derived 0 for "not currently employed".
+  const stated = {
+    current_compensation: "Internship stipend only",
+    current_company: "Not currently employed",
+    location_distance: "Not local - I live in Greater Noida, Uttar Pradesh, and I am willing to relocate to Navi Mumbai at my own expense.",
+  };
+  const facts = identityFacts({}, stated);
+  assert.equal(facts.find((f) => f.tag === "current CTC").value, "Internship stipend only");
+  // With no stated pay the derived answer still applies, and never the expected
+  // salary.
+  assert.equal(identityFacts({}, { current_company: "Not currently employed" })
+    .find((f) => f.tag === "current CTC").value, "0");
+
+  const distance = facts.find((f) => f.tag === "distance from office");
+  assert.ok(distance, "the distance question must have a stated answer to draw on");
+  for (const q of [
+    "how far do you live from seawoods grand central tower 1, mumbai, india? if you are not local, why do you look to move and are you willing to relocate at your own expense? *",
+    "How far away from the office do you live?",
+    "What is the distance from the office to your home?",
+  ]) {
+    assert.ok(distance.hint.test(q), `distance hint must match: ${q}`);
+  }
+  assert.equal(distance.hint.test("Why do you want to work here?"), false);
+  // Never invented when the operator has not stated it.
+  assert.equal(identityFacts({}, {}).some((f) => f.tag === "distance from office"), false);
 });
 
 test("why-interested is grounded in the posting, or left to the human", () => {

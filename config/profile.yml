@@ -50,6 +50,35 @@ candidate:
     # why the answers are stated explicitly rather than derived from it.
     desired_salary_monthly: 'INR 35,000 - 45,000 per month'
     desired_salary_annual: 'INR 8,40,000 - 10,80,000 per annum'
+    # --- 2026-11-10: the subjective screening questions Indian boards ask most
+    # often, answered by the operator himself after #1320 Zema sat blocked on
+    # them. None of these can be derived: a self-rating is a judgement, a
+    # per-skill years figure is not the total experience, and a current package
+    # is a fact about a pay slip. Each is used only on a control whose own words
+    # name that skill, so "how many years of Java" never receives the SQL figure.
+    #
+    # "How many years of hands-on experience do you have with Java in a
+    # professional environment?" -> Under 1 year (the AKS internship, May-Jul
+    # 2026, is the only professional Java work).
+    skill_years:
+      Java: 'Under 1 year'
+    # "Rate your proficiency in Java (1 = beginner, 10 = expert)", asked for four
+    # skills at once. Numbers stated by the operator on 2026-11-10: Java 8,
+    # SQL 8, Spring Boot 7, Hibernate 6.
+    skill_ratings:
+      Java: 8
+      SQL: 8
+      Spring Boot: 7
+      Hibernate: 6
+    # "What is your current compensation?" Literal wording given by the operator:
+    # the internship stipend is the only pay there has been, and the internship
+    # itself ended 01 July 2026, so no salary is claimed.
+    current_compensation: 'Internship stipend only'
+    # "How far do you live from <office>? If you are not local, why do you look
+    # to move and are you willing to relocate at your own expense?" Answered for
+    # Mumbai (#1320, 2026-11-10: "I'd relocate — answer Yes"). No distance in
+    # kilometres is claimed, because nobody measured one.
+    location_distance: 'I am not local - I live in Greater Noida, Uttar Pradesh. I am willing to relocate to Navi Mumbai at my own expense for this role.'
 
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
