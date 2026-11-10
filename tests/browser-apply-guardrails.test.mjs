@@ -61,6 +61,7 @@ import {
   isStrictTargetRole,
   isSubmissionControlLabel,
   isSubmissionLandingUrl,
+  isListingBrowseUrl,
   pageIsClosed,
   safePageUrl,
   isAshbyJobListing,
@@ -2778,4 +2779,29 @@ test("asking a closed page a question does not throw", () => {
   assert.equal(safePageUrl({ isClosed: () => false, url: () => "https://nudge.keka.com/careers/success/94986" }), "https://nudge.keka.com/careers/success/94986");
   assert.equal(safePageUrl({ isClosed: () => true, url: () => "https://nudge.keka.com/" }), "");
   assert.equal(safePageUrl(null), "");
+});
+
+test("a recommendation card's Apply link is not this job's apply control", () => {
+  // Measured 2026-11-10, #1274 Honeywell Aerospace: the matched control was a
+  // "similar jobs" card, so pressing it would have opened a different posting.
+  assert.equal(
+    isListingBrowseUrl(
+      "https://www.linkedin.com/jobs/search-results/?keywords=Intern+Bachelors+Software",
+      "https://www.linkedin.com/jobs/view/4486124872/",
+    ),
+    true,
+  );
+  assert.equal(isListingBrowseUrl("https://www.linkedin.com/jobs/search/?keywords=backend"), true);
+  assert.equal(isListingBrowseUrl("https://www.linkedin.com/jobs/collections/recommended/"), true);
+  assert.equal(isListingBrowseUrl("/jobs/search-results/?keywords=x", "https://www.linkedin.com/jobs/view/1/"), true);
+  assert.equal(isListingBrowseUrl("https://www.linkedin.com/feed/"), true);
+
+  // A real posting, an employer's own form, and a board's apply route are not
+  // browsing.
+  assert.equal(isListingBrowseUrl("https://www.linkedin.com/jobs/view/4486124872/"), false);
+  assert.equal(isListingBrowseUrl("https://job-boards.greenhouse.io/acme/jobs/4006731005"), false);
+  assert.equal(isListingBrowseUrl("https://jobs.lever.co/acme/1234/apply"), false);
+  assert.equal(isListingBrowseUrl("https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/x/OpportunityApply?opportunityId=1"), false);
+  assert.equal(isListingBrowseUrl("https://www.linkedin.com/researcher/1"), false);
+  assert.equal(isListingBrowseUrl(""), false);
 });

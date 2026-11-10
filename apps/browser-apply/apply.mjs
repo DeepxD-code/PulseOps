@@ -985,6 +985,23 @@ async function classifyMissingApplyState(page) {
   }).catch(() => "no-apply-control");
 }
 
+// A link that browses jobs is never this job's own apply control. LinkedIn
+// renders "similar jobs" and "see all" cards with an Apply-labelled anchor
+// whose href points at a search, so matching by label alone can pick up a
+// different posting - measured 2026-11-10, #1274 Honeywell Aerospace, where the
+// control read "Software Engineer Intern … Weekday (YC W21)" and its href was
+// /jobs/search-results/?keywords=…
+const LISTING_BROWSE_PATH = /\/(?:jobs\/search(?:-results)?|jobs\/collections|jobs\/similar|search|feed)(?:\/|$)|[?&]keywords=/i;
+
+function isListingBrowseUrl(value, base = undefined) {
+  try {
+    const parsed = new URL(String(value || ""), base);
+    return LISTING_BROWSE_PATH.test(`${parsed.pathname}${parsed.search}`);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Classify an Apply-looking control before touching it.  Plain `Apply` is
  * usually a modal/flow trigger, but on a one-step form it is the final action.
@@ -3739,6 +3756,13 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
       const valueLabel = typeof el.getAttribute === "function" ? await el.getAttribute("value").catch(() => "") : "";
       const label = (innerText || ariaLabel || valueLabel || sel).trim().slice(0, 80);
       console.log(`    [found] Apply → ${sel} "${label}" href=${href?.slice(0,80)}`);
+      // A recommendation card and a "see all jobs" shortcut both carry "Apply"
+      // text. Clicking one opens a different posting, so it is skipped rather
+      // than classified - the page's own missing-apply state is decided below.
+      if (href && isListingBrowseUrl(href, page.url())) {
+        console.log(`    [apply-skip] ${sel} browses jobs (${String(href).slice(0, 70)}), not this job's apply control`);
+        continue;
+      }
       let target = null;
       let httpTarget = null;
       if (href) {
@@ -9627,6 +9651,7 @@ export {
   isAuthWallHost,
   isGoogleFormUrl,
   isSubmissionControlLabel,
+  isListingBrowseUrl,
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
