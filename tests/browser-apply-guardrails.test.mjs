@@ -2400,6 +2400,57 @@ test("a tailored CV resolves from its folder, and never a stranger's", async () 
   }
 });
 
+test("a tailored CV resolves by role, and a placeholder company resolves none", async () => {
+  // The builder names each folder "<company[:24]>-<sha1(title)[:8]>", so the
+  // CV for a role is computable exactly. Two roles at one company must not
+  // resolve to each other, and the newest folder must never win by accident.
+  const { findResumePdf } = await import("../apps/browser-apply/apply.mjs");
+  const crypto = await import("node:crypto");
+  const dir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)), "..", "output", "pdf",
+  );
+  const clean = (s) => String(s)
+    .replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  const folder = (company, title) => path.join(
+    dir,
+    `${clean(company).slice(0, 24)}-${crypto.createHash("sha1").update(clean(title), "utf8").digest("hex").slice(0, 8)}`,
+  );
+
+  const older = folder("zzroleco", "Automation Testing Engineer");
+  const newer = folder("zzroleco", "AI Implementation Engineer - Internship");
+  const stranger = folder("Unknown", "AI Implementation Engineer - Internship");
+  for (const d of [older, newer, stranger]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(older, "CV.pdf"), "testing-role");
+  // Written second, so a "most recently written" fallback would pick this one.
+  fs.writeFileSync(path.join(newer, "CV.pdf"), "ai-role");
+  fs.writeFileSync(path.join(stranger, "CV.pdf"), "someone-elses-cv");
+  try {
+    assert.equal(
+      findResumePdf("zzroleco", "Automation Testing Engineer"),
+      path.join(older, "CV.pdf"),
+      "the role's own folder wins, even though another was written later",
+    );
+    assert.equal(
+      findResumePdf("zzroleco", "AI Implementation Engineer - Internship"),
+      path.join(newer, "CV.pdf"),
+    );
+
+    // #1059: a row whose company parsed as "Unknown" was handed another
+    // Unknown row's tailored CV. A placeholder company may resolve only the
+    // folder that names its own role - never another row's document.
+    const unknown = findResumePdf("Unknown", "Software Engineer - Automation Testing");
+    assert.notEqual(unknown, path.join(stranger, "CV.pdf"));
+    if (unknown && path.resolve(unknown).toLowerCase().startsWith(path.resolve(dir).toLowerCase())) {
+      assert.equal(
+        path.resolve(unknown).toLowerCase(),
+        path.resolve(folder("Unknown", "Software Engineer - Automation Testing"), "CV.pdf").toLowerCase(),
+      );
+    }
+  } finally {
+    for (const d of [older, newer, stranger]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.

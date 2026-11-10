@@ -33,7 +33,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
@@ -2641,12 +2641,43 @@ function findResumePdf(company, title, dbPdfPath = "") {
     return null;
   }
 
+  // The per-application folder is named deterministically by the builder
+  // (`resume_builder.build_tailored_resume`): "<company[:24]>-<sha1(title)[:8]>",
+  // both parts cleaned the same way. Computing it here resolves the CV that was
+  // rendered for THIS role exactly, instead of trusting whichever folder was
+  // written last. Without it, every row whose company parsed as "Unknown"
+  // resolved to the newest of the nine Unknown-* folders - so #1059, a
+  // "Software Engineer - Automation Testing" posting, was handed
+  // CV_Unknown_AI_Implementation_Engineer_-_Internship.pdf (2026-11-10).
+  const cleanPart = (value) => String(value || "")
+    .replace(/[^A-Za-z0-9_.-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+  const companyPart = cleanPart(company).slice(0, 24);
+  const rolePart = cleanPart(title);
+  if (companyPart && rolePart) {
+    const roleKey = createHash("sha1").update(rolePart, "utf8").digest("hex").slice(0, 8);
+    candidates.push(path.join(pdfDir, `${companyPart}-${roleKey}`, "CV.pdf"));
+  }
+
+  // Files from the older naming scheme, kept only as a fallback: the current
+  // builder writes "<company>-<hash>/CV.pdf", so these can only be a match from
+  // before that layout, never the more specific answer.
   const safeFilePart = (value) => String(value || "").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_");
   candidates.push(
     path.join(pdfDir, `${safeFilePart(company)} - ${safeFilePart(title)}.pdf`),
     path.join(pdfDir, `${safeFilePart(company)}.pdf`),
   );
-  const needle = norm(company).slice(0, 18);
+
+  // A company name that identifies nobody - "Unknown" is the parser's own
+  // placeholder - cannot be used to look a CV up: every such row shares it, so
+  // a fuzzy match returns an unrelated employer's document. Those rows fall
+  // straight through to the base CV, which the caller then re-tailors.
+  const anonymousCompany = !companyPart
+    || /^(?:unknown|na|none|null|undefined|confidential|undisclosed|stealth|private|notapplicable)$/i
+      .test(companyPart.replace(/[^a-z0-9]/gi, ""));
+
+  const needle = anonymousCompany ? "" : norm(company).slice(0, 18);
   if (needle && fs.existsSync(pdfDir)) {
     const hit = fs.readdirSync(pdfDir).find(f => f.endsWith(".pdf") && norm(f).includes(needle));
     if (hit) candidates.push(path.join(pdfDir, hit));
