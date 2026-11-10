@@ -60,6 +60,9 @@ import {
   controlSignatureMatcher,
   isStrictTargetRole,
   isSubmissionControlLabel,
+  isSubmissionLandingUrl,
+  pageIsClosed,
+  safePageUrl,
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
@@ -2739,4 +2742,40 @@ test("a request's allowlist follows the document that issued it, not the row's b
   // a LinkedIn allowlist - the exact mismatch that left #143's form inert.
   assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root-B3B4RIJc.js", "script", "greenhouse"), true);
   assert.equal(isAllowedAssetRequest("https://job-boards.cdn.greenhouse.io/assets/root-B3B4RIJc.js", "script", "linkedin"), false);
+});
+
+test("a submit that lands on the board's own confirmation route counts as confirmed", () => {
+  // Measured 2026-11-09, #1319: Keka answered the submit with 200 and sent the
+  // page to /careers/success/94986, but the run only looked for confirmation
+  // words in the form it had replaced and filed the row as an error.
+  assert.equal(
+    isSubmissionLandingUrl("https://nudge.keka.com/careers/success/94986"),
+    true,
+  );
+  assert.equal(isSubmissionLandingUrl("https://boards.example.com/thank-you"), true);
+  assert.equal(isSubmissionLandingUrl("https://jobs.example.com/application/123/confirmation"), true);
+  assert.equal(isSubmissionLandingUrl("https://jobs.example.com/apply/confirmation?job=1"), true);
+
+  // The form itself, and the job page that precedes it, are not evidence.
+  assert.equal(isSubmissionLandingUrl("https://nudge.keka.com/careers/applyjob/94986?source=linkedin"), false);
+  assert.equal(isSubmissionLandingUrl("https://nudge.keka.com/careers/jobdetails/94986"), false);
+
+  // A route named only in the query string is not the page that was loaded.
+  assert.equal(isSubmissionLandingUrl("https://jobs.example.com/jobs/123?next=/success"), false);
+  // Nonsense is not a confirmation either.
+  assert.equal(isSubmissionLandingUrl(""), false);
+  assert.equal(isSubmissionLandingUrl("not a url"), false);
+});
+
+test("asking a closed page a question does not throw", () => {
+  assert.equal(pageIsClosed({ isClosed: () => true }), true);
+  assert.equal(pageIsClosed({ isClosed: () => false }), false);
+  // A handle whose target has gone throws from isClosed(); that is closed too.
+  assert.equal(pageIsClosed({ isClosed: () => { throw new Error("Target page, context or browser has been closed"); } }), true);
+  assert.equal(pageIsClosed(null), true);
+  assert.equal(pageIsClosed(undefined), true);
+
+  assert.equal(safePageUrl({ isClosed: () => false, url: () => "https://nudge.keka.com/careers/success/94986" }), "https://nudge.keka.com/careers/success/94986");
+  assert.equal(safePageUrl({ isClosed: () => true, url: () => "https://nudge.keka.com/" }), "");
+  assert.equal(safePageUrl(null), "");
 });

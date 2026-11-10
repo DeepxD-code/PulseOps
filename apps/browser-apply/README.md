@@ -82,6 +82,23 @@ asks for things no profile can answer by itself:
 `firstAmount()` supplies the bare number for a `*.amount` control, whose currency
 and "Monthly" period are separate controls on the same row.
 
+### What counts as a confirmation
+
+A click is never a submission on its own. The row is only recorded `Verified`
+when the board itself says so, in either of two shapes:
+
+- the page it already has prints it ("application submitted", "thanks for
+  applying", a visible "Applied" badge), or
+- it **navigates to its own confirmation route** — `/careers/success/<id>`,
+  `/thank-you`, `/confirmation`, `/applied`. Keka does this: on 2026-11-09 (#1319)
+  the submit answered `200` and the page fetched `/careers/success/94986`, and the
+  run still filed the row as an error because it only looked for words.
+
+Only an address reached *after* the press counts, and it is read from the
+page's navigation log rather than from `page.url()`, because the board may close
+the window straight afterwards. A closed page is therefore no longer an error:
+questions to it are skipped, and the landing route decides the row.
+
 ## LinkedIn outreach (`linkedin_outreach.mjs`)
 
 For each company: searches LinkedIn → opens `/people/` → picks up to 2 members

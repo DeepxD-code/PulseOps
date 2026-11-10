@@ -4000,6 +4000,11 @@ async function answerCandidateQuestions(page, profile) {
   for (const select of selects) {
     const hint = `${select.id} ${select.name} ${select.label}`.toLowerCase();
     if (!/salary|ctc|compensation|lpa|lakh|year|month/.test(hint)) continue;
+    // Name the control the way the page does. `hint.split(" ")[0]` is empty
+    // whenever the id is missing, which reported Keka's optional
+    // workExperience.months select as "field (offered: 0 .. 11)" — a message
+    // that cannot be traced back to a control.
+    const name = String(select.name || select.label || select.id || "field").trim().slice(0, 60) || "field";
     let pick = null;
     if (/salary|ctc|compensation|lpa|lakh/.test(hint)) {
       pick = matchSalaryOption(select.options, candidate.expected_salary);
@@ -4010,13 +4015,13 @@ async function answerCandidateQuestions(page, profile) {
       }
     }
     if (!pick) {
-      unanswered.push(`${hint.split(" ")[0] || "field"} (offered: ${select.options.join(" / ")})`);
+      unanswered.push(`${name} (offered: ${select.options.join(" / ")})`);
       continue;
     }
     await page.locator("select").filter({ has: page.locator(`option:text-is("${pick}")`) }).first()
       .selectOption({ label: pick }).catch(() => {});
-    console.log(`    [answer] ${hint.split(" ")[0] || "field"} → "${pick}"`);
-    answered.push(hint.split(" ")[0] || "field");
+    console.log(`    [answer] ${name} → "${pick}"`);
+    answered.push(name);
   }
 
   // Custom dropdowns (Shine) render options as .select-option-label inside
@@ -6833,6 +6838,41 @@ async function hasVisibleAppliedBadge(page) {  const pageHit = await page.evalua
   return false;
 }
 
+// A board confirms a submission two ways: it prints the words in the page it
+// already has, or it navigates to a dedicated route of its own. Keka does the
+// second — measured 2026-11-09 on #1319, where the POST answered 200, the page
+// fetched /careers/success/94986, and the run still filed the row as an error
+// because the confirmation was never looked for in the address.
+const SUBMISSION_LANDING_PATH = /(?:^|\/)(?:success|successful|confirmation|confirmed|thank-?you|thankyou|applied|application-(?:sent|received|submitted)|submitted|completed?)(?:\/|$)/i;
+
+function isSubmissionLandingUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return SUBMISSION_LANDING_PATH.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+// The page can be gone by the time a post-submit question is asked (a board
+// that navigates to its success route may close the window); asking a closed
+// page throws, and that throw used to overwrite the evidence with an error.
+function pageIsClosed(page) {
+  try {
+    return !page || page.isClosed();
+  } catch {
+    return true;
+  }
+}
+
+function safePageUrl(page) {
+  try {
+    return pageIsClosed(page) ? "" : String(page.url() || "");
+  } catch {
+    return "";
+  }
+}
+
 // Naukri Campus periodically injects a full-screen Young Turk contest promo.
 // It can render inside a same-origin iframe and its close icon is often an
 // unlabelled SVG, so ordinary [class*=close] selectors miss it.
@@ -7256,6 +7296,16 @@ async function processJob(browser, job, profile, runtime = {}) {
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   page[Symbol.for("pulseops.browserApplyGuard")] = finalGuard;
+  // Every main-frame address this job visits. A board can confirm a submit by
+  // navigating to its own success route, so the address is part of the
+  // evidence — and it survives the window being closed afterwards, which the
+  // page object does not.
+  const visitedUrls = [];
+  if (typeof page.on === "function") {
+    page.on("framenavigated", (frame) => {
+      try { if (frame === page.mainFrame()) visitedUrls.push(String(frame.url() || "")); } catch { /* gone */ }
+    });
+  }
   // The ATS names its own upload target in a presigned-attributes response.
   // Record that host so the CV upload is not blocked, and nothing else is.
   const uploadHosts = new Set();
@@ -8504,6 +8554,9 @@ async function processJob(browser, job, profile, runtime = {}) {
     let clicked = false;
     let clickError = false;
     let blockedFields = [];
+    // Where the address bar was when the submit was pressed: only a landing
+    // reached AFTER the click can be evidence of a submission.
+    let navMark = visitedUrls.length;
     for (const sel of submitSels) {
       const el = await pickVisible(page.locator(sel));
       if ((await el.count()) > 0) {
@@ -8515,6 +8568,9 @@ async function processJob(browser, job, profile, runtime = {}) {
           console.log(`  [submit-skip] refusing to click non-submit control ${sel} ("${label || "no label"}")`);
           continue;
         }
+        // Remember where the address bar was before the press, so a landing
+        // reached during the pre-submit flow can never be mistaken for proof.
+        navMark = visitedUrls.length;
         const finalClick = await clickFinalControl(page, el, label || sel, finalGuard);
         if (finalClick.captcha) {
           if (!sharedCtx) await context.close();
@@ -8531,8 +8587,13 @@ async function processJob(browser, job, profile, runtime = {}) {
         }
         if (finalClick.clicked) {
           clicked = true;
-          await page.waitForTimeout(3000);
-          if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+          // A board that answers by navigating to its own /success route can
+          // close this window immediately afterwards; a fixed wait on a closed
+          // page threw "Target page, context or browser has been closed" and
+          // filed a submitted application as an error (#1319, Keka).
+          await page.waitForTimeout(3000).catch(() => {});
+          const landed = safePageUrl(page) || visitedUrls[visitedUrls.length - 1] || "";
+          if (landed && !isCurrentPageTrusted(landed, ats, navBoundary)) {
             if (!sharedCtx) await context.close();
             return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
           }
@@ -8565,8 +8626,17 @@ async function processJob(browser, job, profile, runtime = {}) {
         : "  [warn] no clickable final Submit found — recording NeedsReview");
     }
     // Verify before claiming: a click alone is never treated as Applied.
-    const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats) && await hasVisibleAppliedBadge(page);
-    let confirmed = clicked && (serverApplied || await page.evaluate(() =>
+    const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats)
+      && await hasVisibleAppliedBadge(page).catch(() => false);
+    // A board can confirm by leaving the form for a route of its own rather than
+    // printing the words in the page it already has. Only an address reached
+    // AFTER the press counts, and it is read from the navigation log because the
+    // window may already be gone by now (Keka's /careers/success/<id>, #1319).
+    const landing = clicked
+      ? visitedUrls.slice(navMark).find((visited) => isSubmissionLandingUrl(visited)) || ""
+      : "";
+    if (landing) console.log(`  [confirm] the board navigated to its confirmation page: ${landing.slice(0, 120)}`);
+    let confirmed = clicked && (serverApplied || Boolean(landing) || await page.evaluate(() =>
       /successfully applied|application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received/i.test(document.body?.innerText || "")
     ).catch(() => false));
     // Declared at function scope on purpose: the final return that records this
@@ -8576,7 +8646,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     let spamRefused = false;
 // A final click that lands on an SMS verification step is not a submission.
     // With --enter-otp the operator supplies the code they received.
-    if (clicked && !confirmed) {
+    if (clicked && !confirmed && !pageIsClosed(page)) {
       const otp = await completeSmsVerification(page);
       if (otp.state === "submitted") {
         confirmed = true;
@@ -8585,8 +8655,14 @@ async function processJob(browser, job, profile, runtime = {}) {
         confirmed = false;
       }
     }
-    // Diagnose before the context closes, otherwise the page is gone.
-    if (clicked && !confirmed) {
+    // Diagnose before the context closes, otherwise the page is gone. A board
+    // that confirmed by navigating away may also have closed the window, in
+    // which case there is nothing left to diagnose and nothing to complain
+    // about: the landing route already decided this row.
+    if (clicked && !confirmed && pageIsClosed(page)) {
+      console.log("  [confirm] the application window closed after the submit — no receipt was seen on it");
+    }
+    if (clicked && !confirmed && !pageIsClosed(page)) {
       // Say what the page actually says. A silent refusal is otherwise
       // indistinguishable from an unfilled field.
       const outcome = await describeSubmitOutcome(page).catch(() => null);
@@ -8682,7 +8758,8 @@ async function processJob(browser, job, profile, runtime = {}) {
             /application submitted|applied successfully|thank you for applying|thanks for applying|(?:we(?:'ve| have)) received your application|application[-_/ ]sent|you applied|application received|submitted successfully/i.test(document.body?.innerText || "")
           ).catch(() => false);
           if (done) { confirmed = true; break; }
-          await page.waitForTimeout(2000);
+          if (pageIsClosed(page)) break;
+          await page.waitForTimeout(2000).catch(() => {});
         }
         if (confirmed) console.log("  [handoff] confirmation seen — recording verified submission");
       }
@@ -9538,6 +9615,9 @@ export {
   getAuthoritativeDbPath,
   hasCrossOriginFormOrFrame,
   hasVisibleAppliedBadge,
+  isSubmissionLandingUrl,
+  pageIsClosed,
+  safePageUrl,
   inferATS,
   installNavigationGuard,
   isFinalApplyControl,
