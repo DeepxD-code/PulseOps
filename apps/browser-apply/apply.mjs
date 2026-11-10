@@ -3327,22 +3327,59 @@ const UPLOAD_BUTTON_LABEL = /upload\s+file|choose\s+file|browse\b|select\s+(?:a\
  * and nothing was ever uploaded. Clicking the control's own button and
  * answering the file chooser is the path its handler was actually written for.
  */
+const UPLOAD_LABEL_ATTR = "data-pulseops-upload-control";
+
+/**
+ * The elements on the page whose own words say "open a file picker".
+ *
+ * A role query alone is not enough: Eightfold renders its own control as
+ * "Select file" inside the dropzone rather than as a <button>, and the
+ * dropzone's container text is the whole widget ("Drag & drop file .pdf, .doc…
+ * Select file"), so matching on any ancestor would click the wrong thing.
+ * Only an element whose own trimmed text is short and matches is marked, which
+ * leaves the innermost label/button. The marks are removed before returning,
+ * so the DOM is left as the board rendered it.
+ */
+async function markUploadControls(page) {
+  return page.evaluate(({ src, attr }) => {
+    const re = new RegExp(src, "i");
+    let n = 0;
+    for (const el of document.querySelectorAll('button, [role="button"], label, a, span, div')) {
+      const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 60 || !re.test(text)) continue;
+      const rect = el.getBoundingClientRect();
+      if (!rect.width || !rect.height) continue;
+      el.setAttribute(attr, String(n++));
+      if (n >= 4) break;
+    }
+    return n;
+  }, { src: UPLOAD_BUTTON_LABEL.source, attr: UPLOAD_LABEL_ATTR }).catch(() => 0);
+}
+
 async function attachViaFileChooser(page, filePath) {
   if (!page || typeof page.waitForEvent !== "function") return false;
-  const buttons = page.getByRole("button", { name: UPLOAD_BUTTON_LABEL });
-  const total = Math.min(await buttons.count().catch(() => 0), 4);
-  for (let i = 0; i < total; i++) {
-    const button = buttons.nth(i);
-    if (!(await button.isVisible().catch(() => false))) continue;
-    const chooserPromise = page.waitForEvent("filechooser", { timeout: 4000 }).catch(() => null);
-    await button.click({ timeout: 3000 }).catch(() => {});
-    const chooser = await chooserPromise;
-    if (!chooser || typeof chooser.setFiles !== "function") continue;
-    try {
-      await chooser.setFiles(filePath, { timeout: 5000 });
-      console.log(`    [upload] the widget's own upload button opened its file picker — attached ${path.basename(filePath)}`);
-      return true;
-    } catch { /* fall through to the next control */ }
+  const marked = await markUploadControls(page);
+  try {
+    for (let i = 0; i < marked; i++) {
+      const control = page.locator(`[${UPLOAD_LABEL_ATTR}="${i}"]`).first();
+      if (!(await control.isVisible().catch(() => false))) continue;
+      // A native picker answers a click in milliseconds, so a short wait keeps
+      // a widget that has a matching label but no picker from costing seconds
+      // per candidate control.
+      const chooserPromise = page.waitForEvent("filechooser", { timeout: 1500 }).catch(() => null);
+      await control.click({ timeout: 3000 }).catch(() => {});
+      const chooser = await chooserPromise;
+      if (!chooser || typeof chooser.setFiles !== "function") continue;
+      try {
+        await chooser.setFiles(filePath, { timeout: 5000 });
+        console.log(`    [upload] the widget's own upload control opened its file picker — attached ${path.basename(filePath)}`);
+        return true;
+      } catch { /* fall through to the next control */ }
+    }
+  } finally {
+    await page.evaluate((attr) => {
+      for (const el of document.querySelectorAll(`[${attr}]`)) el.removeAttribute(attr);
+    }, UPLOAD_LABEL_ATTR).catch(() => {});
   }
   return false;
 }
