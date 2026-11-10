@@ -8,8 +8,17 @@ const MIN_MONTHLY_INR = 10000; // 10k INR/month == 1.2 LPA per annum
 
 const NUM = String.raw`(\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?)`;
 const CR = String.raw`(?:₹|rs\.?|inr)`;
-const MONTHLY_RE = new RegExp(
-  String.raw`${CR}?\s*${NUM}\s*(?:k\s*)?(?:per\s*month|\/\s*month|\/\s*mo\b|p\.?m\.?\b|monthly|pm\b|a\s*month)`,
+const MONTH_PERIOD = String.raw`(?:per\s*month|\/\s*month|\/\s*mo\b|p\.?m\.?\b|monthly|pm\b|a\s*month)`;
+// "pm" is ambiguous. It is the ordinary Indian shorthand for "per month" in
+// "40k pm", and it is also how a clock time is written. Matching "1 PM" as one
+// rupee a month skipped #1202 gitlab on 2026-11-10 - a People Systems Engineer
+// posting whose only "PM" was a time. So a bare "pm" is only read as pay when
+// the same fragment names money (₹/Rs/INR) or thousands ("40k"), and words that
+// can only mean a period stand on their own.
+const MONTHLY_RE = new RegExp(String.raw`${CR}\s*${NUM}\s*k?\s*${MONTH_PERIOD}`, "i");
+const MONTHLY_K_RE = new RegExp(String.raw`${NUM}\s*k\s*${MONTH_PERIOD}`, "i");
+const MONTHLY_WORDED_RE = new RegExp(
+  String.raw`${NUM}\s*(?:per\s*month|monthly|a\s*month)`,
   "i",
 );
 const HOURLY_RE = new RegExp(
@@ -24,7 +33,6 @@ const PLAIN_ANNUAL_RE = new RegExp(
   String.raw`${CR}?\s*${NUM}\s*(?:per\s*annum|annually|pa|p\.?a\.?\b|a\s*year)`,
   "i",
 );
-
 function toNumber(value) {
   const n = Number(String(value).replace(/,/g, "").trim());
   return Number.isFinite(n) ? n : null;
@@ -59,6 +67,18 @@ function salaryFigureFromText(text) {
     const hasK = /\d\s*k\s*(?:per\s*month|\/\s*month|p\.?m\.?\b|monthly|pm\b)/i.test(m[0]);
     const n = toNumber(m[1]);
     if (n !== null) return { monthly: hasK ? n * 1000 : n, matched: m[0] };
+  }
+
+  m = MONTHLY_K_RE.exec(blob);
+  if (m) {
+    const n = toNumber(m[1]);
+    if (n !== null) return { monthly: n * 1000, matched: m[0] };
+  }
+
+  m = MONTHLY_WORDED_RE.exec(blob);
+  if (m) {
+    const n = toNumber(m[1]);
+    if (n !== null) return { monthly: n, matched: m[0] };
   }
 
   m = HOURLY_RE.exec(blob);

@@ -103,6 +103,31 @@ test("salary parsing agrees with the floor constant", () => {
   assert.equal(monthlyInrFromText("no pay info"), null);
 });
 
+test("a clock time is not a monthly salary", () => {
+  // #1202 gitlab (People Systems Engineer, job-boards.greenhouse.io) was skipped
+  // as "stated Rs 1/month" on 2026-11-10. The only "PM" on the page was a time:
+  // "pm" is also Indian shorthand for "per month", so the fragment has to name
+  // money or thousands before it can mean pay.
+  for (const text of [
+    "Interviews held between 1 PM and 5 PM",
+    "Applications close at 11:59 PM",
+    "Join our webinar at 6 pm IST",
+    "Office hours: 9 AM - 7 PM, Monday to Friday",
+  ]) {
+    assert.deepEqual(
+      statedSalaryTooLow(text),
+      { skip: false, monthly: null, matched: "" },
+      `"${text}" states no salary`,
+    );
+  }
+
+  // The shorthand still works when the fragment names money or thousands.
+  assert.equal(monthlyInrFromText("₹40,000 pm"), 40000);
+  assert.equal(monthlyInrFromText("Rs 25k pm"), 25000);
+  assert.equal(monthlyInrFromText("stipend 20k per month"), 20000);
+  assert.equal(statedSalaryTooLow("₹8,000 pm").skip, true);
+});
+
 test("a skip names the fragment it fired on", () => {
   // #1202 gitlab was skipped as "stated Rs 1/month" and the log could not say
   // what on the page produced it. The fragment is now reported, so a mis-read
