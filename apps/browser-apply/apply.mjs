@@ -5361,6 +5361,41 @@ async function describeMissingRequiredFields(page) {
  * a longer budget, and retry once through the overlay. Triggers are never
  * final submissions, so this stays on the plain click path.
  */
+/**
+ * The forward button on a board's own warning dialog, before it hands the
+ * application to the employer.
+ *
+ * LinkedIn opens "Job search safety reminder" over the posting when Apply is
+ * clicked, with "Review job post" and "Continue applying" — no navigation, no
+ * form. The run waited for a form that could not appear and recorded
+ * NeedsReview on a live application (#1307 TAXOSMART, 2026-11-10). Only the
+ * forward action is matched: "Review job post" goes back to the posting, and a
+ * submission label can never match here.
+ */
+const APPLY_INTERSTITIAL_LABEL =
+  /^(?:continue\s+applying|continue\s+to\s+(?:the\s+)?(?:application|company(?:\s+site)?|employer(?:\s+site)?|external(?:\s+site)?)|proceed\s+to\s+(?:the\s+)?(?:application|company(?:\s+site)?))\b/i;
+
+/**
+ * Step through a board's safety/warning dialog on the way to the form.
+ * Returns true when a control was clicked, so the caller re-checks for the
+ * form rather than treating the dialog as the end of the flow.
+ */
+async function dismissApplyInterstitial(page) {
+  if (!page || typeof page.getByRole !== "function") return false;
+  const controls = page.getByRole("button", { name: APPLY_INTERSTITIAL_LABEL });
+  const total = Math.min(await controls.count().catch(() => 0), 3);
+  for (let i = 0; i < total; i++) {
+    const control = controls.nth(i);
+    if (!(await control.isVisible().catch(() => false))) continue;
+    const label = (await control.innerText().catch(() => "")).trim().slice(0, 60);
+    if (!(await clickTriggerControl(control))) continue;
+    console.log(`    [interstitial] clicked "${label || "continue"}" on the board's own dialog`);
+    await page.waitForTimeout(1500);
+    return true;
+  }
+  return false;
+}
+
 async function clickTriggerControl(el) {
   await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
   try {
@@ -8080,6 +8115,12 @@ async function processJob(browser, job, profile, runtime = {}) {
     // varies. Retry the trigger and wait for real fields before giving up.
     if (!applyNavigation.blocked) {
       let surfaceReady = false;
+      // The board may answer the Apply click with its own dialog instead of a
+      // form ("Job search safety reminder" → "Continue applying" on LinkedIn).
+      // Step through it once before waiting for fields that cannot appear yet.
+      if (await dismissApplyInterstitial(page)) {
+        applyNavigation = { ...applyNavigation, clicked: true };
+      }
       for (let attempt = 1; attempt <= 3 && !surfaceReady; attempt++) {
         await dismissConsentBanners(page);
         surfaceReady = await waitForApplicationSurface(page, 12000);
@@ -8087,6 +8128,8 @@ async function processJob(browser, job, profile, runtime = {}) {
         console.log(`  [form-open] attempt ${attempt}: form not rendered, re-triggering Apply`);
         const again = await detectAndClickApply(page, onExternalAts(navBoundary) ? "generic" : ats, navBoundary, finalGuard);
         if (again.blocked) break;
+        // The re-trigger can land on the same dialog rather than the form.
+        await dismissApplyInterstitial(page);
       }
       if (surfaceReady) await fillCommonFields(page, ats, profile, job, navBoundary);
     }
@@ -10223,6 +10266,7 @@ export {
   hasVisibleAppliedBadge,
   isEssayFieldHint,
   UPLOAD_BUTTON_LABEL,
+  APPLY_INTERSTITIAL_LABEL,
   statedOptionIndex,
   isSubmissionLandingUrl,
   pageIsClosed,

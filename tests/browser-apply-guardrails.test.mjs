@@ -2536,6 +2536,37 @@ test("a stated answer is matched to the option that says it, and never to a look
   assert.equal(statedOptionIndex("No.", ["Yes", "No."]), 1);
 });
 
+test("a board's safety dialog is stepped through, never a submission", async () => {
+  // LinkedIn answers an Apply click with "Job search safety reminder" offering
+  // "Review job post" and "Continue applying". Nothing navigates and no form
+  // appears, so #1307 TAXOSMART was recorded NeedsReview on a live application.
+  const { APPLY_INTERSTITIAL_LABEL } = await import("../apps/browser-apply/apply.mjs");
+
+  for (const label of [
+    "Continue applying",
+    "Continue applying ↗",
+    "Continue to application",
+    "Continue to the application",
+    "Continue to company site",
+    "Proceed to application",
+  ]) {
+    assert.ok(APPLY_INTERSTITIAL_LABEL.test(label), `"${label}" is the dialog's forward action`);
+  }
+
+  for (const label of [
+    "Review job post",
+    "Submit application",
+    "Submit",
+    "Apply now",
+    "Continue",
+    "Save and continue",
+    "Dismiss",
+    "Back",
+  ]) {
+    assert.ok(!APPLY_INTERSTITIAL_LABEL.test(label), `"${label}" must not be clicked as an interstitial`);
+  }
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.
