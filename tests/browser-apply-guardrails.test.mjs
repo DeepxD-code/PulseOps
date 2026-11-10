@@ -2500,6 +2500,42 @@ test("the upload button is found by its own words, never by a submit's", async (
   }
 });
 
+test("a stated answer is matched to the option that says it, and never to a lookalike", async () => {
+  // A board restates the operator's words in its own; the disability
+  // self-identification is answered "No, I don't have a disability" while PayPal
+  // renders "NO. I DON'T HAVE A DISABILITY (INCLUDING CANCER, EPILEPSY…)".
+  // Equality matched nothing, so a required group stayed blank (#1322).
+  const { statedOptionIndex } = await import("../apps/browser-apply/apply.mjs");
+
+  const disability = [
+    "YES. I HAVE A DISABILITY (OR PREVIOUSLY HAD ONE)",
+    "NO. I DON'T HAVE A DISABILITY (INCLUDING CANCER, EPILEPSY, DIABETES, ETC.)",
+    "I DON'T WISH TO ANSWER (INDIA)",
+  ];
+  assert.equal(statedOptionIndex("No, I don't have a disability", disability), 1);
+
+  // The plain confirmations still match exactly, and a short option may be the
+  // start of the stated answer.
+  assert.equal(statedOptionIndex("No", ["Yes", "No"]), 1);
+  assert.equal(statedOptionIndex("Yes", ["No", "Yes"]), 1);
+  assert.equal(statedOptionIndex("No", ["No. I don't have a disability", "Yes"]), 0);
+
+  // "None of the above" must never be read as the option "No": the boundary is
+  // a word edge, not a string prefix.
+  assert.equal(statedOptionIndex("None of the above", ["Yes", "No"]), -1);
+  assert.equal(statedOptionIndex("Nothing to declare", ["Yes", "No"]), -1);
+
+  // Two equally plausible options are left for a human rather than guessed.
+  assert.equal(
+    statedOptionIndex("No", ["No, I don't have a disability", "No, I prefer not to say"]),
+    -1,
+  );
+  assert.equal(statedOptionIndex("", ["Yes", "No"]), -1);
+  assert.equal(statedOptionIndex("No", []), -1);
+  assert.equal(statedOptionIndex("No", ["Yes", "No "]), 1);
+  assert.equal(statedOptionIndex("No.", ["Yes", "No."]), 1);
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.

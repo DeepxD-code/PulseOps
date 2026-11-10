@@ -6074,6 +6074,42 @@ function noticeBandFor(question, options, days) {
   return best || "";
 }
 
+/**
+ * Find the radio option that expresses a stated answer.
+ *
+ * Boards do not repeat the operator's wording. He answered the voluntary
+ * disability self-identification with "No, I don't have a disability" and
+ * PayPal renders that choice as "NO. I DON'T HAVE A DISABILITY (INCLUDING
+ * CANCER, EPILEPSY, DIABETES…)", so an equality test matched nothing and the
+ * required group stayed blank (#1322, 2026-11-10). Matching therefore accepts,
+ * in order: the same words; an option that spells the answer out further; an
+ * answer that spells the option out further.
+ *
+ * Both extra directions stop at a word boundary, because "None of the above"
+ * must never be read as the option "No". Anything still ambiguous (two options
+ * could be meant) returns -1 and the group is left for a human rather than
+ * guessed.
+ */
+function statedOptionIndex(answer, options) {
+  // Compare words, not spelling: a comma where the board wrote a full stop is
+  // not a different answer. "don't" becomes two tokens on both sides, so the
+  // comparison stays symmetric.
+  const words = (s) => String(s ?? "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const wanted = words(answer);
+  if (!wanted.length) return -1;
+  const opts = (Array.isArray(options) ? options : []).map(words);
+  const same = opts.findIndex((o) => o.length === wanted.length && o.every((w, i) => w === wanted[i]));
+  if (same >= 0) return same;
+  const startsWith = (long, short) => short.length < long.length
+    && short.every((w, i) => long[i] === w);
+  const spelledOut = opts.map((o, i) => (startsWith(o, wanted) ? i : -1)).filter((i) => i >= 0);
+  if (spelledOut.length === 1) return spelledOut[0];
+  if (spelledOut.length > 1) return -1;
+  const abbreviated = opts.map((o, i) => (startsWith(wanted, o) ? i : -1)).filter((i) => i >= 0);
+  if (abbreviated.length === 1) return abbreviated[0];
+  return -1;
+}
+
 async function answerFactualRadioQuestions(page, candidate) {
   // Questions about the candidate's own history that no CV field can be turned
   // into an answer mechanically. Each is answered only when the operator has
@@ -6085,6 +6121,12 @@ async function answerFactualRadioQuestions(page, candidate) {
     // "This position requires you to be in the office 8 days per month. Would you
     // be able to meet this requirement?" is a commitment, not a CV fact.
     { key: "office_attendance_days", hint: /in[- ](?:the )?office|office\s+(?:attendance|presence)|days?\s+(?:a|per)\s+(?:week|month)\s+in\s+(?:the\s+)?office/i },
+    // Voluntary self-identification is a radio group, not a text field, so it
+    // needs its own entry here: the disability and conflict-of-interest
+    // statements only exist in application_answers and nothing on a CV can be
+    // turned into them (#1322 PayPal, 2026-11-10).
+    { key: "disability_disclosure", hint: /disabilit\w*|differently\s+abled|voluntary\s+self[- ]identification/i },
+    { key: "conflict_of_interest", hint: /(?:board|advisory\s+group)[\s\S]{0,220}?(?:compete|competitor|interest)|family\s+relationship|government\s+official|known\s+merchant|referred\s+to[\s\S]{0,160}?(?:merchant|partner)|(?:spouse|relative)[\s\S]{0,120}?(?:employee|employer|board|interest)/i },
   ];
   const groups = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
@@ -6181,8 +6223,7 @@ async function answerFactualRadioQuestions(page, candidate) {
       console.log(`    [answer-missing] "${question.slice(0, 90)}" — left blank (no factual source)`);
       continue;
     }
-    const wanted = String(answer).toLowerCase();
-    const index = group.options.findIndex((opt) => opt.trim().toLowerCase() === wanted);
+    const index = statedOptionIndex(answer, group.options);
     if (index < 0) {
       console.log(`    [answer-missing] "${question.slice(0, 60)}": ${group.options.join("/")} offers no "${answer}"`);
       continue;
@@ -10182,6 +10223,7 @@ export {
   hasVisibleAppliedBadge,
   isEssayFieldHint,
   UPLOAD_BUTTON_LABEL,
+  statedOptionIndex,
   isSubmissionLandingUrl,
   pageIsClosed,
   safePageUrl,
