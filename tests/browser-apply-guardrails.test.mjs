@@ -62,6 +62,7 @@ import {
   isSubmissionControlLabel,
   isSubmissionLandingUrl,
   isListingBrowseUrl,
+  isEssayFieldHint,
   CLOSED_LISTING_TEXT,
   pageIsClosed,
   safePageUrl,
@@ -2817,4 +2818,29 @@ test("a posting that stopped taking applications is closed, not an off-site appl
   assert.equal(CLOSED_LISTING_TEXT.test("Applications are closed for this role"), true);
   assert.equal(CLOSED_LISTING_TEXT.test("This position is open until 30 November"), false);
   assert.equal(CLOSED_LISTING_TEXT.test("Apply now and we will review your application"), false);
+});
+
+test("a textarea is only an essay when its own words ask for prose", () => {
+  // Measured 2026-11-10, #1320 Zema on Deel: the "why us" essay (1500 chars) was
+  // poured into the salary box because it is also a textarea, so the money
+  // question was answered with an essay and the real essay stayed empty.
+  assert.equal(isEssayFieldHint("desired base salary (please specify amount and currency) | textarea"), false);
+  assert.equal(isEssayFieldHint("Current CTC in LPA"), false);
+  assert.equal(isEssayFieldHint("Phone number"), false);
+  assert.equal(isEssayFieldHint("How many years of Java experience do you have?"), false);
+  assert.equal(isEssayFieldHint("Rate your Spring Boot knowledge from 1 to 10"), false);
+  assert.equal(isEssayFieldHint("Notice period (days)"), false);
+
+  assert.equal(isEssayFieldHint("Why do you want to work at Zema?"), true);
+  assert.equal(isEssayFieldHint("Tell us about yourself"), true);
+  assert.equal(isEssayFieldHint("Describe your most challenging project"), true);
+  assert.equal(isEssayFieldHint("Cover letter"), true);
+  assert.equal(isEssayFieldHint("What motivates you?"), true);
+  assert.equal(isEssayFieldHint("Anything else we should know? (200-400 words)"), true);
+  assert.equal(isEssayFieldHint("Additional information"), true);
+
+  // A prose-looking label that also asks for a figure is still a figure field.
+  assert.equal(isEssayFieldHint("Tell us your expected salary in LPA"), false);
+  assert.equal(isEssayFieldHint(""), false);
+  assert.equal(isEssayFieldHint(null), false);
 });

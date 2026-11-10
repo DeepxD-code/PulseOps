@@ -1684,6 +1684,32 @@ function firstAmount(value) {
 }
 
 /**
+ * Is this textarea asking for prose, or for a figure?
+ *
+ * A textarea is not automatically an essay. Deel renders "Desired Base Salary
+ * (please specify amount and currency)" as one (`textarea`, 500-char limit), and
+ * the catch-all `form textarea` selector poured the whole 1500-character "why
+ * us" essay into it — the money question was answered with an essay, truncated
+ * at its limit, and the real essay question was left empty (#1320, 2026-11-10).
+ *
+ * So a box only counts when its own words ask for prose AND nothing in them asks
+ * for a number, a rate, or a contact detail. `hint` is the flattened label,
+ * placeholder, name, id, aria-label and surrounding block text.
+ */
+function isEssayFieldHint(hint) {
+  const text = String(hint || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!text) return false;
+  // A figure, a unit, or a contact detail means this is not prose, whatever else
+  // the label says ("tell us your expected salary in LPA").
+  if (/\b(?:salary|compensation|ctc|remuneration|package|amount|currency|inr|usd|lpa|lakhs?)\b/.test(text)) return false;
+  if (/\b(?:number|digits|numeric|phone|mobile|telephone|email|e-mail|address|pin\s*code|postal)\b/.test(text)) return false;
+  if (/\b(?:years?|months?|rate|rating|score|percentage|notice\s*period|availability)\b/.test(text)) return false;
+  // Prose asks: why us, tell us about yourself, describe, motivation, cover letter,
+  // or a word/character target ("200-400 words").
+  return /\bwhy\b|tell\s+us|describe|about\s+(?:you|yourself)|cover\s+letter|motivat|interested\s+in|anything\s+else|additional\s+information|\d{2,4}\s*[-–]\s*\d{2,4}\s*(?:words?|characters?|chars?)/i.test(text);
+}
+
+/**
  * Facts the profile can answer about one form.
  *
  * `job` is optional and only used by the "why interested" fact, which grounds its
@@ -5607,6 +5633,9 @@ async function answerFactualRadioQuestions(page, candidate) {
   const statedQuestions = [
     { key: "high_ownership_role_experience", hint: /founding engineer|forward deployed|\bFDE\b|high[- ]ownership/i },
     { key: "ever_interviewed_here", hint: /interviewed (?:with|at) (?:us|this company)|previously interviewed/i },
+    // "This position requires you to be in the office 8 days per month. Would you
+    // be able to meet this requirement?" is a commitment, not a CV fact.
+    { key: "office_attendance_days", hint: /in[- ](?:the )?office|office\s+(?:attendance|presence)|days?\s+(?:a|per)\s+(?:week|month)\s+in\s+(?:the\s+)?office/i },
   ];
   const groups = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
@@ -5664,6 +5693,18 @@ async function answerFactualRadioQuestions(page, candidate) {
       if (hit) {
         answer = hit;
         from = `current_location (${candidate?.current_location || "unset"})`;
+      } else {
+        // A form that offers only cities he does not live in still has to be
+        // answered to be sent, and a place he has said he would relocate to is
+        // the honest choice: it is a stated preference, not a claimed address.
+        // The log says so, so nothing downstream reads it as his current city.
+        const relocating = String(stated?.relocation_cities || "")
+          .split(",").map((city) => city.trim().toLowerCase()).filter(Boolean);
+        const willing = opts.find((opt) => relocating.includes(opt.toLowerCase()));
+        if (willing) {
+          answer = willing;
+          from = "application_answers.relocation_cities (willing to relocate)";
+        }
       }
     } else {
       const days = noticeDays(candidate);
@@ -5874,15 +5915,35 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     || "I'm a backend and ML engineer completing a B.Tech in CSE (AI/ML), with roughly two years of hands-on experience building production services in Java, C++ and Python. What draws me to this work is that it sits exactly where my two interests meet: the systems engineering that makes software reliable, and the ML research that makes it intelligent. Most of my recent work has been in backend services — REST and GraphQL APIs, relational data models, ERP and workflow systems, and integrations with third-party platforms. Alongside that I've been building agentic pipelines: orchestrating LLM calls, integrating with APIs like GitHub, processing webhook events, and writing the automation and tooling that makes those pipelines testable and observable. I've spent enough time debugging real systems to care about the unglamorous parts — evaluation harnesses, latency budgets, failure modes, inference cost — and I think that is the perspective which makes an AI company interesting to me rather than just its models. I'm deliberately early in my career, which is exactly the point: I want to build real depth at a place where research and engineering are not separated, where shipping safely with a frontier model is treated as a first-class engineering skill, and where the people writing the evaluations are the same people shipping the product. I would rather learn that discipline from people defining what responsible AI deployment looks like than work somewhere still deciding whether it matters."
   ).trim();
   if (whyUs) {
-    const essay = page.locator(
-      'textarea[placeholder*="200-400" i], textarea[id*="why" i], textarea[name*="why" i], form textarea',
-    ).first();
-    if ((await essay.count().catch(() => 0)) > 0) {
+    // A textarea is not automatically an essay. Deel's application form puts its
+    // "Desired Base Salary (please specify amount and currency)" in a textarea,
+    // and the catch-all `form textarea` poured the whole 1499-character essay
+    // into it — over its 500-character limit, on a money field, while the essay
+    // question never got it. So the box must both ask for prose and not be a
+    // money/number field.
+    const boxes = page.locator("textarea");
+    const seen = Math.min(await boxes.count().catch(() => 0), 8);
+    for (let i = 0; i < seen; i++) {
+      const box = boxes.nth(i);
+      if (!(await box.isVisible?.().catch(() => false))) continue;
+      const hint = await box.evaluate((el) => {
+        const norm = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const holder = el.closest("label")
+          || (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null);
+        const block = el.closest("fieldset, section, form > div, div") || el.parentElement;
+        return [
+          norm(el.placeholder), norm(el.name), norm(el.id), norm(el.getAttribute("aria-label")),
+          norm(holder?.innerText), norm(block?.innerText).slice(0, 200),
+        ].filter(Boolean).join(" | ");
+      }).catch(() => "");
+      if (!isEssayFieldHint(hint)) {
+        if (hint) console.log(`    [essay-skip] not an essay field: ${hint.slice(0, 70)}`);
+        continue;
+      }
       const words = whyUs.split(/\s+/).length;
-      const filled = await essay.fill
-        ? await essay.fill(whyUs, { timeout: 4000 }).then(() => true).catch(() => false)
-        : false;
+      const filled = await box.fill(whyUs, { timeout: 4000 }).then(() => true).catch(() => false);
       if (filled) console.log(`    [fill] required essay → ${words} words`);
+      break;
     }
   }
 
@@ -6496,6 +6557,21 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     console.log(`    [answer] ${tag}: no empty field matched ${hintRe.source} (${total} checked)`);
     return null;
   };
+  // The phone's dialling code is its own control wherever a board splits it out
+  // from the number: Keka signs it `mobilePhone.countryCode`, Deel calls it
+  // "Dial code". Left empty it blocks the submit even though the number itself
+  // was filled — #1320 Zema (Deel, 2026-11-10) showed the phone as invalid for
+  // exactly this. It is answered only from a stated answer, and only on a control
+  // that names itself as a dialling/country CODE, so the location "Country"
+  // question further down can never receive "+91".
+  const dialCode = String(candidate?.application_answers?.dial_code || "").trim();
+  if (dialCode) {
+    await combo(
+      /\b(?:dial(?:ling)?\s*code|country\s*code|isd\s*code|country\s*prefix)\b/i,
+      [dialCode, "India", "India (+91)"],
+      { label: "dial code" },
+    );
+  }
   // The location country, NOT a phone's dialling code. The hint requires a
   // location word beside "country" because a phone country-code combobox signs
   // as "country code" and matched the bare /country/ this used to use:
@@ -9651,6 +9727,7 @@ export {
   getAuthoritativeDbPath,
   hasCrossOriginFormOrFrame,
   hasVisibleAppliedBadge,
+  isEssayFieldHint,
   isSubmissionLandingUrl,
   pageIsClosed,
   safePageUrl,

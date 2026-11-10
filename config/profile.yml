@@ -111,9 +111,21 @@ candidate:
     # the list stays one word per hub instead of every variant a board might
     # print. Anything not listed is left unticked and logged [answer-missing]
     # rather than guessed from the job's own city.
-    relocation_cities: 'Bengaluru, Hyderabad, Pune, Chennai, NCR'
+    relocation_cities: 'Bengaluru, Hyderabad, Pune, Chennai, NCR, Navi Mumbai'
+    # Stated by the operator 2026-11-10, for a role that requires office
+    # attendance in a city he would relocate to: "This position requires you to
+    # be in the office 8 days per month. Would you be able to meet this
+    # requirement?" It is a commitment, not a CV fact, so it is stated here and
+    # never inferred from the posting.
+    office_attendance_days: 'Yes'
     future_us_residence: 'Yes'
     requires_visa_sponsorship: 'Yes'
+    # The phone's dialling code, for the boards that render it as its own
+    # control (Keka's `mobilePhone.countryCode`, Deel's "Dial code"). It is a
+    # fact about the number, not about where the candidate lives: the location
+    # "Country" question is answered separately from candidate.country. Only a
+    # control that names itself a dialling/country CODE is given this value.
+    dial_code: '+91'
     # Legal agreements are a separate class of act: accepting one changes what
     # the candidate can legally do later. These are only ever used when the run
     # also passes --accept-legal, and every acceptance is logged as [legal].
