@@ -22,7 +22,11 @@ import path from "node:path";
 const ROOT = path.resolve(".");
 const PROFILE = path.join(ROOT, ".edge-profile");
 const EMAIL = "trex2004avradeep@gmail.com";
-const CERT_DIR = path.join(ROOT, "output", "certs");
+// Where certificates live. The operator keeps them with the rest of his job
+// documents rather than inside the repo (2026-11-10), so the default is that
+// folder and PULSEOPS_CERT_DIR overrides it.
+const CERT_DIR = process.env.PULSEOPS_CERT_DIR
+  || path.join(process.env.USERPROFILE || "", "Documents", "Job stuff", "certificates");
 
 mkdirSync(CERT_DIR, { recursive: true });
 
