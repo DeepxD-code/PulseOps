@@ -128,6 +128,22 @@ test("a clock time is not a monthly salary", () => {
   assert.equal(statedSalaryTooLow("₹8,000 pm").skip, true);
 });
 
+test("a year is not an annual salary", () => {
+  // #1278 Meril was skipped as "stated Rs 169/month" on 2026-11-10; the matched
+  // fragment was "2026 pa" - an eligibility line, not pay.
+  for (const text of [
+    "Eligibility: 2026 pass outs, B.E/B.Tech",
+    "Candidates graduating in 2026 pa",
+    "2025 pa batch preferred",
+  ]) {
+    assert.equal(monthlyInrFromText(text), null, `"${text}" states no salary`);
+  }
+  // A stated salary in the same shape is still read, because it names money.
+  assert.equal(monthlyInrFromText("₹6,00,000 pa"), 50000);
+  assert.equal(monthlyInrFromText("Rs 120000 pa"), 10000);
+  assert.equal(monthlyInrFromText("Rs 1,20,000 p.a"), 10000);
+});
+
 test("a skip names the fragment it fired on", () => {
   // #1202 gitlab was skipped as "stated Rs 1/month" and the log could not say
   // what on the page produced it. The fragment is now reported, so a mis-read

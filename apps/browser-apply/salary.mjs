@@ -30,9 +30,21 @@ const LPA_RE = new RegExp(
   "i",
 );
 const PLAIN_ANNUAL_RE = new RegExp(
-  String.raw`${CR}?\s*${NUM}\s*(?:per\s*annum|annually|pa|p\.?a\.?\b|a\s*year)`,
+  String.raw`${CR}?\s*${NUM}\s*(?:per\s*annum|annually|pa\b|p\.?a\.?\b|a\s*year)`,
   "i",
 );
+
+/**
+ * A four-digit number in the calendar range is a year, not a salary.
+ *
+ * "2026 pa" (an eligibility line — "2026 pass outs") was read as ₹2026 per annum
+ * and skipped #1278 Meril for ₹169/month on 2026-11-10. A real figure names its
+ * currency, so the year is only forgiven when the fragment does not.
+ */
+function isYearNotSalary(fragment, value) {
+  if (/(?:₹|rs\.?|inr)/i.test(String(fragment))) return false;
+  return Number.isInteger(value) && value >= 1900 && value <= 2100;
+}
 function toNumber(value) {
   const n = Number(String(value).replace(/,/g, "").trim());
   return Number.isFinite(n) ? n : null;
@@ -91,7 +103,7 @@ function salaryFigureFromText(text) {
   m = LPA_RE.exec(blob);
   if (m) {
     const n = toNumber(m[1]);
-    if (n !== null) return { monthly: (n * 100000) / 12, matched: m[0] };
+    if (n !== null && !isYearNotSalary(m[0], n)) return { monthly: (n * 100000) / 12, matched: m[0] };
   }
 
   m = PLAIN_ANNUAL_RE.exec(blob);
@@ -99,7 +111,7 @@ function salaryFigureFromText(text) {
     const digits = m[0].replace(/₹/g, " ").match(/[\d,]+/g);
     if (digits && digits.length) {
       const n = toNumber(digits[0]);
-      if (n !== null) return { monthly: n / 12, matched: m[0] };
+      if (n !== null && !isYearNotSalary(m[0], n)) return { monthly: n / 12, matched: m[0] };
     }
   }
   return { monthly: null, matched: "" };
