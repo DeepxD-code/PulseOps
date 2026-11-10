@@ -3294,7 +3294,7 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
           // before the POST is even made; this poll and retry remain as the
           // fallback for a board that advertises the host elsewhere.
           if (uploadHosts && typeof uploadHosts.has === "function") {
-            const deadline = Date.now() + 4000;
+            const deadline = Date.now() + 8000;
             while (!uploadHosts.size && Date.now() < deadline) {
               await page.waitForTimeout(250);
             }
@@ -3312,7 +3312,10 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
                 console.log(`    [upload] ${path.basename(filePath)} is attached — no retry needed`);
               }
             } else {
-              console.log("    [upload] no upload host was advertised by the ATS; the CV may not have attached");
+              // The board's own second upload attempt can still land (Deel made
+              // one on #1320 and succeeded), so this is a warning, not a verdict:
+              // the row is only ever marked on the submit's own evidence.
+              console.log("    [upload] no upload host was advertised within 8s; watching whether the board retries the upload itself");
             }
           }
         return true;
