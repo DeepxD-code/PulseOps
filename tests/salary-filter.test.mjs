@@ -59,7 +59,7 @@ test("a role with no stated salary is never skipped", () => {
     null,
     undefined,
   ]) {
-    assert.deepEqual(statedSalaryTooLow(text), { skip: false, monthly: null });
+    assert.deepEqual(statedSalaryTooLow(text), { skip: false, monthly: null, matched: "" });
   }
 });
 
@@ -101,4 +101,22 @@ test("salary parsing agrees with the floor constant", () => {
   assert.equal(monthlyInrFromText("₹15,00,000 p.a"), 125000);
   assert.equal(monthlyInrFromText("8k pm"), 8000);
   assert.equal(monthlyInrFromText("no pay info"), null);
+});
+
+test("a skip names the fragment it fired on", () => {
+  // #1202 gitlab was skipped as "stated Rs 1/month" and the log could not say
+  // what on the page produced it. The fragment is now reported, so a mis-read
+  // is diagnosable instead of quietly discarding a posting.
+  const low = statedSalaryTooLow("Stipend ₹5,000 per month");
+  assert.equal(low.skip, true);
+  assert.equal(low.monthly, 5000);
+  assert.ok(low.matched.includes("5,000"), `fragment must be reported: ${low.matched}`);
+
+  // A stated high salary reports its fragment too, and never skips.
+  const fine = statedSalaryTooLow("₹8 - 12 LPA");
+  assert.equal(fine.skip, false);
+  assert.ok(fine.matched.length > 0);
+
+  // No figure at all stays silent rather than naming nothing.
+  assert.deepEqual(statedSalaryTooLow("no pay info"), { skip: false, monthly: null, matched: "" });
 });

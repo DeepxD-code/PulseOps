@@ -39,9 +39,18 @@ function safeCodePoint(code) {
   }
 }
 
-/** Best-effort INR-per-month figure from free text, or null. */
-function monthlyInrFromText(text) {
-  if (!text) return null;
+/**
+ * Best-effort INR-per-month figure from free text.
+ *
+ * Returns `{ monthly, matched }` rather than a bare number: a skip is a
+ * decision not to apply, and when the figure is wrong there was no way to tell
+ * what the page had actually said. `matched` is the exact fragment the rule
+ * fired on, so a mis-read is visible in the log instead of silently discarding
+ * a posting (#1202 gitlab, 2026-11-10: "stated Rs 1/month" on a page whose
+ * salary line was never printed).
+ */
+function salaryFigureFromText(text) {
+  if (!text) return { monthly: null, matched: "" };
   const blob = String(text);
 
   let m = MONTHLY_RE.exec(blob);
@@ -49,20 +58,20 @@ function monthlyInrFromText(text) {
     // No \b before k: in "40k" the digit and k are both word characters.
     const hasK = /\d\s*k\s*(?:per\s*month|\/\s*month|p\.?m\.?\b|monthly|pm\b)/i.test(m[0]);
     const n = toNumber(m[1]);
-    if (n !== null) return hasK ? n * 1000 : n;
+    if (n !== null) return { monthly: hasK ? n * 1000 : n, matched: m[0] };
   }
 
   m = HOURLY_RE.exec(blob);
   if (m) {
     const hasK = /\d\s*k\s*(?:per\s*hour|\/\s*hour|\/\s*hr\b|hourly)/i.test(m[0]);
     const n = toNumber(m[1]);
-    if (n !== null) return (hasK ? n * 1000 : n) * 22 * 12;
+    if (n !== null) return { monthly: (hasK ? n * 1000 : n) * 22 * 12, matched: m[0] };
   }
 
   m = LPA_RE.exec(blob);
   if (m) {
     const n = toNumber(m[1]);
-    if (n !== null) return (n * 100000) / 12;
+    if (n !== null) return { monthly: (n * 100000) / 12, matched: m[0] };
   }
 
   m = PLAIN_ANNUAL_RE.exec(blob);
@@ -70,16 +79,21 @@ function monthlyInrFromText(text) {
     const digits = m[0].replace(/₹/g, " ").match(/[\d,]+/g);
     if (digits && digits.length) {
       const n = toNumber(digits[0]);
-      if (n !== null) return n / 12;
+      if (n !== null) return { monthly: n / 12, matched: m[0] };
     }
   }
-  return null;
+  return { monthly: null, matched: "" };
+}
+
+/** Best-effort INR-per-month figure from free text, or null. */
+function monthlyInrFromText(text) {
+  return salaryFigureFromText(text).monthly;
 }
 
 /**
  * Should this posting be skipped for stating a salary below the floor?
- * Returns { skip, monthly }. `skip` is true only when a figure was found AND
- * it is under the threshold.
+ * Returns { skip, monthly, matched }. `skip` is true only when a figure was
+ * found AND it is under the threshold.
  *
  * Zero is not a low salary, it is the absence of one: boards that have not
  * filled in a pay field render "₹0 per month" (or a range starting at 0), and
@@ -88,10 +102,10 @@ function monthlyInrFromText(text) {
  * all. Treat a zero as undisclosed, which the filter already never skips.
  */
 function statedSalaryTooLow(text, minimumMonthlyInr = MIN_MONTHLY_INR) {
-  const monthly = monthlyInrFromText(text);
-  if (monthly === null) return { skip: false, monthly: null };
-  if (monthly <= 0) return { skip: false, monthly };
-  return { skip: monthly < minimumMonthlyInr, monthly };
+  const { monthly, matched } = salaryFigureFromText(text);
+  if (monthly === null) return { skip: false, monthly: null, matched: "" };
+  if (monthly <= 0) return { skip: false, monthly, matched };
+  return { skip: monthly < minimumMonthlyInr, monthly, matched };
 }
 
 /**

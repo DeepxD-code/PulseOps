@@ -96,10 +96,13 @@ async function rejectLowStatedSalary(page, job, probe = null) {
     text = await readPageText(page);
   }
   if (!text) return null;
-  const { skip, monthly } = statedSalaryTooLow(`${job.title || ""} ${text}`);
+  const { skip, monthly, matched } = statedSalaryTooLow(`${job.title || ""} ${text}`);
   if (!skip) return null;
   const shown = Math.round(monthly).toLocaleString("en-IN");
-  console.log(`  [salary] stated Rs ${shown}/month is under the Rs 10,000 floor — not applying`);
+  // Name the fragment the rule fired on. A skip is the engine deciding not to
+  // apply at all, so a mis-read must be visible rather than inferred later.
+  const why = matched ? ` (matched "${String(matched).trim().slice(0, 40)}")` : "";
+  console.log(`  [salary] stated Rs ${shown}/month is under the Rs 10,000 floor — not applying${why}`);
   return { action: "salary-below-threshold", monthly };
 }
 
