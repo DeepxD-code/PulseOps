@@ -51,6 +51,7 @@ import {
   noticeBandFor,
   isApplicationSurfaceControl,
   YEARS_OF_EXPERIENCE_QUESTION,
+  WORK_LOCATION_QUESTION,
   relocationPicks,
   availabilityDate,
   salaryAnswer,
@@ -2038,6 +2039,11 @@ test("current compensation and the distance question come from stated answers", 
   };
   const facts = identityFacts({}, stated);
   assert.equal(facts.find((f) => f.tag === "current CTC").value, "Internship stipend only");
+  // The exact wording Deel uses, which the older pattern missed because it only
+  // accepted "current ctc/package/salary" and this one says "compensation".
+  const currentPay = facts.find((f) => f.tag === "current CTC");
+  assert.ok(currentPay.hint.test("What is your current compensation? *"));
+  assert.equal(currentPay.hint.test("What are your Salary expectations?"), false);
   // With no stated pay the derived answer still applies, and never the expected
   // salary.
   assert.equal(identityFacts({}, { current_company: "Not currently employed" })
@@ -2055,6 +2061,24 @@ test("current compensation and the distance question come from stated answers", 
   assert.equal(distance.hint.test("Why do you want to work here?"), false);
   // Never invented when the operator has not stated it.
   assert.equal(identityFacts({}, {}).some((f) => f.tag === "distance from office"), false);
+
+  // The same question must not be answered with the candidate's city. A bare
+  // \brelocat did exactly that: "…are you willing to relocate at your own
+  // expense?" was read as a location question and the city wrote itself into
+  // the distance box, while the distance answer was skipped because the box
+  // looked filled (#1320, 2026-11-10).
+  assert.equal(WORK_LOCATION_QUESTION.test(
+    "how far do you live from seawoods grand central tower 1, mumbai, india? if you are not local, why do you look to move and are you willing to relocate at your own expense? *",
+  ), false);
+  for (const q of [
+    "Where are you located?",
+    "Where are you based?",
+    "Which city do you currently reside in?",
+    "What is your current location?",
+    "Please list the cities you are willing to relocate to.",
+  ]) {
+    assert.ok(WORK_LOCATION_QUESTION.test(q), `work-location hint must match: ${q}`);
+  }
 });
 
 test("why-interested is grounded in the posting, or left to the human", () => {

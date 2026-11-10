@@ -1692,6 +1692,18 @@ function skillScopedQuestion(stated, profile, signature) {
 const YEARS_OF_EXPERIENCE_QUESTION = /^(?![\s\S]*\b(?:writing|programming|coding|developing)\b)[\s\S]*(?:how\s+many\s+years\s+of\s+(?:[a-z,/+&-]+\s+){0,6}?experience|years\s+of\s+experience|total\s+experience)/i;
 
 /**
+ * "Where are you located?" - the candidate's own city, a fact from the profile.
+ *
+ * Deliberately not a bare `\brelocat`. "...and are you willing to relocate at
+ * your own expense?" is a relocation question, not a location one, and the loose
+ * token wrote the candidate's city into Zema's distance answer (#1320,
+ * 2026-11-10), displacing the sentence that belonged there - the box looked
+ * filled to every later pass while saying nothing the question asked for. A
+ * relocation question is only this fact's business when it asks WHICH place.
+ */
+const WORK_LOCATION_QUESTION = /address from which|which city|work from|current location|where\s+are\s+you\s+(?:located|based|residing)|where\s+(?:do|did)\s+you\s+(?:live|reside)|your\s+(?:current\s+)?location|which\s+city\s+are\s+you|(?:which|what|list\s+the)\s+(?:cities|city|locations?|places?)\b|relocat\w*\s+to\s+(?:the\s+|a\s+)?(?:city|location|region|area|place)\b/i;
+
+/**
  * "Are you subject to any employment agreements / post-employment
  * restrictions ...?" - the same class of representation as a non-compete, and
  * answered from `application_answers.current_non_compete`.
@@ -2180,7 +2192,7 @@ function identityFacts(candidate, stated, job = null, profile = null) {
       // states it: current_company is "Not currently employed", so there is no
       // current package to report and 0 is the truthful answer. If the candidate
       // were employed this resolves to nothing rather than inventing a figure.
-      hint: /current\s*(?:ctc|package|annual\s*compensation|salary)|present\s*(?:ctc|package|salary)|current\s*annual\s*salary/i,
+      hint: /current\s*(?:ctc|package|annual\s*compensation|salary|compensation)|present\s*(?:ctc|package|salary)|current\s*annual\s*salary/i,
       // A stated current compensation is the operator's own words and wins over
       // the derived figure: he answered "Internship stipend only" (2026-11-10),
       // which says more, and more truthfully, than a bare 0.
@@ -6866,7 +6878,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   // PlanetScale asks "Where are you located?" and "Where are you based?" -
   // neither matched the old pattern, and both blocked the submit.
   await answerQuestion(
-    /address from which|which city|relocat|work from|current location|where\s+are\s+you\s+(?:located|based|residing)|where\s+(?:do|did)\s+you\s+(?:live|reside)|your\s+(?:current\s+)?location|which\s+city\s+are\s+you/i,
+    WORK_LOCATION_QUESTION,
     String(candidate.current_location || "").trim(),
     "work location",
   );
@@ -10022,6 +10034,7 @@ export {
   noticeDays,
   noticeBandFor,
   YEARS_OF_EXPERIENCE_QUESTION,
+  WORK_LOCATION_QUESTION,
   isApplicationSurfaceControl,
   relocationPicks,
   availabilityDate,
