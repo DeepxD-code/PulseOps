@@ -62,6 +62,7 @@ import {
   isSubmissionControlLabel,
   isSubmissionLandingUrl,
   isListingBrowseUrl,
+  CLOSED_LISTING_TEXT,
   pageIsClosed,
   safePageUrl,
   isAshbyJobListing,
@@ -2804,4 +2805,16 @@ test("a recommendation card's Apply link is not this job's apply control", () =>
   assert.equal(isListingBrowseUrl("https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/x/OpportunityApply?opportunityId=1"), false);
   assert.equal(isListingBrowseUrl("https://www.linkedin.com/researcher/1"), false);
   assert.equal(isListingBrowseUrl(""), false);
+});
+
+test("a posting that stopped taking applications is closed, not an off-site apply", () => {
+  // Measured 2026-11-10, #1274 Honeywell Aerospace: LinkedIn's own line is
+  // "Not currently accepting applications", and the same page also says
+  // "Responses managed off LinkedIn" — which the run used to decide the job
+  // wanted an off-site application.
+  assert.equal(CLOSED_LISTING_TEXT.test("Promoted by hirer · Responses managed off LinkedIn On-site Full-time Not currently accepting applications"), true);
+  assert.equal(CLOSED_LISTING_TEXT.test("No longer accepting applications"), true);
+  assert.equal(CLOSED_LISTING_TEXT.test("Applications are closed for this role"), true);
+  assert.equal(CLOSED_LISTING_TEXT.test("This position is open until 30 November"), false);
+  assert.equal(CLOSED_LISTING_TEXT.test("Apply now and we will review your application"), false);
 });

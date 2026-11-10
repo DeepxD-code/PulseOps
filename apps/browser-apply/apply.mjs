@@ -965,14 +965,22 @@ function hasSimulationFragment(url) {
   return /^(?:mock|sim\w*|fake|fixture|demo|test)(?:[-_].*)?$/i.test(hash);
 }
 
+// A posting that has stopped taking applications says so in its own words.
+// LinkedIn's wording is "Not currently accepting applications" — measured
+// 2026-11-10 on #1274 Honeywell Aerospace, whose page also says "Responses
+// managed off LinkedIn", so the run read a closed job as an off-site apply and
+// asked a human to finish something the company had already closed.
+const CLOSED_LISTING_TEXT = /no longer accepting applications|not currently accepting applications|not accepting (?:new )?applications|accepting applications (?:closed|has ended)|applications are closed/i;
+
 // Distinguish "closed", "already applied", and "apply on the company site" from
 // a genuinely missing control, so the run records an accurate outcome instead
 // of a blanket NeedsReview.
 async function classifyMissingApplyState(page) {
   if (!page || typeof page.evaluate !== "function") return "no-apply-control";
-  return page.evaluate(() => {
+  return page.evaluate((closedSource) => {
     const text = (document.body?.innerText || "").replace(/\s+/g, " ");
-    if (/no longer accepting applications|this job is no longer|job (has )?expired|position (has been )?filled|no longer available/i.test(text)) {
+    if (new RegExp(closedSource, "i").test(text)
+        || /this job is no longer|job (has )?expired|position (has been )?filled|no longer available/i.test(text)) {
       return "closed-listing";
     }
     if (/apply on (?:the )?(?:company|employer)|apply on company website|external apply|go to (?:the )?(?:company|employer)(?:'s)? website|responses managed off linkedin/i.test(text)) {
@@ -982,7 +990,7 @@ async function classifyMissingApplyState(page) {
       return "already-applied";
     }
     return "no-apply-control";
-  }).catch(() => "no-apply-control");
+  }, CLOSED_LISTING_TEXT.source).catch(() => "no-apply-control");
 }
 
 // A link that browses jobs is never this job's own apply control. LinkedIn
@@ -7443,7 +7451,11 @@ async function processJob(browser, job, profile, runtime = {}) {
       const t = (document.body?.innerText || "").slice(0, 2000);
       return /404|page not found|unable to load the page|may not be valid|posting has been removed|job (?:posting )?(?:has been|was) removed|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i.test(t);
     }).catch(() => false);
-    if (deadHit && !(await hasCaptcha(page))) {
+    const closedNotice = Boolean(deadHit) || await page.evaluate((closedSource) => {
+      const t = (document.body?.innerText || "").slice(0, 2000);
+      return new RegExp(closedSource, "i").test(t);
+    }, CLOSED_LISTING_TEXT.source).catch(() => false);
+    if (closedNotice && !(await hasCaptcha(page))) {
       console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
@@ -9652,6 +9664,7 @@ export {
   isGoogleFormUrl,
   isSubmissionControlLabel,
   isListingBrowseUrl,
+  CLOSED_LISTING_TEXT,
   isAshbyJobListing,
   isGreenhouseJobListing,
   isLeverJobListing,
