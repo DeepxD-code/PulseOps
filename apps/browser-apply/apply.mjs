@@ -5412,18 +5412,33 @@ async function dismissApplyInterstitial(page) {
 
 async function clickTriggerControl(el) {
   await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-  try {
-    await el.click({ timeout: 12000 });
-    return true;
-  } catch {
-    await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+  // A sticky header/footer can sit over the control's centre, so a coordinate
+  // click lands on whatever is behind it. LinkedIn's own "Easy Apply" was
+  // clicked into /mynetwork this way (#1278 Meril, 2026-11-10): the run then
+  // hunted for an application form on the network page. Only when the point is
+  // actually covered does the click fall back to the DOM, which fires the same
+  // handler without hit-testing.
+  const covered = await el.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    if (!box.width || !box.height) return false;
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return !!hit && hit !== node && !node.contains(hit);
+  }).catch(() => false);
+  if (!covered) {
     try {
-      await el.click({ timeout: 8000, force: true });
+      await el.click({ timeout: 12000 });
       return true;
     } catch {
-      return false;
+      await el.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      try {
+        await el.click({ timeout: 8000 });
+        return true;
+      } catch {
+        // fall through to the DOM click below
+      }
     }
   }
+  return el.evaluate((node) => { node.click(); return true; }).catch(() => false);
 }
 
 /**
@@ -8108,7 +8123,25 @@ async function processJob(browser, job, profile, runtime = {}) {
         await page.waitForTimeout(1000);
       }
     }
+    const postingUrl = page.url();
     let applyNavigation = await detectAndClickApply(page, ats, navBoundary, finalGuard);
+    // LinkedIn's own job page is the apply surface: Easy Apply is a modal over
+    // it, so a click that leaves the posting for somewhere else is a misclick,
+    // not a hop. #1278 Meril landed on /mynetwork, where the run filled a search
+    // box and reported "no Submit button detected" on a live posting. Return to
+    // the posting once and let the control be clicked again (the DOM fallback in
+    // clickTriggerControl covers the sticky nav that swallowed the first click).
+    if (ats === "linkedin" && !DRY_RUN && !applyNavigation.blocked && postingUrl) {
+      let landed = "";
+      try { landed = new URL(page.url()).pathname; } catch { landed = ""; }
+      if (landed && !/^\/(?:jobs|apply|preload|talent)\b/i.test(landed)) {
+        console.log(`  [misclick] Apply click left the posting for ${landed} — returning to it`);
+        await page.goto(postingUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        const retried = await detectAndClickApply(page, ats, navBoundary, finalGuard);
+        if (retried.clicked) applyNavigation = retried;
+      }
+    }
     // After an approved off-site hop the page is a corporate careers site, so
     // the originating ATS selectors no longer exist. Re-detect with the
     // generic set (e.g. "Apply for this role"). The hop itself already counts
@@ -9142,7 +9175,23 @@ async function processJob(browser, job, profile, runtime = {}) {
             const el = document.querySelector(".artdeco-inline-feedback--error, [role='alert'], .artdeco-inline-feedback__message");
             return (el?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160);
           }).catch(() => "");
+          // Keep the evidence for the step that would not advance: the walk now
+          // stops instead of clicking into whatever opened on top of it, so the
+          // page itself is the only record of what was missing.
+          const stepText = await page.evaluate(() => {
+            const flat = (el) => (el.innerText || "").replace(/\s+/g, " ").trim();
+            const scopes = [...document.querySelectorAll("div, section, aside, form")]
+              .filter((el) => {
+                const t = flat(el);
+                return t.length > 0 && t.length < 12000
+                  && /\bApply to\s+\S/.test(t) && /\b\d+\s*\/\s*\d+\s+pages?\b/i.test(t);
+              })
+              .sort((a, b) => flat(a).length - flat(b).length);
+            return scopes[0] ? flat(scopes[0]).slice(0, 700) : "";
+          }).catch(() => "");
           console.log(`  [easy-apply] step stalled at "${found.key || "unknown"}"${blocker ? ` — page says: ${blocker}` : ""}`);
+          if (stepText) console.log(`  [easy-apply] step content: ${stepText}`);
+          await page.screenshot({ path: screenshotPath.replace("preview", "wizard"), fullPage: true }).catch(() => {});
           break;
         }
       }
