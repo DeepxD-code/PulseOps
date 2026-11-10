@@ -2451,6 +2451,55 @@ test("a tailored CV resolves by role, and a placeholder company resolves none", 
   }
 });
 
+test("the upload button is found by its own words, never by a submit's", async () => {
+  // Eightfold's dropzone ignores a populated <input type="file">: it keeps
+  // showing "Drag & drop file", issues no request, and the form then refuses
+  // the submit with "Upload your resume cannot be left blank" (#1322 PayPal,
+  // 2026-11-10). Its own "⬆ Upload file" button is the control its handler was
+  // written for, so this regex decides which buttons may be clicked to reach a
+  // file chooser. A submit-ish label must never match: clicking "Submit
+  // application" to reach a picker would send the application with no resume.
+  const { UPLOAD_BUTTON_LABEL } = await import("../apps/browser-apply/apply.mjs");
+  assert.ok(UPLOAD_BUTTON_LABEL instanceof RegExp, "the label matcher must be a RegExp");
+  assert.ok(
+    !UPLOAD_BUTTON_LABEL.global && !UPLOAD_BUTTON_LABEL.sticky,
+    "a stateful /g regex would make .test() alternate between true and false",
+  );
+
+  const matches = [
+    "⬆ Upload file",      // the literal Eightfold control
+    "Upload File",
+    "Choose file",
+    "Choose File",
+    "Browse",
+    "Browse…",
+    "Select file",
+    "Attach file",
+    "Attach CV",
+    "upload resume",
+  ];
+  for (const label of matches) {
+    assert.ok(UPLOAD_BUTTON_LABEL.test(label), `"${label}" opens a file picker and must match`);
+  }
+
+  const refusals = [
+    "Submit application",
+    "Submit",
+    "Apply now",
+    "Apply",
+    "Save and continue",
+    "Save draft",
+    "Cancel",
+    "Next",
+    "Back",
+    "Remove",
+    "Delete",
+  ];
+  for (const label of refusals) {
+    assert.ok(!UPLOAD_BUTTON_LABEL.test(label), `"${label}" must never be clicked to reach a file picker`);
+  }
+});
+
 test("a CV may upload only to the host the ATS itself named", () => {
   // With the upload blocked the board answers "There was an error processing
   // your application", because the form submits with no attachment.

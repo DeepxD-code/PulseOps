@@ -3306,6 +3306,47 @@ async function closeOpenDropdowns(page) {
   return left === 0;
 }
 
+/**
+ * The words a file widget puts on the button that opens its own picker.
+ *
+ * Deliberately narrow: "Submit", "Apply", "Save" and "Cancel" must never match,
+ * because clicking one of those to reach a file chooser would submit or discard
+ * the application instead.
+ */
+const UPLOAD_BUTTON_LABEL = /upload\s+file|choose\s+file|browse\b|select\s+(?:a\s+)?file|attach\s+(?:a\s+)?(?:file|cv|resume)|upload\s+(?:a\s+)?(?:cv|resume)/i;
+
+/**
+ * Hand the file to a widget that owns its own "Upload file" button.
+ *
+ * A hidden <input type="file"> can be populated by setInputFiles while the
+ * widget that owns it never learns about it. Eightfold's dropzone keeps showing
+ * "Drag & drop file", issues no request at all, and the form then refuses the
+ * submit with "Upload your resume cannot be left blank" - measured on #1322
+ * PayPal, 2026-11-10, where the log claimed
+ *   [upload] input[type="file"] <- CV.pdf
+ * and nothing was ever uploaded. Clicking the control's own button and
+ * answering the file chooser is the path its handler was actually written for.
+ */
+async function attachViaFileChooser(page, filePath) {
+  if (!page || typeof page.waitForEvent !== "function") return false;
+  const buttons = page.getByRole("button", { name: UPLOAD_BUTTON_LABEL });
+  const total = Math.min(await buttons.count().catch(() => 0), 4);
+  for (let i = 0; i < total; i++) {
+    const button = buttons.nth(i);
+    if (!(await button.isVisible().catch(() => false))) continue;
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 4000 }).catch(() => null);
+    await button.click({ timeout: 3000 }).catch(() => {});
+    const chooser = await chooserPromise;
+    if (!chooser || typeof chooser.setFiles !== "function") continue;
+    try {
+      await chooser.setFiles(filePath, { timeout: 5000 });
+      console.log(`    [upload] the widget's own upload button opened its file picker — attached ${path.basename(filePath)}`);
+      return true;
+    } catch { /* fall through to the next control */ }
+  }
+  return false;
+}
+
 async function tryUpload(page, selectors, filePath, ats = null, originUrl = null, uploadHosts = null) {
   const currentUrl = typeof page?.url === "function" ? page.url() : "";
   const effectiveAts = ats || (isNavigationBoundary(originUrl) ? originUrl.ats : "generic");
@@ -3354,6 +3395,23 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
           // before the POST is even made; this poll and retry remain as the
           // fallback for a board that advertises the host elsewhere.
           if (uploadHosts && typeof uploadHosts.has === "function") {
+            // Did the widget itself take the file? Its own chip or filename is
+            // the board saying so, and it is the only evidence available when
+            // the board uploads inline and advertises no host.
+            const fileShown = async () => {
+              try {
+                return (await page.getByText(path.basename(filePath), { exact: false }).count()) > 0;
+              } catch { return false; }
+            };
+            await page.waitForTimeout(400);
+            let attached = await fileShown();
+            // Nothing arrived and nothing is displayed: the input we set is not
+            // the one this widget listens to. Ask its own button instead of
+            // re-picking the same file into the same dead input.
+            if (!attached && !uploadHosts.size) {
+              attached = await attachViaFileChooser(page, filePath);
+              if (attached) await page.waitForTimeout(800);
+            }
             const deadline = Date.now() + 8000;
             while (!uploadHosts.size && Date.now() < deadline) {
               await page.waitForTimeout(250);
@@ -3363,19 +3421,22 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
               // picking the SAME file a second time can put the widget back into
               // its empty state, which is how #1320's form went from an attached
               // CV.pdf to "Click or drag file to upload" (2026-11-10).
-              const shown = await page.getByText(path.basename(filePath), { exact: false })
-                .count().catch(() => 0);
+              const shown = await fileShown();
               if (!shown) {
                 await el.setInputFiles(filePath, { timeout: 5000 }).catch(() => {});
                 console.log(`    [upload] retried against trusted host(s): ${[...uploadHosts].join(", ")}`);
               } else {
                 console.log(`    [upload] ${path.basename(filePath)} is attached — no retry needed`);
               }
+            } else if (attached || await fileShown()) {
+              // The board carries the file inline and shows it: a host was never
+              // going to be advertised.
+              console.log(`    [upload] ${path.basename(filePath)} is attached — the board keeps it with the form`);
             } else {
               // The board's own second upload attempt can still land (Deel made
               // one on #1320 and succeeded), so this is a warning, not a verdict:
               // the row is only ever marked on the submit's own evidence.
-              console.log("    [upload] no upload host was advertised within 8s; watching whether the board retries the upload itself");
+              console.log("    [upload] no upload host was advertised within 8s and the board shows no attached file; watching whether it retries the upload itself");
             }
           }
         return true;
@@ -10083,6 +10144,7 @@ export {
   hasCrossOriginFormOrFrame,
   hasVisibleAppliedBadge,
   isEssayFieldHint,
+  UPLOAD_BUTTON_LABEL,
   isSubmissionLandingUrl,
   pageIsClosed,
   safePageUrl,
