@@ -2393,6 +2393,24 @@ test("a CV may upload only to the host the ATS itself named", () => {
   // With nothing harvested, nothing is writable.
   assert.equal(isAllowedPresignedUploadRequest(target, "xhr", "PUT", new Set()), false);
   assert.equal(isAllowedPresignedUploadRequest(target, "xhr", "PUT", null), false);
+
+  // Deel mints its capability as a presigned FORM: the target is the bare bucket
+  // URL and the signature travels in the body, so only the host can be trusted.
+  // Measured 2026-11-10, #1320 Zema: the browser POSTed to
+  //   https://deel-sandbox-prod.s3.eu-west-1.amazonaws.com/
+  // and with that blocked the page showed an empty "Please upload your resume"
+  // box while the form was otherwise complete, so Apply never enabled.
+  const deel = new Set();
+  assert.equal(collectPresignedUploadHosts({
+    data: {
+      url: "https://deel-sandbox-prod.s3.eu-west-1.amazonaws.com/",
+      fields: { key: "uploads/abc", "X-Amz-Signature": "deadbeef" },
+    },
+  }, deel), 1);
+  assert.equal(
+    isAllowedPresignedUploadRequest("https://deel-sandbox-prod.s3.eu-west-1.amazonaws.com/", "fetch", "POST", deel),
+    true,
+  );
 });
 
 test("the submit-time captcha and vendor data are reachable, writes are not", () => {

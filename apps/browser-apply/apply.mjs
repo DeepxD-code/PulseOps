@@ -3289,17 +3289,28 @@ async function tryUpload(page, selectors, filePath, ats = null, originUrl = null
           // The upload capability is only issued in RESPONSE to picking the
           // file, so the first POST to object storage necessarily happens
           // before the guard has learned the host - and is blocked. The ATS then
-          // receives an application with no CV attached. The harvest is
-          // asynchronous (it reads the ATS's response body), so poll briefly
-          // for the host rather than testing once and giving up.
+          // receives an application with no CV attached. The guard now pre-reads
+          // that response (installNavigationGuard), so the host is usually known
+          // before the POST is even made; this poll and retry remain as the
+          // fallback for a board that advertises the host elsewhere.
           if (uploadHosts && typeof uploadHosts.has === "function") {
             const deadline = Date.now() + 4000;
             while (!uploadHosts.size && Date.now() < deadline) {
               await page.waitForTimeout(250);
             }
             if (uploadHosts.size) {
-              await el.setInputFiles(filePath, { timeout: 5000 }).catch(() => {});
-              console.log(`    [upload] retried against trusted host(s): ${[...uploadHosts].join(", ")}`);
+              // Only re-pick when the board has not already accepted the file:
+              // picking the SAME file a second time can put the widget back into
+              // its empty state, which is how #1320's form went from an attached
+              // CV.pdf to "Click or drag file to upload" (2026-11-10).
+              const shown = await page.getByText(path.basename(filePath), { exact: false })
+                .count().catch(() => 0);
+              if (!shown) {
+                await el.setInputFiles(filePath, { timeout: 5000 }).catch(() => {});
+                console.log(`    [upload] retried against trusted host(s): ${[...uploadHosts].join(", ")}`);
+              } else {
+                console.log(`    [upload] ${path.basename(filePath)} is attached — no retry needed`);
+              }
             } else {
               console.log("    [upload] no upload host was advertised by the ATS; the CV may not have attached");
             }
@@ -3794,6 +3805,35 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
           await route.abort("blockedbyclient");
           return;
+        }
+      }
+      // The upload capability is issued in the ATS's response, and the browser
+      // POSTs the file to object storage immediately afterwards. Harvesting that
+      // host from the `response` event loses the race: the S3 POST is already in
+      // flight, gets blocked, and re-picking the same file does not make the
+      // board re-upload it. Measured 2026-11-10, #1320 Zema: the log said
+      // "retried against trusted host(s)" while the page still showed an empty
+      // "Please upload your resume" box and Apply stayed disabled.
+      //
+      // So this one response is fetched through the guard, its body read, and
+      // only then handed to the page - the host is known before anything can
+      // Post to it. Scoped to the ATS's own capability endpoints; every other
+      // request takes the ordinary path below.
+      if (uploadHosts && typeof uploadHosts.add === "function"
+          && /presigned_fields|presigned_attributes|ApiCreateFileUploadHandle|application_form_upload_requests/i.test(requestUrl)) {
+        try {
+          const fetched = await route.fetch();
+          const body = await fetched.text();
+          try {
+            const added = collectPresignedUploadHosts(JSON.parse(body), uploadHosts);
+            if (added) console.log(`    [upload] presigned upload host trusted: ${[...uploadHosts].join(", ")}`);
+          } catch { /* not JSON, nothing to trust */ }
+          await route.fulfill({ response: fetched, body });
+          return;
+        } catch (error) {
+          // A failure here must not take the form down: fall through and let the
+          // request continue unread, exactly as before.
+          console.log(`    [upload] could not pre-read the upload capability: ${String(error).slice(0, 60)}`);
         }
       }
       await route.continue();
