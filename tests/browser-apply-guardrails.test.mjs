@@ -2629,6 +2629,26 @@ test("a years-of-experience select takes the whole-year bucket", async () => {
   assert.equal(numericOption(options, "not stated"), null);
 });
 
+test("a board that refuses automated browsers is told apart from a CAPTCHA", async () => {
+  // Himalayas answered both a headed Edge with a persistent profile and a clean
+  // bundled Chromium (real Chrome UA) with Cloudflare's managed check and HTTP
+  // 403 — title "Just a moment...", body "Performing security verification", no
+  // posting ever painted. There is no widget to click, so waiting for the form
+  // and reporting "no Submit button found" describes the wrong failure.
+  const { isBotVerificationWall, statusForBrowserResult } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(isBotVerificationWall("himalayas.app Performing security verification This website uses a security service to protect against malicious bots."), true);
+  assert.equal(isBotVerificationWall("Just a moment..."), true);
+  assert.equal(isBotVerificationWall("Checking if the site connection is secure"), true);
+  // An ordinary posting page is not a wall, even when it mentions bots.
+  assert.equal(isBotVerificationWall("Platform Engineer (Edge / Docker / IIoT) — apply now"), false);
+  assert.equal(isBotVerificationWall(""), false);
+
+  // A refusal is terminal; a captcha on a real form is worth a human's wait.
+  assert.equal(statusForBrowserResult({ action: "board-blocked" }), "Skipped");
+  assert.equal(statusForBrowserResult({ action: "captcha-blocked" }), "NeedsReview");
+});
+
 test("a wizard step is only Next/Review, never a profile-edit control", async () => {
   // #1033 (Heads Up For Tails, 2026-11-10) clicked "Next" eight times and ended
   // on a profile edit overlay carrying "Back | Next | Save | Add work

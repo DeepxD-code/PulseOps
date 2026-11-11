@@ -5986,6 +5986,31 @@ function isInteractiveChallengeUrl(frameUrl) {
   return true;
 }
 
+/**
+ * A board that refuses automated browsers outright, rather than asking a
+ * question a human could answer.
+ *
+ * Himalayas answers a plain page load - headed Edge with a persistent profile,
+ * and a clean bundled Chromium with a real Chrome user agent alike - with
+ * Cloudflare's managed-check interstitial and HTTP 403. Measured 2026-11-11:
+ * `title: "Just a moment..."`, body "Performing security verification", no
+ * posting and no Apply control ever painted, and an empty full-page screenshot.
+ * There is no widget to click and no sign-in that fixes it, so a run can never
+ * convert one of these into an application.
+ *
+ * Distinct from a CAPTCHA on an application form: that one is solvable in a
+ * headed window and is worth waiting for. This one is a refusal, so it is
+ * recorded as Skipped and the row stops consuming batch slots.
+ */
+function isBotVerificationWall(text) {
+  const body = String(text || "");
+  if (!body) return false;
+  return /performing security verification/i.test(body)
+    || /^\s*just a moment\.\.\./i.test(body)
+    || /checking (?:if the site connection is secure|your browser before accessing)/i.test(body)
+    || /enable javascript and cookies to continue/i.test(body);
+}
+
 async function hasCaptcha(page) {
   try {
     for (const selector of CAPTCHA_SELECTORS) {
@@ -8344,6 +8369,17 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
 
+    // A board that refuses automated browsers never paints the posting. Waiting
+    // for a form that cannot arrive, and then recording "no Submit button
+    // found", describes a broken form rather than the refusal that happened.
+    const wallText = await page.evaluate(() => (document.body?.innerText || "").slice(0, 800)).catch(() => "");
+    if (isBotVerificationWall(wallText)) {
+      const host = (() => { try { return new URL(page.url()).hostname; } catch { return "the board"; } })();
+      console.log(`  [bot-wall] ${host} serves a Cloudflare verification page instead of the posting — no unattended application is possible here`);
+      if (!sharedCtx) await context.close();
+      return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
+    }
+
     // A posting that states pay under the floor is not worth an application.
     const salaryBlock = await rejectLowStatedSalary(page, job, pageProbe);
     if (salaryBlock) {
@@ -10263,6 +10299,10 @@ function statusForBrowserResult(result) {
   if (action === "verified" || (action === "submitted" && result?.confirmed === true)) return "Verified";
   if (action === "submitted" || ["unverified", "chat-incomplete", "needs-verification", "no-submit", "not-submitted", "click-failed", "error"].includes(action)) return "NeedsVerification";
   if (["needs-review", "captcha-blocked", "manual-submit-required", "redirect-blocked", "simulation-blocked", "authwall-skip", "portal-disabled", "profile-incomplete"].includes(action)) return "NeedsReview";
+  // The board refuses automated browsers at the door (Cloudflare managed check,
+  // see isBotVerificationWall). Nothing a human can answer in the window changes
+  // it, and re-attempting burns a slot a day, so it is terminal.
+  if (action === "board-blocked") return "Skipped";
   if (action === "dead-link" || action === "invalid-listing") return "Expired";
   if (action === "salary-below-threshold") return "Skipped";
   // The board refused the submission itself as spam. Recording this as
@@ -10653,6 +10693,7 @@ export {
   hasCrossOriginFormOrFrame,
   hasVisibleAppliedBadge,
   isEssayFieldHint,
+  isBotVerificationWall,
   UPLOAD_BUTTON_LABEL,
   APPLY_INTERSTITIAL_LABEL,
   EASY_APPLY_STEP_NAME,
