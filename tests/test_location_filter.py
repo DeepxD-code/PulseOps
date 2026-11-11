@@ -11,6 +11,7 @@ cost a browser visit.
 from __future__ import annotations
 
 from pulseops_eval.location_filter import filter_by_location
+from pulseops_eval import location_filter as location_filter_module
 
 CONFIG = {
     "preferred_cities": ["Bangalore", "Hyderabad", "Pune", "Chennai", "Remote"],
@@ -72,3 +73,32 @@ def test_foreign_site_inside_the_description_is_rejected_too():
         CONFIG,
     )
     assert kept == []
+
+
+def test_the_scrapers_own_provenance_line_is_not_a_location():
+    # Cards that carry no location are stored with "Salary: not stated Source:
+    # Wellfound India (Backend). Card text: ..." in the description. Reading that
+    # as the employer's location made 109 of 292 queued rows look India-located
+    # when the board had said nothing, which is how rows that only ever refuse
+    # this candidate's location stayed in the apply queue.
+    job = {
+        "location_raw": "",
+        "description": "Salary: not stated Source: Wellfound India (Backend). Card text: Backend Engineer",
+    }
+    assert location_filter_module._resolve_location(job, []) == ""
+
+
+def test_a_real_description_still_names_the_place():
+    foreign = {"location_raw": "", "description": "Location: San Francisco, CA; Seattle, WA. We build robots."}
+    assert location_filter_module._resolve_location(foreign, []) == "foreign"
+
+    india = {"location_raw": "", "description": "Location: Bengaluru, India. Card text is not used here."}
+    assert location_filter_module._resolve_location(india, []) == "india"
+
+
+def test_prose_about_india_after_the_provenance_line_still_counts():
+    job = {
+        "location_raw": "",
+        "description": "Salary: not stated Source: Wellfound India. Card text: Engineer. Our team is based in Pune.",
+    }
+    assert location_filter_module._resolve_location(job, []) == "india"

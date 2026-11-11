@@ -69,9 +69,25 @@ def _city_match(location_raw: str, city: str) -> bool:
     return any(alias in loc for alias in aliases)
 
 
+def _strip_provenance(text: str) -> str:
+    """Drop the scraper's own header from a description before reading it.
+
+    Cards that carry no location are stored with a provenance preamble -
+    "Salary: not stated Source: Wellfound India (Backend). Card text: Backend
+    Engineer" - and reading that as the employer's location made 109 of 292
+    queued rows look India-located when the board had said nothing at all
+    (measured 2026-11-11). The preamble is our note about the row, not a fact
+    about the job.
+    """
+    head, sep, tail = (text or "").partition("Card text:")
+    if sep and "Source:" in head and len(head) < 200:
+        return tail
+    return text or ""
+
+
 def _resolve_location(job: dict, preferred_cities: list[str]) -> str:
     """Returns the matched preferred city, 'remote', 'foreign', or '' if unknown."""
-    location_raw = job.get("location_raw", "") or job.get("description", "")[:100]
+    location_raw = job.get("location_raw", "") or _strip_provenance(job.get("description", ""))[:100]
     if _INDIA_PLACES.search(location_raw or ""):
         for city in preferred_cities:
             if _city_match(location_raw, city):
@@ -85,7 +101,7 @@ def _resolve_location(job: dict, preferred_cities: list[str]) -> str:
         if _city_match(location_raw, city):
             return city.lower()
     # Also check job description for location hints
-    desc_snippet = (job.get("description") or "")[:300].lower()
+    desc_snippet = _strip_provenance(job.get("description") or "")[:300].lower()
     for city in preferred_cities:
         aliases = _CITY_ALIASES.get(city.lower(), [city.lower()])
         if any(a in desc_snippet for a in aliases):
