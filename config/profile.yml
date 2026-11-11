@@ -9,7 +9,18 @@ candidate:
   linkedin: https://linkedin.com/in/avradeep-majumder-4664b532a
   github: https://github.com/DeepxD-code
   portfolio: ''
-  experience_years: 0.2
+  # Four months across two paid engagements, both transcribed from cv.md:
+  # Backend Developer / Software Trainee Intern at AKS Intelligent Systems LLP
+  # (01 May - 01 Jul 2026) and the follow-on production engineering engagement on
+  # the RFQ & Quotation platform (19 Aug - 17 Oct 2026). The open-source
+  # contribution to anomalyco/opencode (Oct 2025 - present) is real work but is
+  # not employment, so it is not counted here.
+  #
+  # Was 0.2, which understated it: the boards ask for total professional
+  # experience, and 0.2 answered "2 months" when the CV states four. 0.34 rather
+  # than 0.3333 so the months question reads "4 months" and the years question
+  # still reads "0 year".
+  experience_years: 0.34
   current_location: Greater Noida, Uttar Pradesh
   country: India
   notice_period: 30 days
