@@ -132,6 +132,13 @@ candidate:
     # honest option there and the radio is left blank on purpose.
     job_board_source: 'LinkedIn'
 
+    # --- 2026-11-11: the two required radios that held #1337 Innovfix and will
+    # hold every LinkedIn/Wellfound form that asks them. Both are commitments
+    # only the candidate can make, stated by the operator directly: comfortable
+    # working onsite, comfortable commuting to the job's location.
+    onsite_comfortable: 'Yes'
+    commute_comfortable: 'Yes'
+
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
     # statements, not inferences. technical_skills_self summarises cv.md and

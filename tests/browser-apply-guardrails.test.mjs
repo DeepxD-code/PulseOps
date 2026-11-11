@@ -2629,6 +2629,27 @@ test("a years-of-experience select takes the whole-year bucket", async () => {
   assert.equal(numericOption(options, "not stated"), null);
 });
 
+test("the onsite and commute questions are answered from the operator's own statement", async () => {
+  // #1337 Innovfix (2026-11-11) reached 3/4 with these two required radios
+  // blank: "Are you comfortable working in an onsite setting?" and "Are you
+  // comfortable commuting to this job's location?". Neither is a CV fact, so
+  // they are matched only against the wording the board actually used.
+  const { answerFactualRadioHints, statedOptionIndex } = await import("../apps/browser-apply/apply.mjs");
+  const hints = answerFactualRadioHints();
+  const byKey = Object.fromEntries(hints.map((item) => [item.key, item.hint]));
+
+  assert.ok(byKey.onsite_comfortable.test("Are you comfortable working in an onsite setting?* Yes No This field is required"));
+  assert.ok(byKey.commute_comfortable.test("Are you comfortable commuting to this job's location?* Yes No This field is required"));
+  assert.ok(byKey.commute_comfortable.test("Are you comfortable commuting to this job’s location?"));
+  // A different question that happens to say "onsite" is not this one.
+  assert.equal(byKey.onsite_comfortable.test("This role is onsite in Bengaluru. Do you have a valid work permit?"), false);
+  assert.equal(byKey.commute_comfortable.test("How long is your commute today?"), false);
+
+  // "Yes" resolves to the Yes option, not to "No" or "None of the above".
+  assert.equal(statedOptionIndex("Yes", ["Yes", "No"]), 0);
+  assert.equal(statedOptionIndex("Yes", ["No", "Yes"]), 1);
+});
+
 test("a board that refuses automated browsers is told apart from a CAPTCHA", async () => {
   // Himalayas answered both a headed Edge with a persistent profile and a clean
   // bundled Chromium (real Chrome UA) with Cloudflare's managed check and HTTP

@@ -6427,14 +6427,27 @@ function statedOptionIndex(answer, options) {
   return -1;
 }
 
-async function answerFactualRadioQuestions(page, candidate) {
-  // Questions about the candidate's own history that no CV field can be turned
-  // into an answer mechanically. Each is answered only when the operator has
-  // stated it in application_answers; otherwise it is left blank and named.
-  const stated = candidate?.application_answers || {};
-  const statedQuestions = [
+/**
+ * Questions about the candidate's own history that no CV field can be turned
+ * into an answer mechanically. Each is answered only when the operator has
+ * stated it in application_answers; otherwise it is left blank and named.
+ *
+ * Exported for the guardrail tests: the wording a board uses is the only thing
+ * that decides whether a stated answer is applied, so a pattern that drifts
+ * silently is a question silently left blank.
+ */
+function answerFactualRadioHints() {
+  return [
     { key: "high_ownership_role_experience", hint: /founding engineer|forward deployed|\bFDE\b|high[- ]ownership/i },
     { key: "ever_interviewed_here", hint: /interviewed (?:with|at) (?:us|this company)|previously interviewed/i },
+    // "Are you comfortable working in an onsite setting?" and "Are you
+    // comfortable commuting to this job's location?" - the two required radios
+    // that held #1337 Innovfix (2026-11-11). Comfort with either is a life
+    // decision, not a CV fact, so it is answered only from the operator's own
+    // statement. The hints stay narrow: the first was answered "No" by a loose
+    // `/onsite/` rule would also catch "Are you open to onsite work abroad?".
+    { key: "onsite_comfortable", hint: /\bare\s+you\s+comfortable\s+working\s+in\s+an?\s+onsite\s+setting|comfortable\s+(?:working|with\s+working)\s+onsite|willing\s+to\s+work\s+onsite/i },
+    { key: "commute_comfortable", hint: /comfortable\s+commut\w*|able\s+to\s+commute|willing\s+to\s+commute|commut\w*\s+to\s+(?:the\s+|this\s+)?(?:job|office|work)\s*(?:'s\s*)?location/i },
     // "This position requires you to be in the office 8 days per month. Would you
     // be able to meet this requirement?" is a commitment, not a CV fact.
     { key: "office_attendance_days", hint: /in[- ](?:the )?office|office\s+(?:attendance|presence)|days?\s+(?:a|per)\s+(?:week|month)\s+in\s+(?:the\s+)?office/i },
@@ -6445,6 +6458,11 @@ async function answerFactualRadioQuestions(page, candidate) {
     { key: "disability_disclosure", hint: /disabilit\w*|differently\s+abled|voluntary\s+self[- ]identification/i },
     { key: "conflict_of_interest", hint: /(?:board|advisory\s+group)[\s\S]{0,220}?(?:compete|competitor|interest)|family\s+relationship|government\s+official|known\s+merchant|referred\s+to[\s\S]{0,160}?(?:merchant|partner)|(?:spouse|relative)[\s\S]{0,120}?(?:employee|employer|board|interest)/i },
   ];
+}
+
+async function answerFactualRadioQuestions(page, candidate) {
+  const stated = candidate?.application_answers || {};
+  const statedQuestions = answerFactualRadioHints();
   const groups = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
     const byName = new Map();
@@ -10780,6 +10798,7 @@ export {
   loadJobsFromDB,
   manualUrlDatabaseGuard,
   parseHttpUrl,
+  answerFactualRadioHints,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
