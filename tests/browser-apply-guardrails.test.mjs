@@ -3419,3 +3419,24 @@ test("a stipend question is answered from the stated monthly floor", async () =>
   assert.equal(stipendFigure("Are you comfortable working onsite?"), null);
   assert.equal(stipendFigure("What is your expected salary?"), null);
 });
+
+test("an approved off-site hop is not a misclick, a sticky-nav jump is", async () => {
+  // #1019 (Park Place Technologies) opened recruiting.ultipro.com through
+  // LinkedIn's Apply, the applier approved that host, and the misclick recovery
+  // then dragged the browser back to the posting - the row died as
+  // redirect-blocked with the employer's own form already in front of it.
+  const { isMisclickDeparture } = await import("../apps/browser-apply/apply.mjs");
+
+  // Approved handoff: the boundary's ATS was re-pointed at the employer's host.
+  assert.equal(isMisclickDeparture("linkedin", "ultipro", "/PAR1035PPTL/JobBoard/e104637a/OpportunityApply"), false);
+  assert.equal(isMisclickDeparture("linkedin", "greenhouse", "/example/jobs/1"), false);
+
+  // The #1278 Meril misclick: the sticky nav swallowed the click and the run
+  // ended up on the network page with the posting still open behind it.
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", "/mynetwork"), true);
+  // A normal Easy Apply modal keeps the posting's own route.
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", "/jobs/view/4477101779/"), false);
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", ""), false);
+  // Only LinkedIn has this recovery at all.
+  assert.equal(isMisclickDeparture("wellfound", "wellfound", "/mynetwork"), false);
+});

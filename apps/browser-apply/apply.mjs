@@ -4287,6 +4287,32 @@ async function navigateAllowed(page, target, ats, originUrl) {
   return true;
 }
 
+/**
+ * Whether a click that left the posting was a misclick or a deliberate hop.
+ *
+ * LinkedIn's own job page is the apply surface - Easy Apply is a modal over it -
+ * so a click that lands on /mynetwork was swallowed by the sticky nav and the
+ * posting must be reopened (#1278 Meril, 2026-11-05).
+ *
+ * A row whose Apply hands off to the employer's ATS is a different thing: the
+ * navigation boundary's ATS has already been re-pointed at that host by
+ * tryPinExternalApplyOrigin, which is the applier's own record that the
+ * departure was approved. Treating it as a misclick dragged the browser back to
+ * LinkedIn and abandoned the handoff, so #1019 (Park Place Technologies,
+ * recruiting.ultipro.com) recorded redirect-blocked on 2026-11-11 with the
+ * approved host already open in front of it.
+ *
+ * Exported for the guardrail tests: this decides whether a real application
+ * page is thrown away.
+ */
+function isMisclickDeparture(ats, boundaryAts, landedPath) {
+  if (ats !== "linkedin" || !landedPath) return false;
+  // An approved off-site hop re-points the boundary; the departure was the
+  // handoff and the page in front of us is the employer's own form.
+  if (boundaryAts && boundaryAts !== ats) return false;
+  return !/^\/(?:jobs|apply|preload|talent)\b/i.test(landedPath);
+}
+
 async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
   const currentUrl = typeof page?.url === "function" ? page.url() : "";
   if (!originUrl || !currentUrl || !isCurrentPageTrusted(currentUrl, ats, originUrl)) {
@@ -8513,7 +8539,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     if (ats === "linkedin" && !DRY_RUN && !applyNavigation.blocked && postingUrl) {
       let landed = "";
       try { landed = new URL(page.url()).pathname; } catch { landed = ""; }
-      if (landed && !/^\/(?:jobs|apply|preload|talent)\b/i.test(landed)) {
+      if (isMisclickDeparture(ats, navBoundary?.ats, landed)) {
         console.log(`  [misclick] Apply click left the posting for ${landed} — returning to it`);
         await page.goto(postingUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
         await page.waitForTimeout(2000);
@@ -10877,6 +10903,7 @@ export {
   answerFactualRadioHints,
   yearsRequirement,
   stipendFigure,
+  isMisclickDeparture,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
