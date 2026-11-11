@@ -2536,6 +2536,48 @@ test("a stated answer is matched to the option that says it, and never to a look
   assert.equal(statedOptionIndex("No.", ["Yes", "No."]), 1);
 });
 
+test("a number-only control is given a number, or nothing", async () => {
+  // LinkedIn's Easy Apply step (#1033, 2026-11-11) asked "Please enter your
+  // notice period in days" / "current ctc in INR" as 20-character text inputs
+  // with a numeric rule. "30 days" and "Internship stipend only" were typed in,
+  // the control said "Invalid input", and the step refused to advance.
+  const { numericFieldAnswer } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.deepEqual(
+    numericFieldAnswer("Please enter your notice period in days* Example: 45", "30 days"),
+    { text: "30", numeric: true, missing: false },
+  );
+  assert.deepEqual(
+    numericFieldAnswer("Please enter your expected ctc in INR* Example: 350000", "INR 8,40,000 - 10,80,000 per annum"),
+    { text: "840000", numeric: true, missing: false },
+  );
+  // Prose with no figure at all is not turned into a 0 nobody stated.
+  assert.deepEqual(
+    numericFieldAnswer("Please enter your current ctc in INR* Example: 200000", "Internship stipend only"),
+    { text: "", numeric: true, missing: true },
+  );
+  // An ordinary text question keeps its prose.
+  assert.deepEqual(
+    numericFieldAnswer("Current company", "Not currently employed"),
+    { text: "Not currently employed", numeric: false, missing: false },
+  );
+});
+
+test("a years-of-experience select takes the whole-year bucket", async () => {
+  const { numericOption, YEARS_OF_EXPERIENCE_QUESTION } = await import("../apps/browser-apply/apply.mjs");
+
+  // The label that blocked #1033: "years of professional experience".
+  assert.ok(YEARS_OF_EXPERIENCE_QUESTION.test("Please select your total years of professional experience:"));
+  assert.ok(YEARS_OF_EXPERIENCE_QUESTION.test("How many years of experience do you have?"));
+  assert.ok(!YEARS_OF_EXPERIENCE_QUESTION.test("How many years of experience do you have developing Java?"));
+
+  const options = ["0 year", "1 year", "2 years", "3 years"].map((label) => ({ value: label, label }));
+  // candidate.experience_years is 0.2; the truthful bucket is "0 year".
+  assert.equal(numericOption(options, "0.2 years").label, "0 year");
+  assert.equal(numericOption(options, "3 years").label, "3 years");
+  assert.equal(numericOption(options, "not stated"), null);
+});
+
 test("a wizard step is only Next/Review, never a profile-edit control", async () => {
   // #1033 (Heads Up For Tails, 2026-11-10) clicked "Next" eight times and ended
   // on a profile edit overlay carrying "Back | Next | Save | Add work

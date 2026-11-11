@@ -37,6 +37,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
+import { isExperienceStepText, matchExperienceEntry } from "./experience.mjs";
 import { BASIC_HTML, detectBasicHtml } from "./page-probe.mjs";
 import { cleanTitle } from "../weekly-scan/lib/relevance.mjs";
 
@@ -1567,6 +1568,45 @@ function yearsOfExperience(candidate) {
 }
 
 /**
+ * The whole-year bucket a numeric answer falls into.
+ *
+ * LinkedIn's "total years of professional experience" select offers "0 year",
+ * "1 year", ... only, while the profile states 0.2 - the truthful bucket is the
+ * one it rounds down into. Used only after the literal, prefix and word matches
+ * have all failed, so a select that spells its options out is never overridden.
+ */
+function numericOption(labels, want) {
+  const figure = Number.parseFloat(String(want || "").replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(figure)) return null;
+  const whole = Math.floor(figure);
+  return labels.find((o) => {
+    const option = Number.parseFloat(String(o.label).replace(/[^0-9.]/g, ""));
+    return Number.isFinite(option) && option === whole;
+  }) || null;
+}
+
+/**
+ * A control that only takes a number gets a number, or nothing.
+ *
+ * LinkedIn's Easy Apply asks "Please enter your notice period in days" and
+ * "Please enter your expected ctc in INR" as 20-character text inputs with a
+ * numeric rule. The stated answers are prose ("30 days", "INR 8,40,000 - 10,80,000
+ * per annum"), the control reported "Invalid input", and the step refused to
+ * advance while the log showed a successful fill (#1033, 2026-11-11). A stated
+ * answer with no figure at all is left empty rather than turned into a 0 that
+ * nobody stated.
+ */
+function numericFieldAnswer(signature, value) {
+  const text = String(value ?? "").trim();
+  const wantsNumber = /\bexample\s*:\s*\d|\bin\s+inr\b|\bin\s+(?:days?|weeks?|months?|years?)\b|\bamount\b|\bnumber\s+of\b|\bnumeric\b|\bdigits?\b/i
+    .test(String(signature || ""));
+  if (!wantsNumber) return { text, numeric: false, missing: false };
+  const digits = text.match(/\d[\d,]*/);
+  if (!digits) return { text: "", numeric: true, missing: true };
+  return { text: digits[0].replace(/,/g, ""), numeric: true, missing: false };
+}
+
+/**
  * A skill name as a matcher, so the same technology is recognised however the
  * board spells it. "Spring Boot" and "SpringBoot" are one skill, and a question
  * asks it in running prose: "rate your proficiency in Java(1 = beginner, 10 =
@@ -1692,7 +1732,7 @@ function skillScopedQuestion(stated, profile, signature) {
  * with 0.2 years would be a false statement about a language the CV never
  * claims. Those are left for the human, which is visible as [answer-missing].
  */
-const YEARS_OF_EXPERIENCE_QUESTION = /^(?![\s\S]*\b(?:writing|programming|coding|developing)\b)[\s\S]*(?:how\s+many\s+years\s+of\s+(?:[a-z,/+&-]+\s+){0,6}?experience|years\s+of\s+experience|total\s+experience)/i;
+const YEARS_OF_EXPERIENCE_QUESTION = /^(?![\s\S]*\b(?:writing|programming|coding|developing)\b)[\s\S]*(?:how\s+many\s+years\s+of\s+(?:[a-z,/+&-]+\s+){0,6}?experience|years\s+of\s+(?:[a-z,/+&-]+\s+){0,4}?experience|total\s+(?:years?|experience))/i;
 
 /**
  * "Where are you located?" - the candidate's own city, a fact from the profile.
@@ -2114,6 +2154,13 @@ function identityFacts(candidate, stated, job = null, profile = null) {
       // Absent unless a per-skill figure is actually stated: a byField fact with
       // nothing to resolve from would otherwise be advertised on every form.
       enabled: () => statedSkillEntries(stated?.skill_years).length > 0,
+      // A question that names no technology is the total-experience question,
+      // even when it is a select this tag's hint happens to match. It was read as
+      // a skill question, resolved to "" and logged
+      //   select offers no option for "" (0 year | 1 year | ...)
+      // while the total-experience fact never matched the wording "total years of
+      // professional experience" (#1033 Heads Up For Tails, 2026-11-11).
+      notWhen: (signature) => !skillScopedQuestion(stated, profile, signature),
     },
     {
       tag: "skill rating",
@@ -5390,6 +5437,117 @@ const APPLY_INTERSTITIAL_LABEL =
 const EASY_APPLY_STEP_NAME = /^(?:next|review|review\s+your\s+application|continue\s+to\s+next\s+step)$/i;
 
 /**
+ * Fill the work-experience form that LinkedIn's Easy Apply renders inside its
+ * own wizard, and save it.
+ *
+ * #1033 (Heads Up For Tails, 2026-11-10) reached step 3/5 and stopped there:
+ * the step is an "Edit experience" form - title, company, city, and the
+ * required "Dates of employment" selects - and Next does nothing until the
+ * dates are chosen. The dates are in the CV, transcribed into
+ * `application_answers.experience_history`; nothing is inferred from the
+ * posting, and an employer or title the profile does not state is left blank so
+ * the run stops at a human instead of writing a wrong date into the candidate's
+ * real profile.
+ *
+ * Returns true when the step was found and saved.
+ */
+async function fillLinkedinExperienceStep(page, profile) {
+  const answers = profile?.application_answers || profile?.candidate?.application_answers || {};
+  const history = Array.isArray(answers.experience_history) ? answers.experience_history : [];
+  const inspect = () => page.evaluate(() => {
+    const flat = (el) => (el.innerText || "").replace(/\s+/g, " ").trim();
+    const scopes = [...document.querySelectorAll("div, section, aside, form")]
+      .filter((el) => {
+        const t = flat(el);
+        return t.length > 0 && t.length < 12000
+          && /\bApply to\s+\S/.test(t) && /\b\d+\s*\/\s*\d+\s+pages?\b/i.test(t);
+      })
+      .sort((a, b) => flat(a).length - flat(b).length);
+    const scope = scopes[0];
+    if (!scope) return null;
+    document.querySelectorAll("[data-pulseops-exp], [data-pulseops-exp-current], [data-pulseops-exp-save]")
+      .forEach((el) => {
+        el.removeAttribute("data-pulseops-exp");
+        el.removeAttribute("data-pulseops-exp-current");
+        el.removeAttribute("data-pulseops-exp-save");
+      });
+    const visible = (el) => el.offsetParent !== null;
+    const selects = [...scope.querySelectorAll("select")].filter(visible);
+    selects.forEach((el, index) => el.setAttribute("data-pulseops-exp", String(index)));
+    const checkboxes = [...scope.querySelectorAll("input[type='checkbox']")].filter(visible);
+    const current = checkboxes.find((box) => /currently\s+work|present/i.test(box.closest("label, div, li")?.innerText || ""));
+    if (current) current.setAttribute("data-pulseops-exp-current", "1");
+    const save = [...scope.querySelectorAll("button")].find((b) => /^save$/i.test(flat(b)) && visible(b));
+    if (save) save.setAttribute("data-pulseops-exp-save", "1");
+    const inputs = [...scope.querySelectorAll("input:not([type='checkbox']):not([type='radio']):not([type='hidden'])")]
+      .filter(visible);
+    return {
+      text: flat(scope).slice(0, 1200),
+      title: (inputs[0]?.value || "").trim(),
+      company: (inputs[1]?.value || "").trim(),
+      selects: selects.length,
+      current: !!current,
+      save: !!save,
+    };
+  }).catch(() => null);
+
+  const step = await inspect();
+  if (!step || !isExperienceStepText(step.text)) return false;
+  const match = matchExperienceEntry(history, { title: step.title, company: step.company });
+  if (!match) {
+    console.log(`  [easy-apply] experience step "${step.title || "?"}" at "${step.company || "?"}": no dates stated in the profile — leaving it for a human`);
+    return false;
+  }
+  const dates = match.dates;
+  const needed = dates.current ? 2 : 4;
+  if (step.selects < needed) {
+    console.log(`  [easy-apply] experience step has ${step.selects} date selects, expected ${needed} — leaving it for a human`);
+    return false;
+  }
+
+  const setSelect = async (index, label) => {
+    const control = page.locator(`[data-pulseops-exp="${index}"]`).first();
+    let chosen = false;
+    try {
+      await control.selectOption({ label });
+      chosen = true;
+    } catch {
+      chosen = await control.selectOption(String(label)).then(() => true).catch(() => false);
+    }
+    if (!chosen) return false;
+    const shown = (await control.evaluate((el) => (el.selectedOptions?.[0]?.textContent || "").trim()).catch(() => ""));
+    return shown.toLowerCase() === String(label).toLowerCase();
+  };
+
+  const startOk = (await setSelect(0, dates.startMonth)) && (await setSelect(1, dates.startYear));
+  let datesOk = startOk;
+  if (startOk && dates.current) {
+    if (step.current) {
+      await page.locator("[data-pulseops-exp-current]").first().check({ timeout: 5000 }).catch(() => {});
+    } else {
+      // A current role with no "I currently work here" control cannot state an
+      // open-ended end date, so it is left for a human rather than guessed.
+      datesOk = false;
+    }
+  } else if (startOk) {
+    datesOk = (await setSelect(2, dates.endMonth)) && (await setSelect(3, dates.endYear));
+  }
+  if (!datesOk) {
+    console.log(`  [easy-apply] experience step dates ${dates.startMonth} ${dates.startYear}${dates.endMonth ? ` - ${dates.endMonth} ${dates.endYear}` : " - present"} were refused by the form`);
+    return false;
+  }
+  console.log(`  [easy-apply] experience dates: ${step.title || "?"} at ${step.company || "?"} ${dates.startMonth} ${dates.startYear} - ${dates.current ? "present" : `${dates.endMonth} ${dates.endYear}`} (from cv.md)`);
+  if (!step.save) return true;
+  await page.locator("[data-pulseops-exp-save]").first().click({ timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(2000);
+  const after = await inspect();
+  if (after && isExperienceStepText(after.text)) {
+    console.log("  [easy-apply] experience form is still open after Save — the wizard's next step decides whether it advanced");
+  }
+  return true;
+}
+
+/**
  * Step through a board's safety/warning dialog on the way to the form.
  * Returns true when a control was clicked, so the caller re-checks for the
  * form rather than treating the dialog as the end of the flow.
@@ -6967,12 +7125,26 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         // per-annum question.
         const text = resolve ? String(resolve(signature) ?? "").trim() : fallback;
         if (!text) continue;
-        await field.fill(text).catch(() => {});
+        // A control that only takes a number is given one, or nothing: prose
+        // leaves it "Invalid input" and the step refuses to advance even though
+        // the log shows a successful fill.
+        const isNumberControl = await field.evaluate((el) => {
+          const type = String(el.getAttribute("type") || "").toLowerCase();
+          const mode = String(el.getAttribute("inputmode") || "").toLowerCase();
+          return type === "number" || mode === "numeric" || mode === "tel";
+        }).catch(() => false);
+        const numeric = numericFieldAnswer(isNumberControl ? "example: 1" : signature, text);
+        if (numeric.missing) {
+          console.log(`    [answer] ${tag}: control takes a number and the stated answer is "${text.slice(0, 40)}" — left empty`);
+          continue;
+        }
+        await field.fill(numeric.text).catch(() => {});
         await page.waitForTimeout(150);
+        const answerText = numeric.text;
         // A controlled input can reject the value it was given. Say so, rather
         // than logging a fill that did not happen.
         let landed = String(await field.inputValue().catch(() => "")).trim();
-        if (landed !== text) {
+        if (landed !== answerText) {
           // Greenhouse renders several required questions as react-select
           // autocompletes - `Location (City)*` and `Are you legally authorized to
           // work...?` among them. Those do not accept a typed value at all: the
@@ -6984,7 +7156,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           // So: type it, then pick from the menu, exactly as combo() does for a
           // dropdown. Only tried after the plain fill fails, so an ordinary text
           // input never pays for a click and a keystroke.
-          const chosen = await pickFromAutocomplete(field, text);
+          const chosen = await pickFromAutocomplete(field, answerText);
           if (chosen) {
             landed = chosen;
             // The option was found and clicked, which pickFromAutocomplete only
@@ -7027,9 +7199,9 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         if (landed && landed !== text) {
           console.log(`    [answer] ${tag}: option "${landed.slice(0, 40)}" selected for "${text.slice(0, 40)}"`);
         }
-        console.log(`    [fill] ${tag} -> "${text.slice(0, 40)}"`);
+        console.log(`    [fill] ${tag} -> "${answerText.slice(0, 40)}"${answerText !== text ? ` (number, from "${text.slice(0, 40)}")` : ""}`);
         filled += 1;
-        firstLanded = firstLanded || text;
+        firstLanded = firstLanded || answerText;
         // Keep going instead of returning on the first match: a form can ask
         // the same fact twice - PlanetScale asks both "Where are you located?"
         // and "Where are you based?" - and stopping after the first left the
@@ -7084,6 +7256,9 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           || labels.find((o) => new RegExp(`\\b${escapeRe(want)}\\b`).test(norm(o.label)));
         if (choice) break;
       }
+      // Last resort, and only from the un-normalised answer: "0.2 years" still
+      // carries its decimal here, while a normalized copy would read as "0 2".
+      if (!choice) choice = numericOption(labels, text);
       if (!choice) {
         console.log(`    [answer] ${tag}: select offers no option for "${text.slice(0, 30)}" (${labels.map((o) => o.label).join(" | ").slice(0, 90)})`);
         continue;
@@ -9154,6 +9329,12 @@ async function processJob(browser, job, profile, runtime = {}) {
           return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
         }
         const found = await locateStep();
+        // The wizard's work-experience step is a form inside the wizard, not a
+        // page with a Next: it has to be filled and saved before the walk can
+        // advance (or Next does nothing at all).
+        if (await fillLinkedinExperienceStep(page, profile).catch(() => false)) {
+          continue;
+        }
         if (!found.found) break;
         // Fill the current step first: LinkedIn keeps Next enabled while required
         // fields are empty, so clicking it just leaves the same step on screen.
@@ -10381,6 +10562,8 @@ export {
   UPLOAD_BUTTON_LABEL,
   APPLY_INTERSTITIAL_LABEL,
   EASY_APPLY_STEP_NAME,
+  numericFieldAnswer,
+  numericOption,
   statedOptionIndex,
   isSubmissionLandingUrl,
   pageIsClosed,

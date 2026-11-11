@@ -74,6 +74,33 @@ candidate:
     # the internship stipend is the only pay there has been, and the internship
     # itself ended 01 July 2026, so no salary is claimed.
     current_compensation: 'Internship stipend only'
+    # Work history with dates, transcribed from cv.md (the candidate's own
+    # document) on 2026-11-11. LinkedIn's Easy Apply renders a "Work experience"
+    # step inside the wizard whose "Dates of employment" selects are required
+    # before Next will advance (#1033 Heads Up For Tails), and similar boards ask
+    # for the same pair. Nothing here is inferred from a posting: a form that
+    # names an employer or title this list does not state is left blank so the
+    # run stops at a human rather than writing a wrong date into a real profile.
+    experience_history:
+      - title: 'Backend Developer'
+        company: 'AKS Intelligent Systems LLP'
+        start_month: 5
+        start_year: 2026
+        end_month: 7
+        end_year: 2026
+        current: false
+      - title: 'Production Engineering - RFQ & Quotation Platform'
+        company: 'AKS Intelligent Systems LLP'
+        start_month: 8
+        start_year: 2026
+        end_month: 10
+        end_year: 2026
+        current: false
+      - title: 'Open Source Contributor'
+        company: 'anomalyco/opencode'
+        start_month: 10
+        start_year: 2025
+        current: true
     # "How far do you live from <office>? If you are not local, why do you look
     # to move and are you willing to relocate at your own expense?" Answered for
     # Mumbai (#1320, 2026-11-10: "I'd relocate — answer Yes"). No distance in
