@@ -24,6 +24,13 @@ candidate:
   current_location: Greater Noida, Uttar Pradesh
   country: India
   notice_period: 30 days
+  # Internship stipends are not salaries. The operator's full-time expectation
+  # is 5 LPA, but on 2026-11-11 he accepted any internship paying at least this
+  # much per month ("Yes - accept 10k+/month stipends"), which is what #1337
+  # Innovfix was waiting on ("Stipend will be 15-18k Maximum, are you fine with
+  # it?"). A question that names a figure below this floor is answered No, and a
+  # question that names no figure at all is left blank.
+  minimum_stipend_monthly: 10000
   # Answers to questions that are commitments or facts about the candidate.
   # These are stated only under --accept-terms and every use is logged as
   # [commitment]. An absent key means the question is left unanswered rather

@@ -3399,3 +3399,23 @@ test("a years-of-experience bar is read from the question, and nothing else is",
   assert.equal(yearsRequirement(""), null);
   assert.equal(yearsRequirement(undefined), null);
 });
+
+test("a stipend question is answered from the stated monthly floor", async () => {
+  // #1337 Innovfix stalled on "Stipend will be 15-18k Maximum, are you fine with
+  // it?" - a figure well under the 5 LPA full-time expectation, so treating it as
+  // a salary question would have refused every internship in the queue.
+  const { stipendFigure } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(stipendFigure("Stipend will be 15-18k Maximum, are you fine with it?"), 15000);
+  assert.equal(stipendFigure("Is a stipend of ₹8,000 per month acceptable?"), 8000);
+  assert.equal(stipendFigure("Are you okay with a stipend of INR 30,000 per month?"), 30000);
+  assert.equal(stipendFigure("Stipend 10k, are you fine?"), 10000);
+  // "3 months internship, stipend 15k" must not read the duration as money.
+  assert.equal(stipendFigure("This is a 3 months internship, stipend 15k, are you willing?"), 15000);
+  // No figure: a question about an unpaid stipend is a different decision, and
+  // nothing in the profile states it.
+  assert.equal(stipendFigure("Are you fine with an unpaid stipend?"), null);
+  // Not a stipend question at all.
+  assert.equal(stipendFigure("Are you comfortable working onsite?"), null);
+  assert.equal(stipendFigure("What is your expected salary?"), null);
+});

@@ -6447,6 +6447,41 @@ function yearsRequirement(question) {
 }
 
 /**
+ * The monthly stipend a question names, or null.
+ *
+ * "Stipend will be 15-18k Maximum, are you fine with it?" is a commitment about
+ * money, so it is answered from a stated floor rather than guessed. A range is
+ * what he would be accepting, so the lower bound is the figure that decides;
+ * "unpaid" and figures that are not money (a duration, a headcount) leave it
+ * unread, because a wrong number here is a job he cannot afford to take.
+ *
+ * Exported for the guardrail tests, for the same reason as yearsRequirement.
+ */
+function stipendFigure(question) {
+  const text = String(question || "");
+  if (!/\bstipend\b/i.test(text)) return null;
+  if (!/\b(fine|okay|ok|comfortable|acceptable|agree|willing|alright)\b/i.test(text)) return null;
+  const clean = (value) => Number.parseFloat(String(value).replace(/,/g, ""));
+  // "15-18k", "15k-18k", "15 to 18k" - the lower bound is the offer.
+  const range = /(\d{1,3}(?:,\d{3})*)\s*k?\s*(?:-|–|\bto\b)\s*(\d{1,3}(?:,\d{3})*)\s*k\b/i.exec(text);
+  if (range) {
+    const low = clean(range[1]);
+    const high = clean(range[2]);
+    if (Number.isFinite(low) && Number.isFinite(high)) return Math.min(low, high) * 1000;
+  }
+  const figures = [];
+  for (const match of text.matchAll(
+    /(\d[\d,]*(?:\.\d+)?)\s*(k)\b|(?:₹|rs\.?|inr)\s*(\d[\d,]*(?:\.\d+)?)|(\d{1,3}(?:,\d{3})+|\d{4,})\b/gi,
+  )) {
+    if (match[1] && match[2]) figures.push(clean(match[1]) * 1000);
+    else if (match[3]) figures.push(clean(match[3]));
+    else if (match[4]) figures.push(clean(match[4]));
+  }
+  if (!figures.length) return null;
+  return Math.min(...figures);
+}
+
+/**
  * Questions about the candidate's own history that no CV field can be turned
  * into an answer mechanically. Each is answered only when the operator has
  * stated it in application_answers; otherwise it is left blank and named.
@@ -6523,6 +6558,7 @@ async function answerFactualRadioQuestions(page, candidate) {
     // two internships a summer long - so the answer is computed from
     // experience_years rather than stated, and a bar that is met still says Yes.
     const yearsBar = yearsRequirement(questionClause);
+    const stipend = yearsBar !== null ? null : stipendFigure(question);
     const living = questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
     if (yearsBar !== null) {
       // Answered here rather than left to the branches below: a bar is a
@@ -6531,6 +6567,13 @@ async function answerFactualRadioQuestions(page, candidate) {
       const have = Number.parseFloat(String(candidate?.experience_years ?? "")) || 0;
       answer = have >= yearsBar ? "Yes" : "No";
       from = `candidate.experience_years (${have} vs a ${yearsBar}-year bar)`;
+    } else if (stipend !== null) {
+      // "Stipend will be 15-18k Maximum, are you fine with it?" An internship is
+      // not priced like a job: the operator's 5 LPA expectation is a full-time
+      // figure, and he accepts an internship above the monthly floor he set.
+      const floor = Number.parseFloat(String(candidate?.minimum_stipend_monthly ?? ""));
+      answer = Number.isFinite(floor) && stipend >= floor ? "Yes" : "No";
+      from = `candidate.minimum_stipend_monthly (INR ${stipend}/month vs a INR ${Number.isFinite(floor) ? floor : "?"} floor)`;
     } else if (living) {
       const target = living[1].trim().toLowerCase();
       const aliases = placeAliases(candidate?.current_location);
@@ -10833,6 +10876,7 @@ export {
   parseHttpUrl,
   answerFactualRadioHints,
   yearsRequirement,
+  stipendFigure,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
