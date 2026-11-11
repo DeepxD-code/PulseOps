@@ -6428,6 +6428,25 @@ function statedOptionIndex(answer, options) {
 }
 
 /**
+ * The years-of-experience bar a question states, or null.
+ *
+ * Only questions that name experience qualify: "at least 5 years" on its own
+ * could be "at least 5 years at your last employer", which is a different fact
+ * about the candidate than total professional experience.
+ *
+ * Exported for the guardrail tests: this decides how a knockout question is
+ * answered, so a pattern that drifts is a false statement on a real application.
+ */
+function yearsRequirement(question) {
+  const text = String(question || "");
+  if (!/\bexperience\b|\bworked\b|\bindustry\b/i.test(text)) return null;
+  const match = /(?:at\s+least|minimum(?:\s+of)?|more\s+than|over)\s+(\d{1,2})\s*\+?\s*years?|\b(\d{1,2})\s*\+\s*years?/i.exec(text);
+  if (!match) return null;
+  const years = Number.parseInt(match[1] || match[2], 10);
+  return Number.isFinite(years) ? years : null;
+}
+
+/**
  * Questions about the candidate's own history that no CV field can be turned
  * into an answer mechanically. Each is answered only when the operator has
  * stated it in application_answers; otherwise it is left blank and named.
@@ -6497,7 +6516,19 @@ async function answerFactualRadioQuestions(page, candidate) {
     const questionClause = question.split(/\?\s*/)[0];
     let answer = null;
     let from = "";
-    const living = questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
+    // "Do you have at least 5 years of professional experience?" is a knockout
+    // question, and the only defensible answer is the true one: the profile
+    // states four months, so a five-year bar is a No. Answering Yes does not buy
+    // an interview - the same recruiter opens a CV that says "Class of 2027" and
+    // two internships a summer long - so the answer is computed from
+    // experience_years rather than stated, and a bar that is met still says Yes.
+    const yearsBar = yearsRequirement(questionClause);
+    if (yearsBar !== null) {
+      const have = Number.parseFloat(String(candidate?.experience_years ?? "")) || 0;
+      answer = have >= yearsBar ? "Yes" : "No";
+      from = `candidate.experience_years (${have} vs a ${yearsBar}-year bar)`;
+    }
+    const living = yearsBar !== null ? null : questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
     if (living) {
       const target = living[1].trim().toLowerCase();
       const aliases = placeAliases(candidate?.current_location);
@@ -10799,6 +10830,7 @@ export {
   manualUrlDatabaseGuard,
   parseHttpUrl,
   answerFactualRadioHints,
+  yearsRequirement,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,

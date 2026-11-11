@@ -3372,3 +3372,30 @@ test("a textarea is only an essay when its own words ask for prose", () => {
   assert.equal(isEssayFieldHint(""), false);
   assert.equal(isEssayFieldHint(null), false);
 });
+
+test("a years-of-experience bar is read from the question, and nothing else is", async () => {
+  // #1126 Sardine asks "Do you have at least 5 years of professional experience
+  // in software engineering?" and stopped the run. The profile states four
+  // months, so the bar is a fact the applier can answer without guessing - but
+  // only when the question is really about experience and really states a bar.
+  const { yearsRequirement } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(
+    yearsRequirement("Do you have at least 5 years of professional experience in software engineering?"),
+    5,
+  );
+  assert.equal(yearsRequirement("Do you have 3+ years of experience?"), 3);
+  assert.equal(yearsRequirement("Minimum of 2 years experience required"), 2);
+  assert.equal(yearsRequirement("More than 10 years of industry experience"), 10);
+
+  // No bar stated: an open count is a different question (filled from the
+  // profile), not a threshold to answer Yes/No to.
+  assert.equal(yearsRequirement("How many years of experience do you have?"), null);
+  // A bar about something other than total professional experience. Answering
+  // this from experience_years would be answering a question nobody asked.
+  assert.equal(yearsRequirement("Do you have at least 5 years at your last employer?"), null);
+  assert.equal(yearsRequirement("Do you have at least 2 years of formal education?"), null);
+  assert.equal(yearsRequirement("Are you comfortable working onsite?"), null);
+  assert.equal(yearsRequirement(""), null);
+  assert.equal(yearsRequirement(undefined), null);
+});
