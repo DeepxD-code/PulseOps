@@ -1607,6 +1607,28 @@ function numericFieldAnswer(signature, value) {
 }
 
 /**
+ * The number a pay question can take, when the operator has stated one.
+ *
+ * "Please enter your current ctc in INR" wants an annual figure, and the prose
+ * answer ("INR 35,000 per month") would be read as 35,000 a year - a mistake by a
+ * factor of twelve. Where a figure is stated for the annual question
+ * (`current_ctc_inr`, `expected_ctc_inr`) it wins over any prose, and a
+ * monthly/per-annum question is never answered with it.
+ */
+function statedNumericAnswer(signature, stated) {
+  const text = String(signature || "");
+  if (!text) return "";
+  if (!/\b(?:annual|per\s+annum|p\.?a\.?|inr|ctc)\b/i.test(text)) return "";
+  if (/\b(?:per\s+month|monthly|per\s+hour|hourly|lpa\s*per\s*month)\b/i.test(text)) return "";
+  const wantsExpected = /\b(?:expected|desired|required)\b[^.;]{0,40}\b(?:ctc|compensation|salary)\b/i.test(text);
+  const wantsCurrent = /\b(?:current|present)\b[^.;]{0,40}\b(?:ctc|compensation|salary)\b/i.test(text);
+  const figure = wantsExpected ? stated?.expected_ctc_inr : (wantsCurrent ? stated?.current_ctc_inr : undefined);
+  const value = typeof figure === "number" ? figure : Number.parseFloat(String(figure ?? ""));
+  if (!Number.isFinite(value) || value < 0) return "";
+  return String(Math.round(value));
+}
+
+/**
  * A skill name as a matcher, so the same technology is recognised however the
  * board spells it. "Spring Boot" and "SpringBoot" are one skill, and a question
  * asks it in running prose: "rate your proficiency in Java(1 = beginner, 10 =
@@ -7133,7 +7155,10 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
           const mode = String(el.getAttribute("inputmode") || "").toLowerCase();
           return type === "number" || mode === "numeric" || mode === "tel";
         }).catch(() => false);
-        const numeric = numericFieldAnswer(isNumberControl ? "example: 1" : signature, text);
+        const statedNumber = statedNumericAnswer(signature, options?.stated);
+        const numeric = statedNumber
+          ? { text: statedNumber, numeric: true, missing: false }
+          : numericFieldAnswer(isNumberControl ? "example: 1" : signature, text);
         if (numeric.missing) {
           console.log(`    [answer] ${tag}: control takes a number and the stated answer is "${text.slice(0, 40)}" — left empty`);
           continue;
@@ -7424,6 +7449,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         resolve: fact.byField,
         fallbackLabels: fact.fallbackLabels,
         notWhen: fact.notWhen,
+        stated,
       });
     }
     // Two questions exist only as dropdowns whose answers can only be chosen
@@ -10564,6 +10590,7 @@ export {
   EASY_APPLY_STEP_NAME,
   numericFieldAnswer,
   numericOption,
+  statedNumericAnswer,
   statedOptionIndex,
   isSubmissionLandingUrl,
   pageIsClosed,

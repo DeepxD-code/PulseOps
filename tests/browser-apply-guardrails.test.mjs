@@ -2563,6 +2563,23 @@ test("a number-only control is given a number, or nothing", async () => {
   );
 });
 
+test("a pay question that states the period takes the stated annual figure", async () => {
+  // #1033: "Please enter your current ctc in INR" is annual and only takes a
+  // number. Reading the prose "INR 35,000 per month" as a yearly figure is wrong
+  // by twelve, so the stated annual figures win where they exist.
+  const { statedNumericAnswer } = await import("../apps/browser-apply/apply.mjs");
+  const stated = { current_ctc_inr: 420000, expected_ctc_inr: 500000 };
+
+  assert.equal(statedNumericAnswer("Please enter your current ctc in INR* Example: 200000", stated), "420000");
+  assert.equal(statedNumericAnswer("Please enter your expected ctc in INR* Example: 350000", stated), "500000");
+  // A per-month question is not answered with an annual figure.
+  assert.equal(statedNumericAnswer("Expected salary per month", stated), "");
+  // No figure stated -> nothing to say, and the prose path handles the field.
+  assert.equal(statedNumericAnswer("Current ctc", {}), "");
+  // Not a pay question at all.
+  assert.equal(statedNumericAnswer("Please enter your notice period in days*", stated), "");
+});
+
 test("a years-of-experience select takes the whole-year bucket", async () => {
   const { numericOption, YEARS_OF_EXPERIENCE_QUESTION } = await import("../apps/browser-apply/apply.mjs");
 

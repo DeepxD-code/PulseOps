@@ -70,10 +70,17 @@ candidate:
       SQL: 8
       Spring Boot: 7
       Hibernate: 6
-    # "What is your current compensation?" Literal wording given by the operator:
-    # the internship stipend is the only pay there has been, and the internship
-    # itself ended 01 July 2026, so no salary is claimed.
-    current_compensation: 'Internship stipend only'
+    # "What is your current compensation?" Stated by the operator on 2026-11-11:
+    # 35,000 per month, of which 28,000 is base and 7,000 variable. Earlier text
+    # ("Internship stipend only") was the same fact before the figure was given.
+    current_compensation: 'INR 35,000 per month (INR 28,000 base + INR 7,000 variable)'
+    # The same facts as figures, for the controls that only take a number and
+    # state the period themselves: "Please enter your current ctc in INR (annual
+    # compensation)" and "expected ctc in INR". A prose answer read by such a
+    # control is either rejected ("Invalid input") or wrong by a factor of twelve
+    # - 35,000 per month is 4,20,000 a year, not 35,000 (#1033, 2026-11-11).
+    current_ctc_inr: 420000
+    expected_ctc_inr: 500000
     # Work history with dates, transcribed from cv.md (the candidate's own
     # document) on 2026-11-11. LinkedIn's Easy Apply renders a "Work experience"
     # step inside the wizard whose "Dates of employment" selects are required
