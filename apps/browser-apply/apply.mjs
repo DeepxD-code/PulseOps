@@ -6523,13 +6523,15 @@ async function answerFactualRadioQuestions(page, candidate) {
     // two internships a summer long - so the answer is computed from
     // experience_years rather than stated, and a bar that is met still says Yes.
     const yearsBar = yearsRequirement(questionClause);
+    const living = questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
     if (yearsBar !== null) {
+      // Answered here rather than left to the branches below: a bar is a
+      // Yes/No question, and letting the chain continue would let a notice or
+      // band rule answer a question that is not about notice or a band.
       const have = Number.parseFloat(String(candidate?.experience_years ?? "")) || 0;
       answer = have >= yearsBar ? "Yes" : "No";
       from = `candidate.experience_years (${have} vs a ${yearsBar}-year bar)`;
-    }
-    const living = yearsBar !== null ? null : questionClause.match(/(?:currently\s+)?(?:living|residing|staying|based|located)\s+in\s+([A-Za-z][A-Za-z. ]{2,30})$/i);
-    if (living) {
+    } else if (living) {
       const target = living[1].trim().toLowerCase();
       const aliases = placeAliases(candidate?.current_location);
       answer = aliases.has(target) ? "Yes" : "No";
