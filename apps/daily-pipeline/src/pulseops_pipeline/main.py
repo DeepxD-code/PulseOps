@@ -258,6 +258,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="PulseOps Daily Pipeline")
     parser.add_argument("--simulate",     action="store_true", help="Offline dry-run (no API calls)")
+    parser.add_argument("--sources",      default="", metavar="LIST",
+                        help="Comma-separated source names to source from this run "
+                             "(e.g. --sources=himalayas). Default: every source.")
     parser.add_argument("--force",        action="store_true", help="Re-evaluate already-seen jobs")
     parser.add_argument("--dashboard",    action="store_true", help="Launch Flask dashboard")
     parser.add_argument("--pause-sends",  action="store_true", help="Halt all outreach")
@@ -395,6 +398,7 @@ def main() -> None:
             def fetch_linkedin(self): return []
             def fetch_google_jobs(self): return []
             def fetch_theirstack(self): return []
+            def fetch_himalayas(self): return []
         scraper = PulseOpsScraper()
 
     if args.simulate:
@@ -402,11 +406,23 @@ def main() -> None:
         print(f"  [~] Simulation: {len(raw_jobs)} mock jobs (source-marked, no live send)")
         stats["sourced"] = len(raw_jobs)
     else:
+        # A single board can be refreshed on its own. The two paid sources
+        # (Google Jobs, TheirStack) are quota-bound and slow, and a free board
+        # like Himalayas is worth a dedicated run without spending them.
+        wanted = {
+            value.strip().lower()
+            for value in str(getattr(args, "sources", "") or "").split(",")
+            if value.strip()
+        }
         for source_name, fetch_fn in [
             ("LinkedIn",    scraper.fetch_linkedin),
             ("Google Jobs", scraper.fetch_google_jobs),
             ("TheirStack",  scraper.fetch_theirstack),
+            ("Himalayas",   scraper.fetch_himalayas),
         ]:
+            if wanted and source_name.lower() not in wanted and source_name.lower().replace(" ", "-") not in wanted:
+                print(f"  [-] {source_name}: not selected for this run")
+                continue
             try:
                 jobs = fetch_fn()
                 consecutive = record_source_health(source_name, run_id, len(jobs))

@@ -27,12 +27,18 @@ import sys
 import time
 from collections.abc import Collection
 from datetime import datetime, timedelta
+from html import unescape as _unescape_html
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from pulseops_core.exceptions import GoogleJobsError, LinkedInBridgeError, TheirStackError
+from pulseops_core.exceptions import (
+    GoogleJobsError,
+    HimalayasError,
+    LinkedInBridgeError,
+    TheirStackError,
+)
 
 
 def _repo_root() -> Path:
@@ -372,6 +378,11 @@ _GOOGLE_API_URL = "https://www.searchapi.io/api/v1/search"
 _GOOGLE_API_HOSTS = frozenset({"www.searchapi.io", "searchapi.io"})
 _THEIRSTACK_API_URL = "https://api.theirstack.com/v1/jobs/search"
 _THEIRSTACK_API_HOSTS = frozenset({"api.theirstack.com"})
+# Himalayas publishes the same feed its site renders, as JSON, with no key:
+# https://himalayas.app/jobs/api?limit=...&offset=... (cursor paging preferred
+# since 2026-08, offset is deprecated but still served).
+_HIMALAYAS_API_URL = "https://himalayas.app/jobs/api"
+_HIMALAYAS_API_HOSTS = frozenset({"himalayas.app"})
 
 
 def _clear_linkedin_handoff(*, strict: bool = False) -> None:
@@ -416,6 +427,23 @@ def _is_linkedin_job_url(value: str) -> bool:
         and parsed.username is None
         and parsed.password is None
     )
+
+
+def _html_to_text(value: str) -> str:
+    """Flatten a feed's HTML description to readable plain text.
+
+    Himalayas ships whole job descriptions as HTML. Stored raw, one posting
+    carries kilobytes of markup into the description column, into the evaluator's
+    prompt, and into every log line that quotes it, while the words a human
+    reads are the same either way.
+    """
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", value or "")
+    text = re.sub(r"(?i)<br\s*/?>|</p>|</li>|</h[1-6]>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _unescape_html(text)
+    text = re.sub(r"[ \t\u00a0]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
 
 
 def _enrich_description(link: str, base_desc: str) -> str:
@@ -671,6 +699,134 @@ class PulseOpsScraper:
             raise
         except Exception as e:
             raise TheirStackError(f"TheirStack failed: {e}") from e
+
+    # -- Himalayas ------------------------------------------------------------
+
+    def fetch_himalayas(self) -> list[dict]:
+        """Fetch remote roles from Himalayas' public JSON feed.
+
+        Himalayas is a remote-first board with no login, so it is read over HTTP
+        rather than scraped. Its JSON feed is the only part of the site that
+        answers a plain request: the HTML pages (*/jobs/countries/india* and the
+        posting pages themselves) sit behind a Cloudflare interstitial that
+        returns "Just a moment..." with HTTP 403.
+
+        Two measured properties of the feed shape this method (2026-11-11):
+
+        - It offers no server-side filtering at all. `?country=India`, `?q=`,
+          `?search=`, `?category=` and `?location=` are ignored, `limit` is capped
+          at 20 per page, and the feed is strictly newest-first across all
+          117,000 roles.
+        - India-restricted roles are ~0.75% of it - 18 in 600 consecutive
+          postings - so a shallow read returns nothing at all. A useful read has
+          to page, which is why the default is 40 pages and the ceiling 150.
+
+        Everything that names a foreign country and is not worldwide is dropped
+        here: no application can be made to it from this machine, and the
+        location filter would reject it a moment later anyway.
+        """
+        query = os.getenv("JOB_SEARCH_QUERY", "backend engineer intern").strip("\"'")
+        # 20 is the feed's own ceiling; asking for more silently returns 20.
+        try:
+            limit = max(10, min(int(os.getenv("HIMALAYAS_LIMIT", "20")), 20))
+        except ValueError:
+            limit = 20
+        try:
+            pages = max(1, min(int(os.getenv("HIMALAYAS_PAGES", "120")), 400))
+        except ValueError:
+            pages = 120
+        keywords = [word for word in re.split(r"[^a-z0-9]+", query.lower()) if len(word) > 2]
+        cutoff = datetime.utcnow() - timedelta(days=self.max_age_days)
+
+        jobs: list[dict] = []
+        seen: set[str] = set()
+        cursor = ""
+        try:
+            for _ in range(pages):
+                params = {"limit": limit}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = safe_get(
+                    _HIMALAYAS_API_URL,
+                    params=params,
+                    timeout=20,
+                    allowed_hosts=_HIMALAYAS_API_HOSTS,
+                    require_https=True,
+                )
+                if resp.status_code != 200:
+                    raise HimalayasError(
+                        f"Himalayas HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
+                payload = resp.json() if resp.content else {}
+                for item in payload.get("jobs", []):
+                    if not isinstance(item, dict):
+                        continue
+                    locations = [str(v) for v in item.get("locationRestrictions") or [] if v]
+                    lowered = [value.strip().lower() for value in locations]
+                    india = any("india" in value for value in lowered)
+                    worldwide = not locations or any(
+                        value in {"worldwide", "anywhere", "global"} for value in lowered
+                    )
+                    # A role open to Asia is open to India, and the location filter
+                    # treats an unstated region as "possible-remote" rather than a
+                    # foreign site, so admitting it here adds reachable postings
+                    # without loosening anything downstream.
+                    regional = any(
+                        value in {"asia", "asia pacific", "apac", "south asia"}
+                        for value in lowered
+                    )
+                    if not (india or worldwide or regional):
+                        continue
+                    title = str(item.get("title") or "Untitled").strip()
+                    # Title only. The feed's `categories` are a noisy tag soup
+                    # ("Public-Health-Analyst", "Associate-Program-Manager") that
+                    # matched "engineer"-ish queries on roles that are not
+                    # engineering at all, and the pipeline's own title filter is
+                    # the one place that decision belongs.
+                    if keywords and not any(word in title.lower() for word in keywords):
+                        continue
+                    posted_at = ""
+                    published = item.get("pubDate")
+                    if isinstance(published, (int, float)) and published > 0:
+                        posted = datetime.utcfromtimestamp(float(published))
+                        if posted < cutoff:
+                            continue
+                        posted_at = posted.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    link = str(item.get("guid") or item.get("applicationLink") or "").strip().split("?")[0]
+                    if not link or link in seen:
+                        continue
+                    seen.add(link)
+                    jobs.append({
+                        "title":        title,
+                        "company":      str(item.get("companyName") or "Unknown").strip(),
+                        "link":         link,
+                        "description":  _enrich_description(link, _html_to_text(item.get("description", "") or "")),
+                        "source":       "Himalayas",
+                        "posted_at":    posted_at,
+                        "location_raw": ", ".join(locations),
+                    })
+                cursor = str(payload.get("nextCursor") or "")
+                if not cursor:
+                    break
+                # The feed is newest-first, so a page whose newest posting is
+                # already past the age cutoff means every page after it is too.
+                # This is what makes a deep page budget affordable: without it the
+                # only stop is the page count.
+                stamps = [
+                    float(item.get("pubDate"))
+                    for item in payload.get("jobs", [])
+                    if isinstance(item, dict) and isinstance(item.get("pubDate"), (int, float))
+                    and float(item.get("pubDate")) > 0
+                ]
+                if stamps and datetime.utcfromtimestamp(max(stamps)) < cutoff:
+                    break
+            return jobs
+        except HimalayasError:
+            raise
+        except Exception as e:
+            raise HimalayasError(f"Himalayas failed: {e}") from e
+
+    # -- Mock (simulation / fallback) -----------------------------------------
 
     # ── Mock (simulation / fallback) ──────────────────────────────────────
 

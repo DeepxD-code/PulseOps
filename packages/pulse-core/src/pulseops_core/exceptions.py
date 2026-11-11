@@ -28,6 +28,10 @@ class TheirStackError(SourceError):
     """TheirStack API request failed."""
     pass
 
+class HimalayasError(SourceError):
+    """Himalayas public API request failed."""
+    pass
+
 class PlaywrightScanError(SourceError):
     """Playwright portal scan failed."""
     pass

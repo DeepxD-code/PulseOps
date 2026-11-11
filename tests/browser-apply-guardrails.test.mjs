@@ -1268,6 +1268,27 @@ test("ATS inference and redirect allowlists are host based", () => {
   assert.equal(isAllowedNavigationUrl("http://jobs.lever.co/form", "lever", "https://jobs.lever.co/example/1"), false);
 });
 
+test("Himalayas and YC postings are recognised, and a lookalike is not", () => {
+  // Himalayas lists the posting on its own host and hands off to the employer's
+  // ATS from there, so it has to be a classified board rather than "generic" -
+  // otherwise every Himalayas row is refused before a browser opens.
+  const posting = "https://himalayas.app/companies/genesys/jobs/staff-software-engineer";
+  assert.equal(inferATS(posting), "himalayas");
+  assert.equal(inferATS("https://www.himalayas.app/companies/x/jobs/y"), "himalayas");
+  assert.equal(isAllowedInitialJobUrl(posting), true);
+  // The posting page is an opener: it may leave for the employer's own site, and
+  // that hop is what PULSEOPS_ALLOW_EXTERNAL_APPLY governs.
+  assert.equal(isAllowedNavigationUrl("https://boards.greenhouse.io/genesys/jobs/1", "himalayas", posting), false);
+
+  const yc = "https://www.workatastartup.com/jobs/12345";
+  assert.equal(inferATS(yc), "yc");
+  assert.equal(isAllowedInitialJobUrl(yc), true);
+
+  // A host that merely mentions the board is not the board.
+  assert.equal(inferATS("https://evil.example/?next=himalayas.app"), "generic");
+  assert.equal(inferATS("https://himalayas.app.evil.example/companies/x/jobs/y"), "generic");
+});
+
 test("UKG Pro Recruiting is a known ATS whose own CDN may serve its app", () => {
   // Measured 2026-11-10, #1019 Park Place Technologies: the posting page is a
   // route of recruiting.ultipro.com, its runtime is on two CDN hostnames of its

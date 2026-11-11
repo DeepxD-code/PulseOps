@@ -44,12 +44,12 @@ candidate:
     # field on every backend role; it is a preference, not a fact, so it lives
     # here rather than being inferred.
     coding_time_percentage: '60-70%'
-    # Compensation floor stated by the operator: >= 35000 INR per month.
-    # Two renderings because boards ask per month and per annum; both sit at or
-    # above the floor. expected_salary (4-5 LPA) was BELOW it per month, which is
-    # why the answers are stated explicitly rather than derived from it.
-    desired_salary_monthly: 'INR 35,000 - 45,000 per month'
-    desired_salary_annual: 'INR 8,40,000 - 10,80,000 per annum'
+    # Compensation stated by the operator, and settled on 2026-11-11 when the two
+    # renderings disagreed: "5lpa stands". One figure, so per-month and per-annum
+    # answers can no longer quote different packages. 5,00,000 a year is 41,667 a
+    # month, which also clears the 35,000 monthly floor the operator set.
+    desired_salary_monthly: 'INR 41,667 per month'
+    desired_salary_annual: 'INR 5,00,000 per annum'
     # --- 2026-11-10: the subjective screening questions Indian boards ask most
     # often, answered by the operator himself after #1320 Zema sat blocked on
     # them. None of these can be derived: a self-rating is a judgement, a
@@ -226,7 +226,7 @@ candidate:
       - 'AnnaSuraksha, a PDS fraud-detection platform in Java and Spring Boot with a 16-signal scoring engine and a Groq LLM explanation layer'
       - 'IntelliX, an ML code-performance profiler in Python and scikit-learn using four classifiers and AST-based multi-language analysis'
       - 'Sangam, an offline-first military logistics platform with sync and conflict resolution'
-  expected_salary: 4-5 LPA
+  expected_salary: 5 LPA
   education: B.Tech — CSE (AI/ML), 2027
 domain:
   title: Backend Engineer

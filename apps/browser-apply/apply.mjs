@@ -206,6 +206,10 @@ const ATS_ALLOWED_HOSTS = Object.freeze({
   // routes of its single-page app.
   ultipro: ["recruiting.ultipro.com"],
   yc: ["workatastartup.com", "www.workatastartup.com", "ycombinator.com", "www.ycombinator.com"],
+  // Himalayas lists the posting itself and, for most roles, hands the candidate
+  // to the employer's own ATS through an outbound control - so its posting page
+  // is classified like Wellfound's: an opener, never a submission.
+  himalayas: ["himalayas.app", "www.himalayas.app"],
   generic: [],
 });
 const ATS_SERVICE_HOSTS = ATS_ALLOWED_HOSTS;
@@ -3056,6 +3060,7 @@ function inferATS(url) {
   // apply form is the `OpportunityApply` route of the same host.
   if (looksLike("ultipro")) return "ultipro";
   if (looksLike("yc")) return "yc";
+  if (looksLike("himalayas")) return "himalayas";
   return "generic";
 }
 
@@ -3116,6 +3121,25 @@ const ATS_SELECTORS = {
       name: ['input[name="name"]'], email: ['input[type="email"]'], resume: ['input[type="file"]'],
     },
     submitBtn: ['button:not([disabled]):has-text("Send")', 'button:has-text("Send")', 'button:has-text("Submit")', 'button:has-text("Apply")']
+  },
+  // Himalayas. The posting route is
+  // /companies/<slug>/jobs/<title-slug>; its "Apply now" control leaves for the
+  // employer's own ATS in the overwhelming majority of listings, which is the
+  // same opener shape Wellfound has.
+  himalayas: {
+    applyBtn: [
+      'a:has-text("Apply now")',
+      'button:has-text("Apply now")',
+      'a:has-text("Apply for this job")',
+      'button:has-text("Apply for this job")',
+      'a:has-text("Apply")',
+      'button:has-text("Apply")',
+    ],
+    fields: {
+      name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'],
+      resume: ['input[type="file"]'],
+    },
+    submitBtn: ['button:has-text("Submit")', 'button[type="submit"]']
   },
   // UKG Pro Recruiting. The posting route is `OpportunityDetail` and its "Apply
   // Now" control opens the form route `OpportunityApply?opportunityId=<id>`;
