@@ -2563,6 +2563,19 @@ test("a number-only control is given a number, or nothing", async () => {
   );
 });
 
+test("the months that follow the whole years are months, not years", async () => {
+  // LinkedIn asks the total twice: "total years of professional experience" and
+  // then "total additional months of experience". Filling only the first held
+  // Easy Apply on 4/5 with Review doing nothing (#1033, 2026-11-11).
+  const { additionalMonthsOfExperience } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(additionalMonthsOfExperience({ experience_years: 0.2 }), "2 months");
+  assert.equal(additionalMonthsOfExperience({ experience_years: 2.5 }), "6 months");
+  assert.equal(additionalMonthsOfExperience({ experience_years: 3 }), "0 months");
+  assert.equal(additionalMonthsOfExperience({ experience_years: 0 }), "0 months");
+  assert.equal(additionalMonthsOfExperience({}), "");
+});
+
 test("a pay question that states the period takes the stated annual figure", async () => {
   // #1033: "Please enter your current ctc in INR" is annual and only takes a
   // number. Reading the prose "INR 35,000 per month" as a yearly figure is wrong

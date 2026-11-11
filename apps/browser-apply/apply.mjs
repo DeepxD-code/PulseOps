@@ -1568,6 +1568,22 @@ function yearsOfExperience(candidate) {
 }
 
 /**
+ * The months left over after the whole years, for the follow-up select.
+ *
+ * LinkedIn asks "total years of professional experience" and then "total
+ * additional months of experience" as two selects. The profile states 0.2 years,
+ * which is 0 years and 2 months - filling only the first left the wizard on
+ * 4/5 with Review doing nothing (#1033, 2026-11-11).
+ */
+function additionalMonthsOfExperience(candidate) {
+  const raw = candidate?.experience_years;
+  const n = typeof raw === "number" ? raw : Number.parseFloat(String(raw ?? ""));
+  if (!Number.isFinite(n) || n < 0) return "";
+  const months = Math.floor((n - Math.floor(n)) * 12 + 1e-9);
+  return `${months} month${months === 1 ? "" : "s"}`;
+}
+
+/**
  * The whole-year bucket a numeric answer falls into.
  *
  * LinkedIn's "total years of professional experience" select offers "0 year",
@@ -2165,6 +2181,14 @@ function identityFacts(candidate, stated, job = null, profile = null) {
       // about "hands-on" or "professional" (#1320 Zema, 2026-11-10). It is left
       // to the per-skill fact below, which answers only from a stated figure.
       notWhen: (signature) => skillScopedQuestion(stated, profile, signature),
+    },
+    {
+      tag: "additional months of experience",
+      // "Please select your total additional months of experience:*" - the
+      // companion select to the years one, and the field that held Easy Apply on
+      // 4/5 with Review doing nothing (#1033, 2026-11-11).
+      hint: /\b(?:total\s+)?additional\s+months?\b|\bextra\s+months?\s+of\s+experience/i,
+      value: additionalMonthsOfExperience(candidate),
     },
     {
       tag: "skill years",
@@ -9394,10 +9418,30 @@ async function processJob(browser, job, profile, runtime = {}) {
                   && /\bApply to\s+\S/.test(t) && /\b\d+\s*\/\s*\d+\s+pages?\b/i.test(t);
               })
               .sort((a, b) => flat(a).length - flat(b).length);
-            return scopes[0] ? flat(scopes[0]).slice(0, 700) : "";
-          }).catch(() => "");
+            const scope = scopes[0];
+            if (!scope) return { questions: "", controls: "" };
+            const visible = (el) => el.offsetParent !== null;
+            // A select's innerText is every option it offers, which buries the
+            // questions after it. Read the labels and the controls' own state
+            // instead, so an unanswered required field is named outright.
+            const questions = [...scope.querySelectorAll("label, legend, h2, h3, h4")]
+              .filter(visible).map(flat).filter(Boolean);
+            const controls = [...scope.querySelectorAll("input, select, textarea")]
+              .filter(visible).map((el) => {
+                const required = el.required || el.getAttribute("aria-required") === "true";
+                const raw = el.tagName === "SELECT"
+                  ? (el.selectedOptions?.[0]?.textContent || "").trim()
+                  : String(el.value || "").trim();
+                return `${el.tagName.toLowerCase()}${required ? "*" : ""}="${raw.slice(0, 40)}"`;
+              });
+            return {
+              questions: questions.join(" | ").slice(0, 600),
+              controls: controls.join(" ").slice(0, 700),
+            };
+          }).catch(() => ({ questions: "", controls: "" }));
           console.log(`  [easy-apply] step stalled at "${found.key || "unknown"}"${blocker ? ` — page says: ${blocker}` : ""}`);
-          if (stepText) console.log(`  [easy-apply] step content: ${stepText}`);
+          if (stepText.questions) console.log(`  [easy-apply] step questions: ${stepText.questions}`);
+          if (stepText.controls) console.log(`  [easy-apply] step controls: ${stepText.controls}`);
           await page.screenshot({ path: screenshotPath.replace("preview", "wizard"), fullPage: true }).catch(() => {});
           break;
         }
@@ -10590,6 +10634,7 @@ export {
   EASY_APPLY_STEP_NAME,
   numericFieldAnswer,
   numericOption,
+  additionalMonthsOfExperience,
   statedNumericAnswer,
   statedOptionIndex,
   isSubmissionLandingUrl,
