@@ -530,6 +530,39 @@ def main() -> None:
     stats["after_soft_filter"] = len(soft_passed)
     print(f"  After soft filter: {len(soft_passed)} (rejected {len(hard_passed) - len(soft_passed)})")
 
+    # -- Himalayas: find these roles on the employer's own board ---------------
+    #
+    # Himalayas mediates the application itself: its `applicationLink` points
+    # back at himalayas.app on every posting measured, no description carries an
+    # employer URL, and himalayas.app answers any automated browser with
+    # Cloudflare's managed check and HTTP 403. A row that also exists on the
+    # employer's own ATS is therefore the only kind that can be applied to, and
+    # the company slug in the listing is the only handle for finding it.
+    #
+    # This runs after filtering, not during sourcing: six companies cost about a
+    # minute to probe, which is not a price worth paying for the rows about to be
+    # discarded. Measured on the 2026-11-11 sample: 4 of 13 companies had a
+    # probeable board and 1 carried the same role.
+    himalayas_rows = [j for j in soft_passed if str(j.get("source") or "") == "Himalayas"]
+    if himalayas_rows and not args.simulate:
+        try:
+            from pulseops_core.scraper import resolve_himalayas_employer_link
+            board_cache: dict = {}
+            recovered = 0
+            for job in himalayas_rows:
+                found = resolve_himalayas_employer_link(job.get("link", ""), job.get("title", ""), board_cache)
+                if found:
+                    job["link"] = found
+                    recovered += 1
+                    print(f"  [+] {job.get('company')} — employer board carries "
+                          f"\"{str(job.get('title'))[:48]}\"")
+            print(f"  Himalayas: {recovered}/{len(himalayas_rows)} found on the employer's own board "
+                  f"(the rest are discovery-only; their site refuses automated browsers)")
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001 - resolution must never stop a run
+            print(f"  [!] Himalayas employer-board resolution failed: {str(e)[:120]}")
+
     if not soft_passed:
         print("[!] No jobs passed domain filters. Exiting.")
         _finish(run_id, stats, run_start, settings)

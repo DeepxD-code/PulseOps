@@ -429,6 +429,171 @@ def _is_linkedin_job_url(value: str) -> bool:
     )
 
 
+# Himalayas throttles the feed per client: a run that reads 120 pages back to
+# back can be answered with HTTP 429 and the body "Rate limit reached", and the
+# whole source then reports zero postings. The limit is burst-shaped, not a hard
+# quota - a single request a few seconds later succeeds, and the response carries
+# no rate-limit headers to pace against - so a 429 is worth waiting out rather
+# than losing the run.
+_HIMALAYAS_RETRY_CODES = frozenset({429, 503})
+_HIMALAYAS_RETRY_WAITS = (5, 15, 30)
+
+
+def _himalayas_get(params: dict):
+    """GET one feed page, waiting out a burst throttle."""
+    resp = None
+    for attempt, wait in enumerate((*_HIMALAYAS_RETRY_WAITS, None)):
+        resp = safe_get(
+            _HIMALAYAS_API_URL,
+            params=params,
+            timeout=20,
+            allowed_hosts=_HIMALAYAS_API_HOSTS,
+            require_https=True,
+        )
+        if resp.status_code not in _HIMALAYAS_RETRY_CODES or wait is None:
+            return resp
+        print(f"    [himalayas] HTTP {resp.status_code} on page read; waiting {wait}s "
+              f"(attempt {attempt + 1} of {len(_HIMALAYAS_RETRY_WAITS)})")
+        time.sleep(wait)
+    return resp
+
+
+def _normalise_board_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+# Public, unauthenticated job-board endpoints. Each returns the employer's live
+# postings without a key, which is what makes an employer board findable from a
+# company slug alone.
+_HIMALAYAS_ATS_BOARDS = (
+    ("ashby", "https://api.ashbyhq.com/posting-api/job-board/{slug}", ("api.ashbyhq.com",)),
+    ("lever", "https://api.lever.co/v0/postings/{slug}", ("api.lever.co",)),
+    ("greenhouse", "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs", ("boards-api.greenhouse.io",)),
+    ("smartrecruiters", "https://api.smartrecruiters.com/v1/companies/{slug}/postings", ("api.smartrecruiters.com",)),
+    ("workable", "https://apply.workable.com/api/v1/widget/accounts/{slug}", ("apply.workable.com",)),
+)
+
+
+def _board_postings(ats: str, slug: str, payload) -> list[tuple[str, str]]:
+    """(title, url) pairs from one ATS board response."""
+    if not isinstance(payload, (dict, list)):
+        return []
+    if ats == "ashby":
+        rows = payload.get("jobs") if isinstance(payload, dict) else []
+        return [(j.get("title", ""), j.get("jobUrl", "")) for j in rows or [] if isinstance(j, dict)]
+    if ats == "lever":
+        rows = payload if isinstance(payload, list) else []
+        return [(j.get("text", ""), j.get("hostedUrl", "")) for j in rows if isinstance(j, dict)]
+    if ats == "greenhouse":
+        rows = payload.get("jobs") if isinstance(payload, dict) else []
+        return [(j.get("title", ""), j.get("absolute_url", "")) for j in rows or [] if isinstance(j, dict)]
+    if ats == "smartrecruiters":
+        rows = payload.get("content") if isinstance(payload, dict) else []
+        return [
+            (j.get("name", ""), f"https://jobs.smartrecruiters.com/{slug}/{j.get('id')}")
+            for j in rows or []
+            if isinstance(j, dict) and j.get("id")
+        ]
+    if ats == "workable":
+        rows = payload.get("jobs") if isinstance(payload, dict) else []
+        return [
+            (j.get("title", ""), j.get("url") or j.get("shortlink") or "")
+            for j in rows or []
+            if isinstance(j, dict)
+        ]
+    return []
+
+
+def _board_slug_candidates(company_slug: str) -> list[str]:
+    """The slug a company most likely registered its board under.
+
+    Himalayas publishes `companySlug` ("portainer-io"), which is often one
+    suffix away from the ATS tenant ("portainer").
+    """
+    base = re.sub(r"[^a-z0-9-]+", "-", (company_slug or "").lower()).strip("-")
+    if not base:
+        return []
+    candidates = [base]
+    stripped = re.sub(r"-(?:io|hq|app|ai|labs|inc|com|co)$", "", base)
+    if stripped and stripped != base:
+        candidates.append(stripped)
+    squashed = base.replace("-", "")
+    if squashed != base:
+        candidates.append(squashed)
+    return candidates
+
+
+def _probe_employer_boards(slug: str) -> list[tuple[str, str]]:
+    """Every posting on the company's public ATS board, whatever the ATS.
+
+    Stops at the first board that answers with postings. A company runs one ATS,
+    so continuing to probe the other four after a hit costs four timeouts per
+    company for a board that would only ever be stale.
+    """
+    for ats, template, hosts in _HIMALAYAS_ATS_BOARDS:
+        try:
+            resp = safe_get(
+                template.format(slug=slug),
+                timeout=6,
+                allowed_hosts=hosts,
+                require_https=True,
+            )
+            if resp.status_code != 200 or not resp.content:
+                continue
+            postings = _board_postings(ats, slug, resp.json())
+            if postings:
+                return postings
+        except Exception as exc:  # noqa: BLE001 - a probe must never break sourcing
+            print(f"    [himalayas-resolve] {ats}:{slug} probe failed: {str(exc)[:80]}")
+    return []
+
+
+def _resolve_himalayas_posting(company_slug: str, title: str, cache: dict[str, list]) -> str:
+    """Find the employer's own posting for a Himalayas listing, or "".
+
+    Himalayas mediates the application itself: `applicationLink` points back at
+    himalayas.app on every posting measured (60/60), no description carries an
+    employer URL (0 in 300), and himalayas.app answers every automated browser
+    with Cloudflare's managed check and HTTP 403. So the employer's own board is
+    the only reachable application surface for these rows, and the company slug
+    is the only handle the feed gives for finding it.
+
+    Measured over the 13 rows sourced on 2026-11-11: 4 companies had a probeable
+    board, and 1 listing carried the same role. The match is therefore exact on
+    the normalised title only - a near-title match would submit an application to
+    a role the candidate never read.
+    """
+    target = _normalise_board_title(title)
+    if not target or not company_slug:
+        return ""
+    for slug in _board_slug_candidates(company_slug):
+        if slug not in cache:
+            cache[slug] = _probe_employer_boards(slug)
+        for board_title, url in cache[slug]:
+            if url and _normalise_board_title(board_title) == target:
+                return url
+    return ""
+
+
+_HIMALAYAS_LINK_RE = re.compile(
+    r"https?://(?:www\.)?himalayas\.app/companies/([^/?#]+)/", re.IGNORECASE
+)
+
+
+def resolve_himalayas_employer_link(link: str, title: str, cache: dict | None = None) -> str:
+    """Resolve a himalayas.app listing to the employer's own posting, or "".
+
+    Called after filtering rather than while sourcing: six companies cost ~60 s
+    to probe, which is not a price worth paying for the rows that are about to be
+    thrown away. Returns "" for any link that is not a Himalayas listing, so a row
+    that was already resolved (or came from another board) passes through.
+    """
+    match = _HIMALAYAS_LINK_RE.match(str(link or ""))
+    if not match:
+        return ""
+    return _resolve_himalayas_posting(match.group(1), title, cache if cache is not None else {})
+
+
 def _html_to_text(value: str) -> str:
     """Flatten a feed's HTML description to readable plain text.
 
@@ -746,13 +911,7 @@ class PulseOpsScraper:
                 params = {"limit": limit}
                 if cursor:
                     params["cursor"] = cursor
-                resp = safe_get(
-                    _HIMALAYAS_API_URL,
-                    params=params,
-                    timeout=20,
-                    allowed_hosts=_HIMALAYAS_API_HOSTS,
-                    require_https=True,
-                )
+                resp = _himalayas_get(params)
                 if resp.status_code != 200:
                     raise HimalayasError(
                         f"Himalayas HTTP {resp.status_code}: {resp.text[:200]}"

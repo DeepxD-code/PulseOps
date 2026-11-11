@@ -1,4 +1,4 @@
-"""Himalayas feed parsing tests (no network).
+﻿"""Himalayas feed parsing tests (no network).
 
 The live feed's shape was measured on 2026-11-11: no server-side filtering, 20
 jobs per page regardless of `limit`, ~0.75% of postings restricted to India, and
@@ -24,6 +24,7 @@ def _posting(**overrides):
     item = {
         "title": "Backend Engineer",
         "companyName": "Example Co",
+        "companySlug": "example",
         "locationRestrictions": ["India"],
         "categories": ["Backend-Engineer"],
         "pubDate": now,
@@ -34,11 +35,31 @@ def _posting(**overrides):
     return item
 
 
-def _fake_get(pages, calls=None):
-    """A safe_get stand-in that serves one page per call, then stops paginating."""
+def _fake_get(pages, calls=None, boards=None):
+    """A safe_get stand-in that serves the feed from `pages` and ATS boards from
+    `boards` (keyed by "ats:slug").
+
+    Both the feed and the employer-board probes go through safe_get, and the feed
+    queue must not be consumed by a probe - so routing is by URL, and any board
+    the test did not declare answers 404 the way a company with no such tenant
+    does.
+    """
     queue = list(pages)
+    boards = boards or {}
 
     def fake(url, **kwargs):
+        if "himalayas.app" not in url:
+            for key, payload in boards.items():
+                ats, slug = key.split(":", 1)
+                if slug in url and (
+                    (ats == "lever" and "api.lever.co" in url)
+                    or (ats == "ashby" and "api.ashbyhq.com" in url)
+                    or (ats == "greenhouse" and "boards-api.greenhouse.io" in url)
+                    or (ats == "workable" and "apply.workable.com" in url)
+                    or (ats == "smartrecruiters" and "api.smartrecruiters.com" in url)
+                ):
+                    return SimpleNamespace(status_code=200, content=b"{}", json=lambda: payload)
+            return SimpleNamespace(status_code=404, content=b"", json=lambda: {})
         if calls is not None:
             calls.append(kwargs.get("params"))
         payload = queue.pop(0) if queue else {"jobs": [], "nextCursor": ""}
@@ -157,3 +178,150 @@ def test_a_non_200_answer_is_a_typed_source_failure(monkeypatch):
 
     with pytest.raises(scraper_module.HimalayasError):
         scraper_module.PulseOpsScraper().fetch_himalayas()
+
+
+
+# -- Employer-board resolution ------------------------------------------------
+#
+# Himalayas mediates the application itself (`applicationLink` is himalayas.app
+# on every posting measured) and refuses automated browsers, so the employer's
+# own board is the only reachable application surface. Measured 2026-11-11 over
+# the 13 sourced rows: 4 companies had a probeable board, 1 carried the role.
+
+LISTING = "https://himalayas.app/companies/example/jobs/backend-engineer"
+
+
+def _boards(monkeypatch, mapping):
+    """Route safe_get to canned ATS boards; anything else answers 404."""
+    def fake(url, **kwargs):
+        for key, payload in mapping.items():
+            ats, slug = key.split(":", 1)
+            if slug not in url:
+                continue
+            if (ats == "lever" and "api.lever.co" in url) \
+                    or (ats == "ashby" and "api.ashbyhq.com" in url) \
+                    or (ats == "greenhouse" and "boards-api.greenhouse.io" in url) \
+                    or (ats == "workable" and "apply.workable.com" in url) \
+                    or (ats == "smartrecruiters" and "api.smartrecruiters.com" in url):
+                return SimpleNamespace(status_code=200, content=b"{}", json=lambda: payload)
+        return SimpleNamespace(status_code=404, content=b"", json=lambda: {})
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+
+
+def test_an_employer_board_that_carries_the_role_yields_its_own_posting(monkeypatch):
+    _boards(monkeypatch, {
+        "lever:example": [
+            {"text": "Account Executive", "hostedUrl": "https://jobs.lever.co/example/other"},
+            {"text": "Backend Engineer", "hostedUrl": "https://jobs.lever.co/example/1"},
+        ]
+    })
+
+    assert scraper_module.resolve_himalayas_employer_link(LISTING, "Backend Engineer") == \
+        "https://jobs.lever.co/example/1"
+
+
+def test_a_near_title_is_never_treated_as_the_same_role(monkeypatch):
+    # Binance's own board carried "Software Engineer - Blockchain Security
+    # (Full-stack)" for a listing of "Software Engineer - Blockchain Security". A
+    # contains-match would submit an application to a scope nobody read.
+    _boards(monkeypatch, {
+        "greenhouse:example": [{
+            "title": "Software Engineer - Blockchain Security (Full-stack)",
+            "absolute_url": "https://job-boards.greenhouse.io/example/jobs/1",
+        }]
+    })
+
+    assert scraper_module.resolve_himalayas_employer_link(
+        LISTING, "Software Engineer - Blockchain Security"
+    ) == ""
+
+
+def test_a_link_that_is_not_a_himalayas_listing_is_left_alone(monkeypatch):
+    called = []
+
+    def fake(url, **kwargs):
+        called.append(url)
+        return SimpleNamespace(status_code=404, content=b"", json=lambda: {})
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+
+    assert scraper_module.resolve_himalayas_employer_link("https://jobs.lever.co/example/1", "Backend Engineer") == ""
+    # Already-resolved rows and other boards pass through without a probe.
+    assert called == []
+
+
+def test_a_company_slug_is_tried_one_suffix_away():
+    candidates = scraper_module._board_slug_candidates("portainer-io")
+    assert candidates[0] == "portainer-io"
+    assert "portainer" in candidates
+    assert scraper_module._board_slug_candidates("mercor") == ["mercor"]
+
+
+def test_a_failed_probe_returns_nothing_rather_than_raising(monkeypatch):
+    def fake(url, **kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+
+    assert scraper_module.resolve_himalayas_employer_link(LISTING, "Backend Engineer") == ""
+
+
+def test_the_probe_stops_at_the_first_board_that_answers(monkeypatch):
+    # Each unanswered ATS costs a timeout, and a company runs one board, so the
+    # remaining four are not worth asking.
+    asked = []
+
+    def fake(url, **kwargs):
+        asked.append(url)
+        if "api.lever.co" in url:
+            return SimpleNamespace(
+                status_code=200,
+                content=b"{}",
+                json=lambda: [{"text": "Backend Engineer", "hostedUrl": "https://jobs.lever.co/example/1"}],
+            )
+        return SimpleNamespace(status_code=404, content=b"", json=lambda: {})
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+    scraper_module.resolve_himalayas_employer_link(LISTING, "Backend Engineer")
+
+    assert any("api.lever.co" in u for u in asked)
+    assert len(asked) == 2  # ashby (404), then lever (hit) - nothing after.
+
+# -- Feed throttling ---------------------------------------------------------
+#
+# Measured 2026-11-11: a 60-page run was answered with HTTP 429 "Rate limit
+# reached" and the whole source reported zero postings, while a single request a
+# few seconds later succeeded. Losing a run to a burst throttle is not a real
+# outage, so a 429 is waited out.
+
+def test_a_throttled_page_is_retried_and_the_run_continues(monkeypatch):
+    payload = {"jobs": [_posting()], "nextCursor": ""}
+    calls = []
+
+    def fake(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            return SimpleNamespace(status_code=429, content=b"{}", text="Rate limit reached")
+        return SimpleNamespace(status_code=200, content=b"{}", json=lambda: payload)
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+    # The waits are read from the module so a test never sleeps for real.
+    monkeypatch.setattr(scraper_module, "_HIMALAYAS_RETRY_WAITS", (0,))
+
+    jobs = scraper_module.PulseOpsScraper().fetch_himalayas()
+
+    assert len(calls) == 2
+    assert len(jobs) == 1
+
+
+def test_a_throttle_that_never_clears_is_a_typed_failure(monkeypatch):
+    def fake(url, **kwargs):
+        return SimpleNamespace(status_code=429, content=b"{}", text="Rate limit reached")
+
+    monkeypatch.setattr(scraper_module, "safe_get", fake)
+    monkeypatch.setattr(scraper_module, "_HIMALAYAS_RETRY_WAITS", (0, 0))
+
+    with pytest.raises(scraper_module.HimalayasError) as caught:
+        scraper_module.PulseOpsScraper().fetch_himalayas()
+    assert "429" in str(caught.value)
