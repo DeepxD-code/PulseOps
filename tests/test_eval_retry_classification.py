@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "packages" / "pulse-eval" / "src"))
 from pulseops_eval.analyzer import (  # noqa: E402
     _is_daily_quota,
     _is_malformed_json,
+    _is_server_unavailable,
     _is_transient_network,
 )
 
@@ -62,6 +63,36 @@ def test_real_errors_are_not_mistaken_for_retryable_transients(message):
     # transient previously disabled the whole engine for a job.
     assert _is_malformed_json(message) is False
     assert _is_transient_network(message) is False
+
+
+@pytest.mark.parametrize("message", [
+    # Verbatim from #1137 Viaduct (2026-11-12), which lost the application because
+    # the outreach-modal drafter had no second attempt.
+    ("503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently "
+     "experiencing high demand. Spikes in demand are usually temporary. Please try again later.', "
+     "'status': 'UNAVAILABLE'}}"),
+    "500 INTERNAL. An internal error has occurred.",
+    "502 Bad Gateway",
+    "504 Deadline Exceeded: the server timed out",
+    "The model is overloaded, please try again",
+])
+def test_a_server_side_outage_is_retried(message):
+    assert _is_server_unavailable(message) is True
+
+
+@pytest.mark.parametrize("message", [
+    "429 rate limit exceeded",
+    "API key not valid",
+    "PERMISSION_DENIED",
+    "Expecting ',' delimiter: line 61 column 6",
+    "connection refused",
+    "",
+])
+def test_a_client_error_is_not_called_a_server_outage(message):
+    # Only a 5xx that says so. A 429 is handled on its own branch (it may mean a
+    # daily quota, which must disable the engine rather than be retried), and an
+    # auth failure must never be looped over.
+    assert _is_server_unavailable(message) is False
 
 
 def test_daily_quota_is_not_treated_as_per_minute():

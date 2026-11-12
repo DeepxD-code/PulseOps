@@ -226,6 +226,35 @@ def _is_malformed_json(msg: str) -> bool:
     )
 
 
+def _is_server_unavailable(msg: str) -> bool:
+    """True for a 5xx from the provider: the request was fine, the service was not.
+
+    Gemini answers 503 UNAVAILABLE whenever a model is briefly over capacity:
+
+        503 UNAVAILABLE. This model is currently experiencing high demand.
+        Spikes in demand are usually temporary. Please try again later.
+
+    Only 429, truncated JSON and transport faults were retried, so this fell
+    through to a raise - and the caller was the outreach-modal drafter, where a
+    single transient 503 left the modal open and cost the application
+    (measured #1137 Viaduct, 2026-11-12). The server says to try again later, so
+    that is what this does.
+
+    Matched on the status code text rather than on the SDK's ServerError class,
+    because the same message arrives from google.genai, groq and openai and this
+    module must not import any of them to decide.
+
+    A 5xx anywhere is enough on its own; the phrase list exists for providers
+    that report overload without a code ("The model is currently overloaded").
+    Misreading a line number as a status costs nothing here, because the JSON
+    branch retries on exactly the same terms.
+    """
+    low = str(msg or "").lower()
+    if any(code in low for code in ("500", "502", "503", "504")):
+        return True
+    return "unavailable" in low or "overloaded" in low or "high demand" in low
+
+
 def _is_transient_network(msg: str) -> bool:
     """DNS resets and aborted sockets, which are momentary rather than fatal.
 
@@ -357,13 +386,18 @@ def _query_gemini(prompt: str) -> dict:
                     time.sleep(wait)
                 else:
                     raise
-            elif _is_malformed_json(msg) or _is_transient_network(msg):
-                # Neither is a quota problem, so the engine stays enabled. These
-                # were killing whole jobs with no second attempt, which is how a
-                # 141-role run lost 16 to truncated JSON and 8 to a DNS blip.
+            elif _is_malformed_json(msg) or _is_transient_network(msg) or _is_server_unavailable(msg):
+                # None of these is a quota problem, so the engine stays enabled.
+                # These were killing whole jobs with no second attempt, which is
+                # how a 141-role run lost 16 to truncated JSON and 8 to a DNS
+                # blip, and how one 503 lost an outreach-modal application.
                 if attempt < 3:
                     time.sleep(2 * (attempt + 1))
-                    kind = "truncated JSON" if _is_malformed_json(msg) else "network"
+                    kind = (
+                        "truncated JSON" if _is_malformed_json(msg)
+                        else "network" if _is_transient_network(msg)
+                        else "server unavailable"
+                    )
                     print(f"  [Gemini] {kind}, retry {attempt + 1}/3…")
                     continue
                 raise
