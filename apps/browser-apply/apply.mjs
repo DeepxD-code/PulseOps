@@ -217,6 +217,15 @@ const ATS_SERVICE_HOSTS = ATS_ALLOWED_HOSTS;
 // (a modal or embedded panel). Treating it as the final submission fills the
 // fields after the "submit" and never actually applies.
 const APPLY_IS_ALWAYS_INTERMEDIATE = new Set(["greenhouse", "lever", "ashby"]);
+// The opposite shape: on these two boards the job page's Apply control opens an
+// outreach modal and the real submission is the modal's Send. It navigates
+// nowhere, so the one-step heuristic cannot classify it and it falls through as
+// "intermediate" - the modal opens, then the generic filler runs against it and
+// reports "no empty field matched ... (1-2 checked)" for every question, ending
+// in NeedsReview (#1132 Brave 2026-11-12). Classifying the opener as final sends
+// the flow into the modal handler, which is where the Send lives; that is what
+// already happened whenever the control's label was "Apply now" (#1137 Viaduct).
+const OUTREACH_MODAL_ATS = new Set(["yc", "wellfound"]);
 const STRICT_ROLE_EXCLUDES = [
   "full stack", "full-stack", "fullstack", "frontend", "front-end",
   "laravel", "wordpress", "react", "angular", "vue", "mobile", "android",
@@ -4302,8 +4311,14 @@ function isAccountGate(ats, landedOnWall) {
  */
 function wellfoundSendConfirmed(bodyText, modalGone) {
   if (!modalGone) return false;
+  const text = String(bodyText || "");
+  // "Undo · 3:03" is the same receipt after the toast collapses into the action
+  // row: the Apply control is replaced by an undo countdown once the application
+  // is queued. Measured #1132 Brave 2026-11-12, where the send had gone out and
+  // the only trace left on the page was that countdown.
+  if (/undo\s*[\u00b7:\-]\s*\d{1,2}:\d{2}/i.test(text)) return true;
   return /message sent|application sent|will be sent|your application to|we'll be in touch|thanks for reaching out|successfully applied|application submitted/i
-    .test(String(bodyText || ""));
+    .test(text);
 }
 
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
@@ -4543,11 +4558,19 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
       // it to intermediate or the fields get filled *after* the "submission".
       const forceIntermediate = (APPLY_IS_ALWAYS_INTERMEDIATE.has(effectiveAts) || hoppedOffBoard)
         && type !== "submit";
+      const forceFinal = OUTREACH_MODAL_ATS.has(effectiveAts) && type !== "submit"
+        && /\bapply\b/i.test(label);
       const classification = classifyApplyControl({
         label, href, selector: sel,
         oneStep: forceIntermediate ? false : oneStep,
         isSubmit: type === "submit",
       });
+      if (forceFinal && !classification.final) {
+        classification.classification = "final";
+        classification.final = true;
+        classification.intermediate = false;
+        classification.safeToClick = true;
+      }
       if (forceIntermediate && classification.final) {
         classification.classification = "intermediate";
         classification.final = false;
@@ -8621,10 +8644,23 @@ async function processJob(browser, job, profile, runtime = {}) {
     // A server-side Applied badge is authoritative for the human-facing ATSs.
     // Check it before opening another application modal (including the Naukri
     // Young Turk flow) and record a verified, idempotent outcome.
-    if (HUMAN_FINAL_STATUSES.has(ats) && !(await hasCaptcha(page)) && await hasVisibleAppliedBadge(page)) {
-      console.log(`  [${ats}] server-side Applied badge already present — recording verified submission`);
-      if (!sharedCtx) await context.close();
-      return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
+    //
+    // The badge is client-rendered, so a single look 1.5 s after load reads the
+    // pre-hydration page: Wellfound paints a disabled "Apply" first and swaps it
+    // for "✓ Applied" once its GraphQL response lands. Measured #1132 Brave
+    // 2026-11-12 - the run saw no control at all ("no Apply button found for
+    // wellfound"), fell into the generic filler, and recorded NeedsReview on an
+    // application that was already in the board's list. Poll briefly instead;
+    // four looks over ~4.5 s costs nothing next to that.
+    if (HUMAN_FINAL_STATUSES.has(ats) && !(await hasCaptcha(page))) {
+      for (let look = 0; look < 4; look++) {
+        if (await hasVisibleAppliedBadge(page)) {
+          console.log(`  [${ats}] server-side Applied badge already present — recording verified submission`);
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
+        }
+        if (look < 3) await page.waitForTimeout(1500);
+      }
     }
 
     // A Hirist posting answers with the word "Applied" in place of its Apply
@@ -8821,6 +8857,18 @@ async function processJob(browser, job, profile, runtime = {}) {
         return { company: job.company, title: job.title, link: url, ats, action: "captcha-blocked", pdf: resumePdf };
       }
       if (!finalClick.clicked) {
+        // A control that will not accept the click can mean the board already has
+        // this application. Wellfound hydrates "Apply" as a disabled button and
+        // only swaps it for "✓ Applied" afterwards, so the badge check made 1.5 s
+        // earlier saw the pre-hydration button and the run went on to click it -
+        // "[final-disabled] Apply is disabled" on a posting already applied to
+        // (#1136 Viaduct, 2026-11-12). Re-read the page now that more time has
+        // passed before calling this a failure.
+        if (!DRY_RUN && !finalClick.captcha && await hasVisibleAppliedBadge(page).catch(() => false)) {
+          console.log(`  [${ats}] control would not click and the board already shows an Applied badge — recording verified submission`);
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
+        }
         if (!sharedCtx) await context.close();
         const action = DRY_RUN ? "dry-run-preview"
           : (finalClick.blocked === "send-paused" || finalClick.blocked === "db-missing" ? "send-paused"
@@ -8999,7 +9047,7 @@ async function processJob(browser, job, profile, runtime = {}) {
       ).catch(() => false);
       if (!modalOpen || nAreas === 0) {
         const opener = page
-          .locator('button:has-text("Apply Now"), button:has-text("Apply to job"), a:has-text("Apply Now")')
+          .locator('button:has-text("Apply Now"), button:has-text("Apply now"), button:has-text("Apply to job"), a:has-text("Apply Now"), a:has-text("Apply now"), button:has-text("Apply")')
           .first();
         if ((await opener.count()) > 0) {
           console.log("  [yc] no modal yet - clicking the apply control to open it");
@@ -9014,7 +9062,20 @@ async function processJob(browser, job, profile, runtime = {}) {
           console.log(`  [yc] after opener: textarea=${nAreas} modal=${modalOpen}`);
         }
       }
-      if (modalOpen && nAreas > 0) {
+      // A note is not a precondition for submitting. Some Wellfound listings
+      // open a modal with "Cancel" and "Send application" and no textarea at
+      // all (#1132 Brave News Backend Engineer 2026-11-12, measured: one control
+      // on the whole page, the search box). Requiring a textarea read that as
+      // "no outreach modal detected", fell through to the generic filler, and
+      // recorded NeedsReview on a form that needed one click.
+      //
+      // The control must be visible: Wellfound keeps a pre-rendered hidden copy
+      // of the modal in the DOM, and clicking that one does nothing.
+      const sendBtn = page
+        .locator('button:has-text("Submit application"):visible, button[type="submit"]:has-text("Submit"):visible, button:has-text("Send application"):visible, button:has-text("Send"):visible')
+        .first();
+      const sendVisible = await sendBtn.count().catch(() => 0);
+      if (modalOpen && (nAreas > 0 || sendVisible > 0)) {
         // Wellfound closes applications by geography and says so inside the
         // modal, with the Send button rendered disabled rather than hidden:
         //   "mozee is not accepting applications from your current location due
@@ -9087,9 +9148,12 @@ async function processJob(browser, job, profile, runtime = {}) {
             } catch (e) { console.log(`  [yc] location pick failed: ${String(e).slice(0, 80)}`); }
           }
         }
-        console.log(`  [yc] outreach modal open with ${nAreas} textarea(s) — drafting answers`);
+        // A note is not a precondition for submitting, so the send control is
+        // resolved once here and used by both the drafted and the note-less case.
+        if (nAreas > 0) console.log(`  [yc] outreach modal open with ${nAreas} textarea(s) — drafting answers`);
+        else console.log(`  [yc] outreach modal open with no note field — submitting as-is`);
         let answers = null;
-        try {
+        if (nAreas > 0) try {
           const { execFileSync } = await import("node:child_process");
           const roleSnippet = await page.evaluate(() =>
             (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 800)
@@ -9111,7 +9175,7 @@ async function processJob(browser, job, profile, runtime = {}) {
           });
           answers = JSON.parse(out.trim().split(/\r?\n/).pop());
         } catch (e) { console.log(`  [yc] answer drafting failed: ${String(e).slice(0, 120)}`); }
-        if (answers) {
+        if (nAreas === 0 || answers) {
           const keys = ["intro", "built", "why"];
           // Wellfound keeps a pre-rendered (hidden) copy of this modal in the
           // DOM, so document order is not the modal: filling textarea[0] and [1]
@@ -9152,9 +9216,8 @@ async function processJob(browser, job, profile, runtime = {}) {
           // button[type=submit]; YC says "Send application". Looking only for
           // "Send application"/"Send" found nothing, so every drafted answer
           // stopped one click short of submission and was recorded needs-review.
-          const sendBtn = page
-            .locator('button:has-text("Submit application"), button[type="submit"]:has-text("Submit"), button:has-text("Send application"), button:has-text("Send")')
-            .first();
+          // The locator itself is resolved once, above, so the note-less case and
+          // the drafted case both submit through the same visible control.
           let sent = false;
           let clickError = false;
           if (DRY_RUN) {
@@ -9220,8 +9283,12 @@ async function processJob(browser, job, profile, runtime = {}) {
             if (!sharedCtx) await context.close();
             return { company: job.company, title: job.title, link: url, ats, action: "redirect-blocked", pdf: resumePdf };
           }
+          // The receipt is not always first in the page text: on #1136 the nav
+          // ("Ready to interview Home Profile ...") took the first 400 characters
+          // and the toast sat behind it, so the success check read a slice that
+          // could not contain it. Read the whole page and only shorten the log.
           const postSend = await page.evaluate(() =>
-            (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 400)
+            (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 8000)
           ).catch(() => "");
           const modalGone = await page.evaluate(() =>
             [...document.querySelectorAll("textarea")].length === 0

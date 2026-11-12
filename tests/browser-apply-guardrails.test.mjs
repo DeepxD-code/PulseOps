@@ -3577,6 +3577,9 @@ test("a Wellfound toast in the future tense is still a submission", async () => 
   );
   assert.equal(wellfoundSendConfirmed("Message sent", true), true);
   assert.equal(wellfoundSendConfirmed("Application submitted successfully", true), true);
+  // #1132 Brave: the toast collapses into the action row as an undo countdown
+  // and no other trace of the send is left on the page.
+  assert.equal(wellfoundSendConfirmed("Save Undo · 3:03 brave.com/", true), true);
 
   // A modal still on screen is not a submission, whatever the page says behind
   // it: the same text can be in the listing's own copy.
