@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -1467,7 +1467,7 @@ test("Ashby /application routes are treated as the apply step", () => {
   // Ashby labels the control "Application" and links to a path ending in
   // /application. It matched neither an apply-word nor a known intermediate
   // label, so every Ashby posting classified as "unknown" and was left
-  // unclicked — 16 applications lost in a single run.
+  // unclicked â€” 16 applications lost in a single run.
   const rel = classifyApplyControl({
     label: "Application",
     href: "/deepgram/d98e6723-3485-4b58-9494-d6bf028fa905/application",
@@ -2084,7 +2084,7 @@ test("current compensation and the distance question come from stated answers", 
   assert.equal(identityFacts({}, {}).some((f) => f.tag === "distance from office"), false);
 
   // The same question must not be answered with the candidate's city. A bare
-  // \brelocat did exactly that: "…are you willing to relocate at your own
+  // \brelocat did exactly that: "â€¦are you willing to relocate at your own
   // expense?" was read as a location question and the city wrote itself into
   // the distance box, while the distance answer was skipped because the box
   // looked filled (#1320, 2026-11-10).
@@ -2252,7 +2252,7 @@ test("role scope is judged on the posting, never on the evaluator's notes", () =
   named.getAttribute = (a) => ({ id: a === "id" ? "country" : "" })[a] || "";
   assert.match(signature(named), /country/);
 
-  // A dropdown's nearest wrappers hold only the input and its "Select…"
+  // A dropdown's nearest wrappers hold only the input and its "Selectâ€¦"
   // placeholder, so stripping them leaves nothing. The matcher must keep
   // climbing to reach the prompt, or every question-based match fails.
   const control = mkNode("", [mkNode(""), mkNode("")]);
@@ -2274,7 +2274,7 @@ test("role scope is judged on the posting, never on the evaluator's notes", () =
 test("the page-side matcher is self-contained so it can be serialised", () => {
   // Playwright serialises the evaluate callback into the page. If it referenced
   // anything outside its own body, the reference would be undefined in the page
-  // and every field would fail to match — silently, before this guard existed.
+  // and every field would fail to match â€” silently, before this guard existed.
   const src = controlSignatureMatcher().toString();
   for (const forbidden of ["fieldQuestionText", "controlSignatureMatcher(", "require(", "process."]) {
     assert.equal(src.includes(forbidden), false, `matcher must not reference ${forbidden}`);
@@ -2476,7 +2476,7 @@ test("the upload button is found by its own words, never by a submit's", async (
   // Eightfold's dropzone ignores a populated <input type="file">: it keeps
   // showing "Drag & drop file", issues no request, and the form then refuses
   // the submit with "Upload your resume cannot be left blank" (#1322 PayPal,
-  // 2026-11-10). Its own "⬆ Upload file" button is the control its handler was
+  // 2026-11-10). Its own "â¬† Upload file" button is the control its handler was
   // written for, so this regex decides which buttons may be clicked to reach a
   // file chooser. A submit-ish label must never match: clicking "Submit
   // application" to reach a picker would send the application with no resume.
@@ -2488,12 +2488,12 @@ test("the upload button is found by its own words, never by a submit's", async (
   );
 
   const matches = [
-    "⬆ Upload file",      // the literal Eightfold control
+    "â¬† Upload file",      // the literal Eightfold control
     "Upload File",
     "Choose file",
     "Choose File",
     "Browse",
-    "Browse…",
+    "Browseâ€¦",
     "Select file",
     "Attach file",
     "Attach CV",
@@ -2524,7 +2524,7 @@ test("the upload button is found by its own words, never by a submit's", async (
 test("a stated answer is matched to the option that says it, and never to a lookalike", async () => {
   // A board restates the operator's words in its own; the disability
   // self-identification is answered "No, I don't have a disability" while PayPal
-  // renders "NO. I DON'T HAVE A DISABILITY (INCLUDING CANCER, EPILEPSY…)".
+  // renders "NO. I DON'T HAVE A DISABILITY (INCLUDING CANCER, EPILEPSYâ€¦)".
   // Equality matched nothing, so a required group stayed blank (#1322).
   const { statedOptionIndex } = await import("../apps/browser-apply/apply.mjs");
 
@@ -2640,7 +2640,7 @@ test("the onsite and commute questions are answered from the operator's own stat
 
   assert.ok(byKey.onsite_comfortable.test("Are you comfortable working in an onsite setting?* Yes No This field is required"));
   assert.ok(byKey.commute_comfortable.test("Are you comfortable commuting to this job's location?* Yes No This field is required"));
-  assert.ok(byKey.commute_comfortable.test("Are you comfortable commuting to this job’s location?"));
+  assert.ok(byKey.commute_comfortable.test("Are you comfortable commuting to this jobâ€™s location?"));
   // A different question that happens to say "onsite" is not this one.
   assert.equal(byKey.onsite_comfortable.test("This role is onsite in Bengaluru. Do you have a valid work permit?"), false);
   assert.equal(byKey.commute_comfortable.test("How long is your commute today?"), false);
@@ -2653,7 +2653,7 @@ test("the onsite and commute questions are answered from the operator's own stat
 test("a board that refuses automated browsers is told apart from a CAPTCHA", async () => {
   // Himalayas answered both a headed Edge with a persistent profile and a clean
   // bundled Chromium (real Chrome UA) with Cloudflare's managed check and HTTP
-  // 403 — title "Just a moment...", body "Performing security verification", no
+  // 403 â€” title "Just a moment...", body "Performing security verification", no
   // posting ever painted. There is no widget to click, so waiting for the form
   // and reporting "no Submit button found" describes the wrong failure.
   const { isBotVerificationWall, statusForBrowserResult } = await import("../apps/browser-apply/apply.mjs");
@@ -2662,7 +2662,7 @@ test("a board that refuses automated browsers is told apart from a CAPTCHA", asy
   assert.equal(isBotVerificationWall("Just a moment..."), true);
   assert.equal(isBotVerificationWall("Checking if the site connection is secure"), true);
   // An ordinary posting page is not a wall, even when it mentions bots.
-  assert.equal(isBotVerificationWall("Platform Engineer (Edge / Docker / IIoT) — apply now"), false);
+  assert.equal(isBotVerificationWall("Platform Engineer (Edge / Docker / IIoT) â€” apply now"), false);
   assert.equal(isBotVerificationWall(""), false);
 
   // A refusal is terminal; a captcha on a real form is worth a human's wait.
@@ -2703,7 +2703,7 @@ test("a board's safety dialog is stepped through, never a submission", async () 
 
   for (const label of [
     "Continue applying",
-    "Continue applying ↗",
+    "Continue applying â†—",
     "Continue to application",
     "Continue to the application",
     "Continue to company site",
@@ -2805,7 +2805,7 @@ test("the submit-time captcha and vendor data are reachable, writes are not", ()
     true,
   );
   // The enterprise/reload call fetches challenge state, and the gstatic bundle
-  // arrives as resource type "other" — both are required to produce a token.
+  // arrives as resource type "other" â€” both are required to produce a token.
   assert.equal(
     isAllowedReadOnlyApiRequest(
       "https://www.recaptcha.net/recaptcha/enterprise/reload?k=KEY", "xhr", "GET", "greenhouse",
@@ -3216,7 +3216,7 @@ test("the upload control's own label decides between a tailored resume and the p
   assert.equal(decideUploadKind("Resume/CV").kind, "resume");
   assert.equal(decideUploadKind("Upload your resume").kind, "resume");
   assert.equal(decideUploadKind("Attach resume (PDF)").kind, "resume");
-  assert.equal(decideUploadKind("Updated résumé").kind, "resume");
+  assert.equal(decideUploadKind("Updated rÃ©sumÃ©").kind, "resume");
   assert.equal(decideUploadKind("Upload your CV").kind, "cv");
   assert.equal(decideUploadKind("Attach CV *").kind, "cv");
   assert.equal(decideUploadKind("Curriculum Vitae").kind, "cv");
@@ -3339,9 +3339,9 @@ test("a recommendation card's Apply link is not this job's apply control", () =>
 test("a posting that stopped taking applications is closed, not an off-site apply", () => {
   // Measured 2026-11-10, #1274 Honeywell Aerospace: LinkedIn's own line is
   // "Not currently accepting applications", and the same page also says
-  // "Responses managed off LinkedIn" — which the run used to decide the job
+  // "Responses managed off LinkedIn" â€” which the run used to decide the job
   // wanted an off-site application.
-  assert.equal(CLOSED_LISTING_TEXT.test("Promoted by hirer · Responses managed off LinkedIn On-site Full-time Not currently accepting applications"), true);
+  assert.equal(CLOSED_LISTING_TEXT.test("Promoted by hirer Â· Responses managed off LinkedIn On-site Full-time Not currently accepting applications"), true);
   assert.equal(CLOSED_LISTING_TEXT.test("No longer accepting applications"), true);
   assert.equal(CLOSED_LISTING_TEXT.test("Applications are closed for this role"), true);
   assert.equal(CLOSED_LISTING_TEXT.test("This position is open until 30 November"), false);
@@ -3407,7 +3407,7 @@ test("a stipend question is answered from the stated monthly floor", async () =>
   const { stipendFigure } = await import("../apps/browser-apply/apply.mjs");
 
   assert.equal(stipendFigure("Stipend will be 15-18k Maximum, are you fine with it?"), 15000);
-  assert.equal(stipendFigure("Is a stipend of ₹8,000 per month acceptable?"), 8000);
+  assert.equal(stipendFigure("Is a stipend of â‚¹8,000 per month acceptable?"), 8000);
   assert.equal(stipendFigure("Are you okay with a stipend of INR 30,000 per month?"), 30000);
   assert.equal(stipendFigure("Stipend 10k, are you fine?"), 10000);
   // "3 months internship, stipend 15k" must not read the duration as money.
@@ -3508,4 +3508,59 @@ test("a plain navigation lands on its own URL; a timed-out one does not", async 
   assert.equal(navigationLanding(job, job, false), job);
   assert.equal(navigationLanding(job, job, true), "");
   assert.equal(navigationLanding(job, "", false), "");
+});
+test("an off-site hop re-detects with the employer ATS's own controls", async () => {
+  // #1019: the hop pinned recruiting.ultipro.com, then the runner re-detected
+  // with "generic", whose list has no "Apply Now" - so it found no control on a
+  // page that had one.
+  const { hopApplyAts, createNavigationBoundary, tryPinExternalApplyOrigin } =
+    await import("../apps/browser-apply/apply.mjs");
+
+  const boundary = createNavigationBoundary("https://www.linkedin.com/jobs/view/1/", "linkedin");
+  assert.equal(hopApplyAts("linkedin", boundary), "generic");
+
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://recruiting.ultipro.com/PAR/JobBoard/x/OpportunityDetail", "linkedin", true), true);
+  boundary.ats = "ultipro";
+  assert.equal(hopApplyAts("linkedin", boundary), "ultipro");
+
+  // An unrecognised careers site leaves the row's own ATS in place, so the
+  // generic fallback stands.
+  const other = createNavigationBoundary("https://www.linkedin.com/jobs/view/2/", "linkedin");
+  assert.equal(tryPinExternalApplyOrigin(other, "https://careers.example.com/apply/7", "linkedin", true), true);
+  assert.equal(hopApplyAts("linkedin", other), "generic");
+  assert.equal(hopApplyAts("linkedin", null), "generic");
+});
+test("a board's candidate sign-in is an account gate, not a broken form", async () => {
+  // #1019: UltiPro's posting renders "Apply now" as a <ukg-button>, and clicking
+  // it goes to signin-us.ultipro.com/u/login. The run waited for a form, found
+  // none, and recorded "no clickable final Submit" on a board that simply wants
+  // an account - parking the row in NeedsReview to fail the same way next time.
+  const { isAuthWallHost } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(isAuthWallHost("signin-us.ultipro.com"), true);
+  assert.equal(isAuthWallHost("signin-eu.ultipro.com"), true);
+  assert.equal(isAuthWallHost("signin.ultipro.com"), true);
+  // The recruiting host itself is the board, not a gate.
+  assert.equal(isAuthWallHost("recruiting.ultipro.com"), false);
+  // A host that merely ends in the vendor's name is not the vendor.
+  assert.equal(isAuthWallHost("signin-us.ultipro.com.evil.example"), false);
+  // The existing shapes still work.
+  assert.equal(isAuthWallHost("login.microsoftonline.com"), true);
+  assert.equal(isAuthWallHost("talent.example.com"), false);
+});
+test("an account gate is board-blocked on gated ATSes only", async () => {
+  // #1019: UltiPro's "Apply now" goes to signin-us.ultipro.com, so there is no
+  // form to fill and the row was parked in NeedsVerification as "page is not a
+  // trusted HTTPS origin". Workday behaves the same way.
+  const { isAccountGate } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(isAccountGate("ultipro", true), true);
+  assert.equal(isAccountGate("workday", true), true);
+  // Only when a wall was actually reached.
+  assert.equal(isAccountGate("ultipro", false), false);
+  // A board session that expired is recoverable by signing in again, so it stays
+  // NeedsReview rather than being written off.
+  assert.equal(isAccountGate("linkedin", true), false);
+  assert.equal(isAccountGate("naukri", true), false);
+  assert.equal(isAccountGate(undefined, true), false);
 });

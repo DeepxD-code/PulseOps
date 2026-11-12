@@ -3162,6 +3162,14 @@ const ATS_SELECTORS = {
   // fallback so a renamed field still gets filled.
   ultipro: {
     applyBtn: [
+      // UKG's ignite rewrite renders the control as a custom element, so there
+      // is no <a> or <button> to match: the posting's Apply lives in
+      // <ukg-button>Apply now</ukg-button> (measured #1019 Park Place
+      // Technologies 2026-11-11: every a/button selector returned 0, while
+      // getByText found exactly one visible ukg-button). Clicking the element
+      // works - it is what a person clicks.
+      'ukg-button:has-text("Apply now")',
+      'ukg-button:has-text("Apply Now")',
       'a:has-text("Apply Now")',
       'button:has-text("Apply Now")',
       'a:has-text("Apply")',
@@ -4038,6 +4046,11 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
           try { shortener = URL_SHORTENER_HOST.test(canonicalHost(new URL(requestUrl).hostname)); }
           catch { shortener = false; }
           if (!shortener && !tryPinExternalApplyOrigin(boundary, requestUrl, servingAts)) {
+            // Remember what was refused. An account gate (UKG Pro Recruiting's
+            // signin-us.ultipro.com) and a broken page both land here, and the
+            // difference decides whether the row is board-blocked or needs a
+            // human - so the destination has to survive the abort.
+            if (isNavigationBoundary(boundary)) boundary.blockedNavigation = requestUrl;
             console.log(`    [redirect-block] ${requestUrl}`);
             await route.abort("blockedbyclient");
             return;
@@ -4218,6 +4231,12 @@ const AUTH_WALL_SUFFIX = /(?:^|\.)(?:auth0\.com|okta\.com|onelogin\.com|duosecur
 function isAuthWallHost(host) {
   const h = canonicalHost(host);
   if (!h) return false;
+  // UKG Pro Recruiting keeps its candidate sign-in on its own host: a posting's
+  // "Apply now" goes to signin-us.ultipro.com/u/login (measured #1019 Park Place
+  // Technologies, 2026-11-11, and the same shape as Workday and TalentRecruit).
+  // The leading-dot pattern below only matches "signin.example.com", so this
+  // shape read as an ordinary page and the run kept waiting for a form.
+  if (/^signin(?:-[a-z]{2})?\.ultipro\.com$/.test(h)) return true;
   return AUTH_WALL_HOST.test(h) || AUTH_WALL_SUFFIX.test(h)
     || /^(?:login|signin|sign-in|auth|sso|accounts)\./.test(h);
 }
@@ -4234,6 +4253,31 @@ function isGoogleFormUrl(url) {
   } catch {
     return false;
   }
+}
+
+/**
+ * ATSes whose application form has no anonymous path at all.
+ *
+ * UltiPro (UKG Pro Recruiting) routes every posting's "Apply now" through
+ * signin-us.ultipro.com/u/login, and Workday does the same per employer. There
+ * is no form behind that gate for this applier to fill, so the row is
+ * board-blocked rather than NeedsReview, where it would be re-run and fail
+ * identically.
+ *
+ * Board logins that expire (LinkedIn, Naukri, Instahyre) are deliberately not
+ * in this set: those walls are transient, and the row is worth retrying after
+ * signing in again.
+ */
+const ACCOUNT_GATED_ATS = new Set(["ultipro", "workday"]);
+
+/**
+ * Whether a landing is this ATS's own candidate-account gate.
+ *
+ * Extracted so the scoping is covered by tests: the identical wall on a board
+ * whose session merely expired must not be written off as unusable.
+ */
+function isAccountGate(ats, landedOnWall) {
+  return Boolean(landedOnWall) && ACCOUNT_GATED_ATS.has(String(ats || "").toLowerCase());
 }
 
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
@@ -4258,6 +4302,27 @@ function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EX
   boundary.externalApplyHost = host;
   boundary.pinnedOrigin = url.origin;
   return true;
+}
+
+/**
+ * Which selector set to use on a page reached through an approved off-site hop.
+ *
+ * The originating board's controls do not exist on the employer's site, so the
+ * generic set is the safe default. But when the hop landed on an ATS we can name
+ * - navigateAllowed re-points the boundary at it - that ATS's own control list
+ * is more precise and, for UltiPro, strictly broader: its Apply control reads
+ * "Apply Now", which the generic list does not match. Re-detecting with
+ * "generic" on recruiting.ultipro.com therefore found nothing (#1019 Park Place
+ * Technologies, 2026-11-11) while an Apply control sat on the page.
+ *
+ * A landing host that is not a known ATS leaves boundary.ats as the row's own
+ * board, so it still resolves to "generic".
+ *
+ * Exported for the guardrail tests.
+ */
+function hopApplyAts(rowAts, boundary) {
+  const derived = isNavigationBoundary(boundary) ? String(boundary.ats || "") : "";
+  return derived && derived !== rowAts ? derived : "generic";
 }
 
 /**
@@ -8614,7 +8679,16 @@ async function processJob(browser, job, profile, runtime = {}) {
     // an empty form.
     if (!applyNavigation.blocked && onExternalAts(navBoundary)
         && !(await pageHasOneStepApplicationForm(page))) {
-      const retry = await detectAndClickApply(page, "generic", navBoundary, finalGuard);
+      // The hop has pinned the employer's own ATS when the landing host is one
+      // we know (navigateAllowed re-points the boundary and the page's allowlists
+      // follow it). UltiPro's own control is "Apply Now", which the generic set
+      // does not carry, so re-detecting with "generic" on recruiting.ultipro.com
+      // found nothing at all and the run recorded "no Apply button found for
+      // generic" on a page that had one (#1019 Park Place Technologies,
+      // 2026-11-11). An unrecognised corporate careers site still gets the
+      // generic set, which is why this is conditional rather than the boundary's
+      // value outright.
+      const retry = await detectAndClickApply(page, hopApplyAts(ats, navBoundary), navBoundary, finalGuard);
       if (retry.clicked) applyNavigation = retry;
     }
     // Opening the form is racy: the trigger may only scroll to a lazily
@@ -8633,8 +8707,24 @@ async function processJob(browser, job, profile, runtime = {}) {
         surfaceReady = await waitForApplicationSurface(page, 12000);
         if (surfaceReady) break;
         console.log(`  [form-open] attempt ${attempt}: form not rendered, re-triggering Apply`);
-        const again = await detectAndClickApply(page, onExternalAts(navBoundary) ? "generic" : ats, navBoundary, finalGuard);
-        if (again.blocked) break;
+        const again = await detectAndClickApply(page, onExternalAts(navBoundary) ? hopApplyAts(ats, navBoundary) : ats, navBoundary, finalGuard);
+        if (again.blocked) {
+          // A re-trigger that is refused because the click went to a candidate
+          // sign-in is an account gate, not a broken form. UltiPro walks
+          // Account/Login -> signin-us.ultipro.com/u/login; the guard refuses to
+          // interact with that page and kept the destination on the boundary.
+          // Discarding the result here is what made the account-gate branch below
+          // unreachable and parked #1019 Park Place Technologies in NeedsReview
+          // with "no clickable final Submit" (2026-11-11).
+          let wallHost = "";
+          try { wallHost = new URL(page.url()).hostname; } catch { wallHost = ""; }
+          if (isAccountGate(ats, isAuthWallHost(wallHost))) {
+            console.log(`  [account-gate] ${wallHost} wants a candidate account before any form — recording board-blocked`);
+            if (!sharedCtx) await context.close();
+            return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
+          }
+          break;
+        }
         // The re-trigger can land on the same dialog rather than the form.
         await dismissApplyInterstitial(page);
       }
@@ -8652,6 +8742,20 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
     }
     if (applyNavigation.blocked) {
+      // An account gate is not a broken form. UKG Pro Recruiting sends the
+      // posting's "Apply now" to signin-us.ultipro.com/u/login, so there is no
+      // form to fill until the candidate registers - and the same is true of
+      // Workday and TalentRecruit. Recording "no Submit button found" describes
+      // a wall as a bug and parks the row in NeedsReview, where it is re-run and
+      // fails the same way; the board simply cannot be used unattended.
+      const refusedHost = (() => {
+        try { return new URL(navBoundary?.blockedNavigation || "").hostname; } catch { return ""; }
+      })();
+      if (isAuthWallHost(refusedHost)) {
+        console.log(`  [account-gate] ${refusedHost} wants a candidate account before the form — recording board-blocked`);
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
+      }
       if (!sharedCtx) await context.close();
       const action = ["send-paused", "claim-blocked", "claim-lost"].includes(applyNavigation.reason)
         ? applyNavigation.reason
@@ -8682,6 +8786,21 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
       await page.waitForTimeout(2500);
       if (!isCurrentPageTrusted(page.url(), ats, navBoundary)) {
+        // A candidate sign-in is not an untrusted page, it is an account gate.
+        // UltiPro's "Apply now" walks Account/Login -> AuthCode/Login ->
+        // signin-us.ultipro.com/u/login; the hop is cross-origin, so the trust
+        // check refuses it and the row was recorded needs-verification ("page is
+        // not a trusted HTTPS origin") on a board that simply wants a candidate
+        // account (#1019 Park Place Technologies, 2026-11-11). Nothing was
+        // submitted there, and no form exists behind that wall, so the honest
+        // outcome is board-blocked.
+        let landedHost = "";
+        try { landedHost = new URL(page.url()).hostname; } catch { landedHost = ""; }
+        if (isAccountGate(ats, isAuthWallHost(landedHost))) {
+          console.log(`  [account-gate] ${landedHost} wants a candidate account before any form — recording board-blocked`);
+          if (!sharedCtx) await context.close();
+          return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
+        }
         if (!sharedCtx) await context.close();
         return { company: job.company, title: job.title, link: url, ats, action: "needs-verification", pdf: resumePdf };
       }
@@ -10960,6 +11079,8 @@ export {
   stipendFigure,
   isMisclickDeparture,
   navigationLanding,
+  hopApplyAts,
+  isAccountGate,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
