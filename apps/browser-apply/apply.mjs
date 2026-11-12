@@ -6174,6 +6174,30 @@ async function clickFinalControl(page, locator, label, options = {}) {
  * always present once the captcha is allowed to load. A visible checkbox or
  * Turnstile widget is a real stop.
  */
+/**
+ * Whether a vendor captcha frame is actually asking a human to do something.
+ *
+ * Ashby gates submit with reCAPTCHA Enterprise, whose frames carry no `size`
+ * hint and whose bframe URL is `.../enterprise/bframe?...`, so the URL alone
+ * read as a human challenge and every Ashby application stopped there for 180 s
+ * and was recorded needs-review. Measured #473 (sarvam, 2026-11-12) on the open
+ * form: the anchor frame's whole body is "protected by reCAPTCHA", the bframe's
+ * body is empty, there is no `.recaptcha-checkbox`, and both iframes compute to
+ * invisible. Nothing a person could act on.
+ *
+ * The frame's own words are the honest signal - a checkbox or an image grid
+ * says a person, a "protected by" badge says nobody.
+ *
+ * Returns null when the frame cannot be read, so the caller can fall back to the
+ * URL instead of assuming either way.
+ */
+function vendorFrameChallengesHuman(text) {
+  if (text === null || text === undefined) return null;
+  const body = String(text).replace(/\s+/g, " ").trim();
+  return /not a robot|select all|verify you are human|complete the captcha|images? (?:with|containing)|click verify|press and hold|puzzle/i
+    .test(body);
+}
+
 function isInteractiveChallengeUrl(frameUrl) {
   const src = String(frameUrl || "").toLowerCase();
   if (!/recaptcha|hcaptcha|turnstile|challenges\.|arkoselabs/.test(src)) return false;
@@ -6256,7 +6280,17 @@ async function hasCaptcha(page) {
       // unreadable-frame check so its cross-origin body cannot trip a fail-closed.
       const frameUrl = (() => { try { return frame.url(); } catch { return ""; } })();
       if (/recaptcha|hcaptcha|turnstile|arkoselabs/i.test(String(frameUrl))) {
-        if (isInteractiveChallengeUrl(frameUrl)) return true;
+        // The URL is not enough: reCAPTCHA Enterprise's bframe carries no `size`
+        // hint even when the widget is score-based and invisible, so every Ashby
+        // application waited 180 s here for a challenge nobody could see (#473
+        // sarvam, 2026-11-12 — anchor body "protected by reCAPTCHA", empty
+        // bframe, no checkbox). Ask the frame what it is showing.
+        const vendorBody = await frame.locator("body").innerText().catch(() => null);
+        const asksHuman = vendorFrameChallengesHuman(vendorBody);
+        if (asksHuman === true) return true;
+        // Unreadable and no `size=invisible`: the URL is the only evidence left,
+        // so fail closed rather than assume the widget is passive.
+        if (asksHuman === null && isInteractiveChallengeUrl(frameUrl)) return true;
         continue;
       }
       const frameHit = await frame.locator("body").innerText().catch(() => null);
@@ -11193,6 +11227,7 @@ export {
   hopApplyAts,
   isAccountGate,
   wellfoundSendConfirmed,
+  vendorFrameChallengesHuman,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,

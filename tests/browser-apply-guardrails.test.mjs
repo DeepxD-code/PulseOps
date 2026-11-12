@@ -3587,3 +3587,27 @@ test("a Wellfound toast in the future tense is still a submission", async () => 
   assert.equal(wellfoundSendConfirmed("", true), false);
   assert.equal(wellfoundSendConfirmed("Apply now", true), false);
 });
+test("a passive reCAPTCHA Enterprise badge is not a human challenge", async () => {
+  // Ashby gates submit with reCAPTCHA Enterprise, whose frames carry no `size`
+  // hint, so the URL alone read as a challenge and every Ashby application
+  // stopped for 180 s and landed NeedsReview. Measured #473 sarvam 2026-11-12:
+  // the anchor frame's body is exactly "protected by reCAPTCHA", the bframe's is
+  // empty, there is no checkbox, and both iframes compute to invisible.
+  const { vendorFrameChallengesHuman } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(vendorFrameChallengesHuman("protected by reCAPTCHA"), false);
+  assert.equal(vendorFrameChallengesHuman(""), false);
+  assert.equal(vendorFrameChallengesHuman("   "), false);
+  assert.equal(vendorFrameChallengesHuman("reCAPTCHA"), false);
+
+  // A real challenge is a person's job, whatever the URL says.
+  assert.equal(vendorFrameChallengesHuman("I'm not a robot"), true);
+  assert.equal(vendorFrameChallengesHuman("Select all images with traffic lights"), true);
+  assert.equal(vendorFrameChallengesHuman("Please verify you are human"), true);
+  assert.equal(vendorFrameChallengesHuman("Complete the captcha to continue"), true);
+
+  // Unreadable is not a verdict: the caller falls back to the URL and fails
+  // closed rather than guessing the widget is passive.
+  assert.equal(vendorFrameChallengesHuman(null), null);
+  assert.equal(vendorFrameChallengesHuman(undefined), null);
+});
