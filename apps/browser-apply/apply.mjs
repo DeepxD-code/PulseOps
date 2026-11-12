@@ -636,7 +636,21 @@ const ATS_TRUSTED_REQUEST_HOSTS = Object.freeze({
   // That refusal was this guard breaking the vendor's CAPTCHA, not Ashby
   // detecting automation. The vendor allowlist lives in CAPTCHA_VENDOR_REQUESTS
   // and is consulted for every ATS, so no per-ATS copy is needed here.
-}); 
+  // UKG Pro Recruiting fetches its own design system at runtime rather than
+  // shipping it in the bundle: the ignite manifest, web components and the
+  // localisation strings behind every label all arrive as `fetch` GETs from
+  // ignite.cdn.ultipro.com. The asset allowance above is keyed on the script and
+  // stylesheet resource types, so those reads were still blocked and the
+  // component set never upgraded - the posting rendered, but no Apply control
+  // ever appeared and the run recorded "no Submit button detected" (#1019 Park
+  // Place Technologies, measured 2026-11-11). Read-only, GET/HEAD only, and
+  // scoped to the design-system prefix the page actually asks for. Served from
+  // the same CDN as the ultipro runtime above; the host is not guessable from
+  // the page, so there is nothing wider to grant.
+  ultipro: [
+    { host: "ignite.cdn.ultipro.com", pathPrefix: "/dls-cdn/", types: ["xhr", "fetch", "other"] },
+  ],
+});
 
     // Google's reCAPTCHA endpoints, whichever ATS is in play.
 //
@@ -4246,6 +4260,32 @@ function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EX
   return true;
 }
 
+/**
+ * Where a navigation actually landed, or "" when it never left.
+ *
+ * `page.goto` throws on a 30-second timeout even when the browser has already
+ * arrived somewhere else, because LinkedIn's outbound Apply is
+ * /safety/go?url=<employer ATS> and its 303 leaves the original navigation
+ * promise pending while the employer's document renders (measured #1019 Park
+ * Place Technologies, 2026-11-11). So after a timeout the landing is read from
+ * the page rather than from the threw-or-not.
+ *
+ * Only a *failed* goto that still shows the exact URL asked for means the
+ * navigation did not complete; there is then nothing new to approve, and
+ * treating the redirector URL as a destination would pin trust to it. A goto
+ * that returned normally is on its target whenever the page has no redirect,
+ * which is the ordinary case for every posting URL.
+ *
+ * Exported for the guardrail tests: this decides whether an arrived-at
+ * application page is kept or the row is recorded redirect-blocked.
+ */
+function navigationLanding(target, landedUrl, gotoFailed = false) {
+  const landed = String(landedUrl || "");
+  if (!landed) return "";
+  if (!gotoFailed) return landed;
+  return landed === String(target || "") ? "" : landed;
+}
+
 async function navigateAllowed(page, target, ats, originUrl) {
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
@@ -4262,28 +4302,43 @@ async function navigateAllowed(page, target, ats, originUrl) {
     }
     console.log("    [shortener] resolving a short link from a trusted Apply control");
   }
+  let gotoError = null;
   try {
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
   } catch (e) {
-    console.log(`    [redirect-block] navigation failed: ${String(e).slice(0, 100)}`);
-    return false;
+    // A timed-out goto is not evidence that the click went nowhere. LinkedIn's
+    // outbound Apply is /safety/go?url=<employer ATS>, which answers 303 to the
+    // employer's host; the browser follows it while the original navigation
+    // promise stays pending, so page.goto throws "Timeout 30000ms exceeded" with
+    // the employer's own form already rendered in the window. Measured on #1019
+    // Park Place Technologies 2026-11-11: the ultipro document was fetched (200)
+    // and the row was still recorded redirect-blocked.
+    //
+    // So the decision is made on where the page actually is, below. The error is
+    // kept only for the case where that landing is refused too.
+    gotoError = e;
   }
-  if (!isAllowedNavigationUrl(page.url(), ats, boundary)) {
-    if (tryPinExternalApplyOrigin(boundary, page.url(), ats)) {
+  let landed = "";
+  try { landed = page.url(); } catch { landed = ""; }
+  landed = navigationLanding(target, landed, !!gotoError);
+  if (!landed || !isAllowedNavigationUrl(landed, ats, boundary)) {
+    if (tryPinExternalApplyOrigin(boundary, landed, ats)) {
       // The off-site host is the page that will be filled from now on, so its
       // vendor allowlists apply to it. Leaving the row's ATS in place here was
       // the other half of the #143 failure: the guard pinned Greenhouse while
       // still holding a LinkedIn allowlist, so Greenhouse's own runtime was
       // refused and the form stayed inert.
-      const derived = inferATS(page.url());
+      const derived = inferATS(landed);
       if (derived && derived !== "generic") boundary.ats = derived;
-      console.log(`    [external-apply] approved off-site apply host → ${canonicalHost(parseHttpUrl(page.url()).hostname)}`);
+      console.log(`    [external-apply] approved off-site apply host → ${canonicalHost(parseHttpUrl(landed).hostname)}`);
       return true;
     }
-    console.log(`    [redirect-block] landed on ${page.url()}`);
+    console.log(gotoError
+      ? `    [redirect-block] navigation failed: ${String(gotoError).slice(0, 100)}`
+      : `    [redirect-block] landed on ${landed || page.url()}`);
     return false;
   }
-  pinNavigationOrigin(boundary, page.url());
+  pinNavigationOrigin(boundary, landed);
   return true;
 }
 
@@ -10904,6 +10959,7 @@ export {
   yearsRequirement,
   stipendFigure,
   isMisclickDeparture,
+  navigationLanding,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,

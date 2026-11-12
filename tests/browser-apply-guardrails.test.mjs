@@ -3440,3 +3440,72 @@ test("an approved off-site hop is not a misclick, a sticky-nav jump is", async (
   // Only LinkedIn has this recovery at all.
   assert.equal(isMisclickDeparture("wellfound", "wellfound", "/mynetwork"), false);
 });
+
+test("UltiPro's design-system reads are allowed, and only read-only", async () => {
+  // #1019 (Park Place Technologies) reached recruiting.ultipro.com and then sat
+  // on a page whose Apply control never rendered: the ignite manifest, the web
+  // components and the en-US strings behind every label are fetched at runtime,
+  // and the asset allowance is keyed on script/stylesheet, not fetch.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://ignite.cdn.ultipro.com/dls-cdn/ignite/latest/timestamp.json", "fetch", "GET", "ultipro",
+    ),
+    true,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://ignite.cdn.ultipro.com/dls-cdn/ignite/latest/web-components/ignite/localization/translations/ukg/ukg.en-US.json",
+      "fetch", "GET", "ultipro",
+    ),
+    true,
+  );
+  // The allowance is read-only and prefix-scoped.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://ignite.cdn.ultipro.com/dls-cdn/ignite/latest/timestamp.json", "fetch", "POST", "ultipro",
+    ),
+    false,
+  );
+  assert.equal(
+    isAllowedReadOnlyApiRequest("https://ignite.cdn.ultipro.com/other/path.json", "fetch", "GET", "ultipro"),
+    false,
+  );
+  // And it is UltiPro's allowance, not everyone's.
+  assert.equal(
+    isAllowedReadOnlyApiRequest(
+      "https://ignite.cdn.ultipro.com/dls-cdn/ignite/latest/timestamp.json", "fetch", "GET", "greenhouse",
+    ),
+    false,
+  );
+});
+
+test("a goto that timed out after the browser arrived still counts as arrived", async () => {
+  // #1019: LinkedIn's /safety/go?url=<employer ATS> answered 303 to ultipro and
+  // page.goto threw "Timeout 30000ms exceeded" anyway, with the employer's page
+  // already rendered. The row died because the timeout was read as "did not go
+  // anywhere".
+  const { navigationLanding } = await import("../apps/browser-apply/apply.mjs");
+
+  const target = "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Frecruiting%2Eultipro%2Ecom%2FPAR1035PPTL";
+  assert.equal(
+    navigationLanding(target, "https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/e104/OpportunityDetail"),
+    "https://recruiting.ultipro.com/PAR1035PPTL/JobBoard/e104/OpportunityDetail",
+  );
+
+  // Still on the redirector after a failed goto means the navigation never
+  // completed, so nothing new may be approved (pinning it would trust the
+  // shortener instead of the ATS).
+  assert.equal(navigationLanding(target, target, true), "");
+  assert.equal(navigationLanding(target, "", true), "");
+  assert.equal(navigationLanding(target, null, true), "");
+});
+test("a plain navigation lands on its own URL; a timed-out one does not", async () => {
+  // The distinction matters both ways: a posting URL with no redirect must count
+  // as arrived (every ordinary job page does this), while a timed-out goto still
+  // sitting on the redirector must not.
+  const { navigationLanding } = await import("../apps/browser-apply/apply.mjs");
+  const job = "https://www.linkedin.com/jobs/view/4477101779/";
+  assert.equal(navigationLanding(job, job, false), job);
+  assert.equal(navigationLanding(job, job, true), "");
+  assert.equal(navigationLanding(job, "", false), "");
+});
