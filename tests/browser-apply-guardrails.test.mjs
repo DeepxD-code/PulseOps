@@ -3564,3 +3564,23 @@ test("an account gate is board-blocked on gated ATSes only", async () => {
   assert.equal(isAccountGate("naukri", true), false);
   assert.equal(isAccountGate(undefined, true), false);
 });
+test("a Wellfound toast in the future tense is still a submission", async () => {
+  // #1137 Viaduct 2026-11-12: the modal closed, the toast read "Your application
+  // to Viaduct will be sent in a few minutes. Undo - 4:54", the graphql POST had
+  // gone out - and the row was recorded needs-verification because only the past
+  // tense was recognised.
+  const { wellfoundSendConfirmed } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(
+    wellfoundSendConfirmed("Your application to Viaduct will be sent in a few minutes. Undo · 4:54", true),
+    true,
+  );
+  assert.equal(wellfoundSendConfirmed("Message sent", true), true);
+  assert.equal(wellfoundSendConfirmed("Application submitted successfully", true), true);
+
+  // A modal still on screen is not a submission, whatever the page says behind
+  // it: the same text can be in the listing's own copy.
+  assert.equal(wellfoundSendConfirmed("Your application to Viaduct will be sent in a few minutes.", false), false);
+  assert.equal(wellfoundSendConfirmed("", true), false);
+  assert.equal(wellfoundSendConfirmed("Apply now", true), false);
+});

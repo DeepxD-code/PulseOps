@@ -4280,6 +4280,32 @@ function isAccountGate(ats, landedOnWall) {
   return Boolean(landedOnWall) && ACCOUNT_GATED_ATS.has(String(ats || "").toLowerCase());
 }
 
+/**
+ * Whether a YC / Wellfound outreach modal was actually submitted.
+ *
+ * Both boards close the modal and leave a receipt behind, but they word it
+ * differently and Wellfound uses the future tense:
+ *
+ *   YC         "Message sent"
+ *   Wellfound  "Your application to Viaduct will be sent in a few minutes.
+ *               Undo · 4:54"
+ *
+ * Only the past tense was recognised, so a completed submission was recorded
+ * needs-verification - measured #1137 Viaduct 2026-11-12, where the modal had
+ * closed, the toast was on screen, and the graphql POST had already gone out.
+ * The undo window makes that toast a receipt rather than a promise.
+ *
+ * A modal that is still open is never a submission, whatever the page says
+ * behind it.
+ *
+ * Exported for the guardrail tests.
+ */
+function wellfoundSendConfirmed(bodyText, modalGone) {
+  if (!modalGone) return false;
+  return /message sent|application sent|will be sent|your application to|we'll be in touch|thanks for reaching out|successfully applied|application submitted/i
+    .test(String(bodyText || ""));
+}
+
 function tryPinExternalApplyOrigin(boundary, landingUrl, ats, enabled = ALLOW_EXTERNAL_APPLY) {
   if (!enabled) return false;
   if (!isNavigationBoundary(boundary)) return false;
@@ -7983,8 +8009,25 @@ async function hasHiristAppliedBadge(page) {
 }
 
 async function hasVisibleAppliedBadge(page) {  const pageHit = await page.evaluate(() => {
-    const statusText = /^(applied|already applied|application submitted|application sent|you applied)$/i;
-    const statusAria = /^(applied|already applied|application submitted|application sent|you applied)/i;
+    const statusText = (raw) => {
+      // "✓ Applied" is how Wellfound marks a posting the candidate has already
+      // submitted (#1137 Viaduct 2026-11-12: the page's own control read
+      // "✓ Applied" and the row was still re-opened, re-filled and recorded
+      // needs-review). The tick is a decoration on the same word, so leading
+      // ticks and whitespace are stripped before the exact match.
+      const text = String(raw || "").replace(/\s+/g, " ").trim().replace(/^[\u2713\u2714\u2705\s]+/, "");
+      return /^(applied|already applied|application submitted|application sent|you applied)$/i.test(text);
+    };
+    // A tick marks the posting's own action row; a search result's status chip is
+    // the bare word. The distinction is what lets the tick override the
+    // many-job-links guard below without trusting a chip from another posting.
+    const tickedStatus = (raw) => {
+      const text = String(raw || "").replace(/\s+/g, " ").trim();
+      return /^[\u2713\u2714\u2705]/.test(text) && statusText(text);
+    };
+    // An aria-label may add a sentence after the status ("Applied on 12 Nov"), so
+    // it is matched on its prefix rather than exactly.
+    const statusAria = (raw) => statusText(String(raw || "").split(/[.\u00b7|]/)[0]);
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
@@ -7999,9 +8042,10 @@ async function hasVisibleAppliedBadge(page) {  const pageHit = await page.evalua
     const jobLinks = [...document.querySelectorAll('a[href*="/jobs/"], a[href*="/role/"], a[href*="/company/"]')]
       .filter(visible).length;
     const multiJob = jobLinks > 1;
-    if (multiJob && !strong) return false;
-    if (!multiJob && nodes.some((el) => visible(el) && statusText.test((el.innerText || el.textContent || "").trim().replace(/\s+/g, " ")))) return true;
-    return strong || nodes.some((el) => visible(el) && statusAria.test((el.getAttribute("aria-label") || "").trim()));
+    const ticked = nodes.some((el) => visible(el) && tickedStatus(el.innerText || el.textContent));
+    if (multiJob && !strong && !ticked) return false;
+    if (nodes.some((el) => visible(el) && statusText(el.innerText || el.textContent))) return true;
+    return strong || nodes.some((el) => visible(el) && statusAria(el.getAttribute("aria-label")));
   }).catch(() => false);
   if (pageHit) return true;
   for (const frame of page.frames?.() || []) {
@@ -9183,7 +9227,7 @@ async function processJob(browser, job, profile, runtime = {}) {
             [...document.querySelectorAll("textarea")].length === 0
           ).catch(() => false);
           const serverApplied = await hasVisibleAppliedBadge(page);
-          const ycDone = serverApplied || (modalGone && /message sent|application sent|we'll be in touch|thanks for reaching out|successfully/i.test(postSend));
+          const ycDone = serverApplied || wellfoundSendConfirmed(postSend, modalGone);
           console.log(`  [yc] post-send check: done=${ycDone} modalGone=${modalGone} :: ${postSend.slice(0, 180)}`);
           await page.screenshot({ path: screenshotPath.replace("preview", "yc-final"), fullPage: false }).catch(() => {});
           if (!sharedCtx) await context.close();
@@ -11081,6 +11125,7 @@ export {
   navigationLanding,
   hopApplyAts,
   isAccountGate,
+  wellfoundSendConfirmed,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
