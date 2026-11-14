@@ -3630,3 +3630,38 @@ test("a 404 or 410 posting document is a dead listing, a refusal is not", async 
   assert.equal(isGoneDocumentStatus(0), false);
   assert.equal(isGoneDocumentStatus(null), false);
 });
+test("a Wellfound posting whose own header names a non-India remote scope is ineligible", async () => {
+  // #1110 Speak 2026-11-14, read from the public posting in a separate browser:
+  //   Backend Engineer $150k - $280k | Remote ( United States ) | San Francisco
+  //   Hires remotely in United States
+  //   Visa Sponsorship Not Available
+  // The modal said nothing, disabled Send, and the row was recorded NeedsReview
+  // on a role no India-based candidate can apply to.
+  const { postingRemoteOutsideIndia } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(
+    postingRemoteOutsideIndia("Save Apply Now Backend Engineer $150k | Remote ( United States ) | San Francisco | Full Time"),
+    "United States",
+  );
+  assert.equal(
+    postingRemoteOutsideIndia("Hires remotely in United States Visa Sponsorship Not Available"),
+    "United States",
+  );
+  assert.equal(postingRemoteOutsideIndia("Remote ( Canada )"), "Canada");
+  assert.equal(postingRemoteOutsideIndia("Remote ( EMEA )"), "EMEA");
+
+  // India, worldwide and silence are all in scope and must stay in the queue.
+  assert.equal(postingRemoteOutsideIndia("Remote ( India )"), "");
+  assert.equal(postingRemoteOutsideIndia("Remote ( Worldwide )"), "");
+  assert.equal(postingRemoteOutsideIndia("Remote ( Anywhere )"), "");
+  assert.equal(postingRemoteOutsideIndia("Hires remotely in India"), "");
+  assert.equal(postingRemoteOutsideIndia("Backend Engineer Remote Full Time"), "");
+  assert.equal(postingRemoteOutsideIndia(""), "");
+
+  // A region the list does not recognise is not a verdict either.
+  assert.equal(postingRemoteOutsideIndia("Remote ( Narnia )"), "");
+
+  // The sidebar names other postings' regions; only the header counts.
+  const far = "Backend Engineer Remote Full Time " + "x".repeat(2100) + " More jobs Remote ( United States )";
+  assert.equal(postingRemoteOutsideIndia(far), "");
+});

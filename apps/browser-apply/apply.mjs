@@ -6232,6 +6232,60 @@ function isGoneDocumentStatus(status) {
   return code === 404 || code === 410;
 }
 
+/**
+ * Whether a Wellfound posting states, in its own words, that it is remote only
+ * within somewhere other than India.
+ *
+ * The board enforces geography at submit: it disables "Send application" and,
+ * on some listings, says why in the modal ("Accountable is not accepting
+ * applications from your current location due to timezone overlap"). Those the
+ * engine already records as location-ineligible. Others say nothing in the modal
+ * and put the region on the posting instead:
+ *
+ *   Backend Engineer  $150k – $280k | Remote ( United States ) • San Francisco
+ *   Hires remotely in United States
+ *   Visa Sponsorship Not Available
+ *
+ * Measured #1110 (Speak, 2026-11-14) in a browser where the same posting is
+ * public: three sibling rows that day were Skipped only because the board
+ * happened to word its refusal in the modal, and this one was recorded
+ * NeedsReview on a role no India-based candidate can apply to.
+ *
+ * Only the posting's own header text is read, only for the board whose wording
+ * was measured, and only a recognised non-India region blocks. "India",
+ * "worldwide" or no stated region at all leave the row alone - blank location is
+ * where the productive half of this queue lives.
+ *
+ * Returns the matched region string, or "" when there is nothing to act on.
+ */
+function postingRemoteOutsideIndia(pageText) {
+  const body = String(pageText || "").replace(/\s+/g, " ");
+  if (!body) return "";
+  // The posting header sits at the top; scanning the whole page would pick up
+  // the "More jobs" sidebar, where other postings name their own regions.
+  const header = body.slice(0, 2000);
+  const claims = [];
+  for (const re of [
+    /Remote\s*\(\s*([^)]{2,70}?)\s*\)/gi,
+    /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/gi,
+  ]) {
+    const m = re.exec(header);
+    if (!m) continue;
+    // The free-text capture runs on into the next badge ("Hires remotely in
+    // United States Visa Sponsorship Not Available"), so cut it at the first
+    // word that starts a different fact.
+    claims.push(String(m[1] || "")
+      .split(/\b(?:Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
+      .trim());
+  }
+  if (!claims.length) return "";
+  const region = [...new Set(claims)].join("; ");
+  if (/india|worldwide|anywhere|global|world-wide|apac|asia\b/i.test(region)) return "";
+  const named = /united states|u\.?\s?s\.?\s?a\b|canada|americas?|latin america|emea|europe|european union|united kingdom|\buk\b|germany|france|netherlands|spain|poland|portugal|ireland|sweden|denmark|norway|finland|switzerland|singapore|japan|korea|china|australia|new zealand|brazil|mexico|argentina|colombia|chile|israel|uae|dubai|saudi|qatar|africa|nigeria|kenya|south africa|middle east|turkey|pakistan|bangladesh|sri lanka/i
+    .test(region);
+  return named ? region.slice(0, 80) : "";
+}
+
 function isBotVerificationWall(text) {
   const body = String(text || "");
   if (!body) return false;
@@ -8757,6 +8811,21 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
 
+    // A posting that states a remote scope outside India cannot be applied to
+    // from here, whatever the modal does or does not say.
+    if (ats === "wellfound") {
+      const postingText = await page.evaluate(() => (document.body?.innerText || "")).catch(() => "");
+      const remoteRegion = postingRemoteOutsideIndia(postingText);
+      if (remoteRegion) {
+        console.log(`  [location-ineligible] the posting's own remote scope is "${remoteRegion}" — not an India-based role`);
+        if (!sharedCtx) await context.close();
+        return {
+          company: job.company, title: job.title, link: url, ats,
+          action: "location-ineligible", reason: `remote scope: ${remoteRegion}`, pdf: resumePdf,
+        };
+      }
+    }
+
     // A board that refuses automated browsers never paints the posting. Waiting
     // for a form that cannot arrive, and then recording "no Submit button
     // found", describes a broken form rather than the refusal that happened.
@@ -11263,6 +11332,7 @@ export {
   wellfoundSendConfirmed,
   vendorFrameChallengesHuman,
   isGoneDocumentStatus,
+  postingRemoteOutsideIndia,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
