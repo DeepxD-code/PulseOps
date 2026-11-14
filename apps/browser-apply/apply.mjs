@@ -4505,13 +4505,25 @@ async function navigateAllowed(page, target, ats, originUrl) {
  * recruiting.ultipro.com) recorded redirect-blocked on 2026-11-11 with the
  * approved host already open in front of it.
  *
+ * The re-pointed ATS alone is not enough to tell them apart. `boundary.ats` only
+ * moves when inferATS can name the landing host, and a corporate careers site
+ * is `generic`: #1036, #1370, #1371, #1374, #1388, #1390 and #1394 (ALPRESI,
+ * 2026-11-15) logged `[external-apply] approved off-site apply host →
+ * alpresiresearch.com` and were still recorded as misclicks, because the
+ * boundary's ATS stayed "linkedin". So the caller passes the applier's own
+ * approval record - boundary.externalApplyHost, set only by
+ * tryPinExternalApplyOrigin - and any approved hop is a handoff.
+ *
  * Exported for the guardrail tests: this decides whether a real application
  * page is thrown away.
  */
-function isMisclickDeparture(ats, boundaryAts, landedPath) {
+function isMisclickDeparture(ats, boundaryAts, landedPath, externalApplyApproved = false) {
   if (ats !== "linkedin" || !landedPath) return false;
-  // An approved off-site hop re-points the boundary; the departure was the
-  // handoff and the page in front of us is the employer's own form.
+  // An approved off-site hop is the handoff, and the page in front of us is the
+  // employer's own form.
+  if (externalApplyApproved) return false;
+  // Still honoured: a hop onto a host we can name re-points the ATS, and older
+  // callers rely on that alone.
   if (boundaryAts && boundaryAts !== ats) return false;
   return !/^\/(?:jobs|apply|preload|talent)\b/i.test(landedPath);
 }
@@ -8742,6 +8754,20 @@ async function processJob(browser, job, profile, runtime = {}) {
       } catch { /* a dead response object is not worth a warning */ }
     });
   }
+  // Whether Cloudflare's challenge machinery was served at all. A 403 document
+  // with a challenge behind it is a wall; a bare 403 is a refusal that may be
+  // transient and stays in the queue.
+  let challengeSeen = false;
+  if (typeof page.on === "function") {
+    page.on("request", (request) => {
+      try {
+        const href = String(request.url?.() || "");
+        if (/\/cdn-cgi\/(?:challenge-platform|challenge)\/|challenges\.cloudflare\.com/i.test(href)) {
+          challengeSeen = true;
+        }
+      } catch { /* same */ }
+    });
+  }
   // The ATS names its own upload target in a presigned-attributes response.
   // Record that host so the CV upload is not blocked, and nothing else is.
   const uploadHosts = new Set();
@@ -8950,6 +8976,20 @@ async function processJob(browser, job, profile, runtime = {}) {
     // actual disappearance of the challenge; a timeout or stale marker returns
     // captcha-blocked and can never fall through to Apply/Submit.
     if (await hasCaptcha(page)) {
+      // Cloudflare's managed challenge on a posting that answered 403 is a wall,
+      // not a puzzle: measured #233-#249 (Glassdoor India, 2026-11-15), every
+      // navigation answered `403 GET document`, the same-origin
+      // /cdn-cgi/challenge-platform/ script ran, and the challenge never cleared
+      // in 180 s - on MySQL-fresh visits for eight rows. Himalayas behaves the
+      // same way and it is the IP, not the browser: a clean headless Chromium
+      // and a Rust stealth browser both stayed on "Just a moment...". Waiting
+      // three minutes per row to record captcha-blocked describes a handoff a
+      // human could complete, and there is nothing here for a human to complete.
+      if (documentStatus === 403 && challengeSeen) {
+        console.log("  [board-blocked] the posting answered 403 behind a Cloudflare challenge — no session can pass this");
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
+      }
       console.log(`  [captcha] CAPTCHA/Challenge detected — waiting for verification to disappear`);
       if (!HEADED) console.log("    (run with --headed to solve manually)");
       await page.screenshot({ path: path.join(ROOT, `output/apply-${String(job.company || "job").replace(/\W/g,"_")}-captcha.png`), fullPage: true }).catch(()=>{});
@@ -8978,7 +9018,7 @@ async function processJob(browser, job, profile, runtime = {}) {
     if (ats === "linkedin" && !DRY_RUN && !applyNavigation.blocked && postingUrl) {
       let landed = "";
       try { landed = new URL(page.url()).pathname; } catch { landed = ""; }
-      if (isMisclickDeparture(ats, navBoundary?.ats, landed)) {
+      if (isMisclickDeparture(ats, navBoundary?.ats, landed, onExternalAts(navBoundary))) {
         console.log(`  [misclick] Apply click left the posting for ${landed} — returning to it`);
         await page.goto(postingUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
         await page.waitForTimeout(2000);
@@ -11447,6 +11487,7 @@ export {
   isMisclickDeparture,
   navigationLanding,
   hopApplyAts,
+  onExternalAts,
   isAccountGate,
   wellfoundSendConfirmed,
   vendorFrameChallengesHuman,

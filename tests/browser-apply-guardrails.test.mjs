@@ -3439,6 +3439,32 @@ test("an approved off-site hop is not a misclick, a sticky-nav jump is", async (
   assert.equal(isMisclickDeparture("linkedin", "linkedin", ""), false);
   // Only LinkedIn has this recovery at all.
   assert.equal(isMisclickDeparture("wellfound", "wellfound", "/mynetwork"), false);
+
+  // An approved hop onto a host inferATS cannot name leaves the boundary's ATS
+  // as the row's board, so the approval flag is what has to be honoured.
+  // Measured #1036/#1370/#1371/#1374/#1388/#1390/#1394 (ALPRESI, 2026-11-15):
+  // "approved off-site apply host → alpresiresearch.com", then
+  // "[misclick] … returning to it", then redirect-blocked on LinkedIn.
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", "/careers/software-developer-intern/", true), false);
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", "/mynetwork", true), false);
+  // Without the approval, the same departure is still a swallowed click.
+  assert.equal(isMisclickDeparture("linkedin", "linkedin", "/careers/software-developer-intern/", false), true);
+});
+
+test("a pinned off-site hop is remembered as approved, whatever the landing host", async () => {
+  const { createNavigationBoundary, tryPinExternalApplyOrigin, onExternalAts } =
+    await import("../apps/browser-apply/apply.mjs");
+
+  const boundary = createNavigationBoundary("https://www.linkedin.com/jobs/view/4476283326/", "linkedin");
+  assert.equal(onExternalAts(boundary), false);
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://alpresiresearch.com/careers/software-developer-intern/", "linkedin", true), true);
+  // The approval is recorded by the pin itself, not inferred from a host we can
+  // name: ALPRESI's careers site is not an ATS, so boundary.ats stays "linkedin".
+  assert.equal(boundary.externalApplyHost, "alpresiresearch.com");
+  assert.equal(boundary.ats, "linkedin");
+  assert.equal(onExternalAts(boundary), true);
+  // A second hop is never granted, approved or not.
+  assert.equal(tryPinExternalApplyOrigin(boundary, "https://other.example/apply", "linkedin", true), false);
 });
 
 test("UltiPro's design-system reads are allowed, and only read-only", async () => {
