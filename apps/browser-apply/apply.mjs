@@ -513,36 +513,25 @@ const STRICT_ROLE_EXCLUDE_RES = STRICT_ROLE_EXCLUDES.map((marker) => {
 });
 
 /**
- * Whether a title is worth opening the posting for, when the stored description
- * is missing.
+ * The role gate.
  *
- * The role gate judges a generic title ("Software Engineer", "API Developer",
- * "Founding Engineer") on the posting body, so that "Research Engineer" at an
- * ML company is admitted and "Software Sales" is not. Measured 2026-11-14:
- * every India board but Instahyre stores no description at all - LinkedIn 0/113,
- * Himalayas 0/43, YC 0/25, Glassdoor India 0/19, Indeed India 0/15 - so that
- * branch had no body to read and ~55 engineering-looking India rows were refused
- * for the absence of evidence rather than the presence of a bad one.
+ * `scopeFromTitleOnly` answers "is the title worth opening the posting for?"
+ * when the stored description is missing.
  *
- * This answers only the title-level question: every exclusion, seniority and
- * generic-discipline rule still applies, and only a title that would otherwise
- * be decided by the body is admitted. The applier then reads the live posting
- * and runs the same check on it before anything is clicked.
+ * The gate judges a generic title ("Software Engineer", "Founding Engineer") on
+ * the posting body, on purpose, so "Research Engineer" at an ML company is
+ * admitted and "Software Sales" is not. Measured 2026-11-14: every India board
+ * but Instahyre stores no description at all - LinkedIn 0/113, Himalayas 0/43,
+ * YC 0/25, Glassdoor India 0/19, Indeed India 0/15 - so that branch had no body
+ * to read and ~55 engineering-looking India rows were refused for the absence of
+ * evidence rather than the presence of a bad one.
+ *
+ * With the flag, every exclusion, seniority and generic-discipline rule still
+ * applies; only a title that would otherwise be decided by the body is admitted,
+ * and the applier then runs the same check on the live posting before it clicks
+ * anything. It widens what is examined, not what is submitted.
  */
-function isProvisionallyInScopeTitle(title) {
-  const source = String(title || "").trim().replace(/\s+/g, " ");
-  const raw = cleanTitle(source) || source;
-  const value = raw.toLowerCase();
-  if (!value) return false;
-  if (STRICT_ROLE_EXCLUDE_RES.some((pattern) => pattern.test(value))) return false;
-  if (SENIORITY_DENY.test(value) && !INTERN_MODIFIER.test(value)) return false;
-  if (STRICT_ROLE_GENERIC_DENY.test(roleBasis(raw) || value)) return false;
-  if (STRICT_ROLE_ALLOWED.test(value)) return true;
-  if (ENTRY_LEVEL_MARKER.test(value) && ENGINEERING_NOUN.test(value)) return true;
-  return isGenericRoleTitle(raw);
-}
-
-function isStrictTargetRole(title, description = "") {
+function isStrictTargetRole(title, description = "", { scopeFromTitleOnly = false } = {}) {
   // roleBasis relies on capitalisation to strip a location glued onto the role
   // noun ("EngineerLondon"). Lower-casing first made every one of those rules
   // dead, so the raw title is normalised here and only then compared.
@@ -581,6 +570,9 @@ function isStrictTargetRole(title, description = "") {
 
   // Generic title: judge on the body rather than discarding the role.
   if (!isGenericRoleTitle(raw)) return false;
+  // The body is the missing evidence, not the verdict, and the applier will read
+  // the live posting before it clicks anything.
+  if (scopeFromTitleOnly) return true;
   const body = String(description || "");
   if (!body || descriptionIsFrontendOnly(body)) return false;
   return DESCRIPTION_ALLOWED.test(body);
@@ -2679,7 +2671,7 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
     // check to it before clicking anything - and refuse everyone else.
     const provisionally = SCOPE_FROM_POSTING
       && !String(storedDescription || "").trim()
-      && isProvisionallyInScopeTitle(job?.title);
+      && isStrictTargetRole(job?.title, "", { scopeFromTitleOnly: true });
     if (!provisionally) return false;
   }
   // Explicit --job-id runs may target high-score Evaluated OR Verified rows
@@ -8875,9 +8867,9 @@ async function processJob(browser, job, profile, runtime = {}) {
     }
 
     // A row whose source stored no description was admitted on its title alone
-    // (see isProvisionallyInScopeTitle). The posting it opened is the evidence
-    // that was missing, so run the same body check on it before spending a form
-    // on a role the gate would have refused. The text is read from <main> where
+    // (see isStrictTargetRole's scopeFromTitleOnly). The posting it opened is the
+    // evidence that was missing, so run the same body check on it before spending
+    // a form on a role the gate would have refused. The text is read from <main> where
     // the board has one, so a "similar jobs" sidebar cannot name a stack for a
     // posting that never mentions one.
     if (SCOPE_FROM_POSTING && !String(jobDescriptionFor(job) || "").trim()) {
@@ -11380,7 +11372,6 @@ export {
   isAllowedInitialJobUrl,
   isAllowedNavigationUrl,
   isStrictTargetRole,
-  isProvisionallyInScopeTitle,
   isAuthWallHost,
   isGoogleFormUrl,
   isSubmissionControlLabel,

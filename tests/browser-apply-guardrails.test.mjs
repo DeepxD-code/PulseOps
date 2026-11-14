@@ -3762,18 +3762,18 @@ test("a generic title with no stored description is judged at the posting", asyn
   // 2026-11-14), so ~55 engineering-looking rows were refused because the body
   // check had no body. They are admitted on the title now, and the applier runs
   // the same check on the live posting before it clicks anything.
-  const { isProvisionallyInScopeTitle, isStrictTargetRole, isEligibleJob } = await import("../apps/browser-apply/apply.mjs");
+  const { isStrictTargetRole, isEligibleJob } = await import("../apps/browser-apply/apply.mjs");
 
-  assert.equal(isProvisionallyInScopeTitle("Software Engineer"), true);
-  assert.equal(isProvisionallyInScopeTitle("Software Developer Intern"), true);
-  assert.equal(isProvisionallyInScopeTitle("Founding Engineer"), true);
+  assert.equal(isStrictTargetRole("Software Engineer", "", { scopeFromTitleOnly: true }), true);
+  assert.equal(isStrictTargetRole("Software Developer Intern", "", { scopeFromTitleOnly: true }), true);
+  assert.equal(isStrictTargetRole("Founding Engineer", "", { scopeFromTitleOnly: true }), true);
 
   // The title-level rules still decide, and they still refuse.
-  assert.equal(isProvisionallyInScopeTitle("Senior Backend Engineer"), false);
-  assert.equal(isProvisionallyInScopeTitle("Solutions Architect"), false);
-  assert.equal(isProvisionallyInScopeTitle("Security Engineer"), false);
-  assert.equal(isProvisionallyInScopeTitle("Marketing Intern"), false);
-  assert.equal(isProvisionallyInScopeTitle(""), false);
+  assert.equal(isStrictTargetRole("Senior Backend Engineer", "", { scopeFromTitleOnly: true }), false);
+  assert.equal(isStrictTargetRole("Solutions Architect", "", { scopeFromTitleOnly: true }), false);
+  assert.equal(isStrictTargetRole("Security Engineer", "", { scopeFromTitleOnly: true }), false);
+  assert.equal(isStrictTargetRole("Marketing Intern", "", { scopeFromTitleOnly: true }), false);
+  assert.equal(isStrictTargetRole("", "", { scopeFromTitleOnly: true }), false);
 
   // The row is admitted only while the description is missing; the moment one
   // exists and does not describe engineering work, the body check refuses it.
