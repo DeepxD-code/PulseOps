@@ -6285,7 +6285,7 @@ function postingRemoteOutsideIndia(pageText) {
   const factRow = /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/i.exec(body);
   if (factRow) {
     claims.push(String(factRow[1] || "")
-      .split(/\b(?:Remote work policy|Remote only|Company Location|Job Location|Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
+      .split(/\b(?:Remote work policy|Remote only|Company Location|Job Location|Job type|Employment type|Experience|Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
       .trim());
   }
   if (!claims.length) return "";

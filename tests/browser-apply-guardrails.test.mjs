@@ -3689,6 +3689,10 @@ test("the signed-in posting's fact row decides the remote scope", async () => {
   assert.equal(postingRemoteOutsideIndia("Hires remotely in Canada Remote only"), "Canada");
   assert.equal(postingRemoteOutsideIndia("Hires remotely in India Remote work policy Remote only"), "");
 
+  // #1110/#1112/#1134 measured 2026-11-14 read back as "United States Job type":
+  // the next badge after the fact row was "Job type", not "Visa Sponsorship".
+  assert.equal(postingRemoteOutsideIndia("Hires remotely in United States Job type Full Time"), "United States");
+
   // A description that merely quotes the parenthesised form is not the title
   // line, and the sidebar comes after the description.
   const prose = "Backend Engineer Remote Full Time About the job " + "x".repeat(1200) + " More jobs Remote ( United States )";
