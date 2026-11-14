@@ -6261,21 +6261,31 @@ function isGoneDocumentStatus(status) {
 function postingRemoteOutsideIndia(pageText) {
   const body = String(pageText || "").replace(/\s+/g, " ");
   if (!body) return "";
-  // The posting header sits at the top; scanning the whole page would pick up
-  // the "More jobs" sidebar, where other postings name their own regions.
-  const header = body.slice(0, 2000);
+  // Two page shapes, both measured 2026-11-14:
+  //
+  //   public posting      "… Backend Engineer $150k – $280k | Remote ( United
+  //                        States ) • San Francisco | Full Time"
+  //   signed-in posting   "… Hires remotely in United States Remote work policy
+  //                        Remote only Company Location Los Angeles"
+  //
+  // The signed-in page carries the candidate's own nav and a profile banner
+  // ahead of the posting and has no parenthesised region at all, so reading only
+  // a header slice found nothing and #1108/1110/1112/1134 stayed NeedsReview.
+  // But widening the whole read is wrong the other way: descriptions quote
+  // "Remote ( … )" in prose, and the "More jobs" sidebar names other postings'
+  // own regions. So the title-line form is read from the top of the page only,
+  // and the fact-row form - which is distinctive wording no prose uses - is read
+  // anywhere.
   const claims = [];
-  for (const re of [
-    /Remote\s*\(\s*([^)]{2,70}?)\s*\)/gi,
-    /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/gi,
-  ]) {
-    const m = re.exec(header);
-    if (!m) continue;
-    // The free-text capture runs on into the next badge ("Hires remotely in
-    // United States Visa Sponsorship Not Available"), so cut it at the first
-    // word that starts a different fact.
-    claims.push(String(m[1] || "")
-      .split(/\b(?:Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
+  const titleLine = /Remote\s*\(\s*([^)]{2,70}?)\s*\)/i.exec(body.slice(0, 800));
+  if (titleLine) claims.push(String(titleLine[1] || "").trim());
+  // The fact-row capture runs on into the next badge ("Hires remotely in United
+  // States Visa Sponsorship Not Available"), so cut it at the first word that
+  // starts a different fact.
+  const factRow = /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/i.exec(body);
+  if (factRow) {
+    claims.push(String(factRow[1] || "")
+      .split(/\b(?:Remote work policy|Remote only|Company Location|Job Location|Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
       .trim());
   }
   if (!claims.length) return "";
@@ -9327,25 +9337,38 @@ async function processJob(browser, job, profile, runtime = {}) {
           for (let i = 0; i < Math.min(visibleCount, 3); i++) {
             const area = areas.nth(i);
             const text = answers[keys[i]] || "";
-            try {
-              await area.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
-              await area.click({ timeout: 8000 });
-              await area.fill(text, { timeout: 8000 });
-            } catch (e) {
-              // Fallback: JS focus + value set + input events (modals/overlays)
-              await page.evaluate(([idx, val]) => {
-                const t = [...document.querySelectorAll("textarea")]
-                  .filter((el) => el.getClientRects().length > 0)[idx];
-                if (!t) return;
-                t.scrollIntoView({ block: "center" });
-                t.focus();
-                document.execCommand("selectAll", false, null);
-                document.execCommand("insertText", false, val);
-                t.dispatchEvent(new Event("input", { bubbles: true }));
-                t.dispatchEvent(new Event("change", { bubbles: true }));
-              }, [i, text]).catch(() => {});
+            let gotLen = 0;
+            // Three attempts, because the modal is a controlled React component:
+            // the first input event can rebuild the note block, so the node that
+            // took the text is replaced and reads back empty. #1112 (Monte Carlo,
+            // 2026-11-14) wrote 467 and 468 characters into two textareas and
+            // read back [0,0], then refused the Send for incomplete answers.
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                await area.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+                await area.click({ timeout: 8000 });
+                await area.fill(text, { timeout: 8000 });
+              } catch (e) {
+                // Fallback: JS focus + value set + input events (modals/overlays)
+                await page.evaluate(([idx, val]) => {
+                  const t = [...document.querySelectorAll("textarea")]
+                    .filter((el) => el.getClientRects().length > 0)[idx];
+                  if (!t) return;
+                  t.scrollIntoView({ block: "center" });
+                  t.focus();
+                  document.execCommand("selectAll", false, null);
+                  document.execCommand("insertText", false, val);
+                  t.dispatchEvent(new Event("input", { bubbles: true }));
+                  t.dispatchEvent(new Event("change", { bubbles: true }));
+                }, [i, text]).catch(() => {});
+              }
+              gotLen = (await area.inputValue().catch(() => "")).length;
+              // A note that the board's own minimum accepts is done. The gate
+              // later requires 50 characters, so anything under that is a
+              // failed write whatever the target length was.
+              if (gotLen >= Math.min(text.length, 50)) break;
+              await page.waitForTimeout(500);
             }
-            const gotLen = (await area.inputValue().catch(() => "")).length;
             console.log(`  [yc] textarea ${i + 1}: target ${text.length} chars, actual ${gotLen}`);
           }
           await page.waitForTimeout(1500);

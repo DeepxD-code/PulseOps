@@ -3662,6 +3662,35 @@ test("a Wellfound posting whose own header names a non-India remote scope is ine
   assert.equal(postingRemoteOutsideIndia("Remote ( Narnia )"), "");
 
   // The sidebar names other postings' regions; only the header counts.
-  const far = "Backend Engineer Remote Full Time " + "x".repeat(2100) + " More jobs Remote ( United States )";
+  const far = "Backend Engineer Remote Full Time About the job " + "x".repeat(2100) + " More jobs Remote ( United States )";
   assert.equal(postingRemoteOutsideIndia(far), "");
+});
+test("the signed-in posting's fact row decides the remote scope", async () => {
+  // #1108 Astra 2026-11-14, read from the signed-in Edge page: no parenthesised
+  // region anywhere and no "About the job" heading - the scope is a fact row,
+  // "Hires remotely in United States Remote work policy Remote only Company
+  // Location Los Angeles, San Francisco", roughly 5000 characters in behind the
+  // candidate's own nav and the description.
+  const { postingRemoteOutsideIndia } = await import("../apps/browser-apply/apply.mjs");
+  const signedIn =
+    "Ready to interview Home Profile Jobs Applied Messages DiscoverStartups"
+    + "Astra Astra Actively Hiring The Instant Payments API 11-50 Employees B2B Early Stage"
+    + " Share Follow Overview People Culture and benefits Funding Jobs 6"
+    + " Backend Engineer at Astra $125k – $160k RECRUITER RECENTLY ACTIVE POSTED 3 WEEKS AGO"
+    + " Save Apply About Astra Astra is building mission-critical infrastructure for moving money at scale. "
+    + "We are a remote-first company and our engineers work from wherever they are. ".repeat(45)
+    + "Apply now Hires remotely in United States Remote work policy Remote only"
+    + " Company Location Los Angeles, San Francisco";
+  assert.equal(postingRemoteOutsideIndia(signedIn), "United States");
+
+  // The same row ends and the sidebar starts: other postings' regions are not
+  // this posting's scope. Cut at the badge that follows the fact row.
+  assert.equal(postingRemoteOutsideIndia("Hires remotely in United States Visa Sponsorship Not Available"), "United States");
+  assert.equal(postingRemoteOutsideIndia("Hires remotely in Canada Remote only"), "Canada");
+  assert.equal(postingRemoteOutsideIndia("Hires remotely in India Remote work policy Remote only"), "");
+
+  // A description that merely quotes the parenthesised form is not the title
+  // line, and the sidebar comes after the description.
+  const prose = "Backend Engineer Remote Full Time About the job " + "x".repeat(1200) + " More jobs Remote ( United States )";
+  assert.equal(postingRemoteOutsideIndia(prose), "");
 });
