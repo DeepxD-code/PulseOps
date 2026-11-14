@@ -3732,3 +3732,27 @@ test("an on-site posting's own Job Location decides eligibility", async () => {
   assert.equal(postingRemoteOutsideIndia("Job Location Remote Work Policy Remote only"), "");
   assert.equal(postingRemoteOutsideIndia("Job Location Bengaluru Visa Sponsorship Not Available"), "");
 });
+
+test("the document title carries the place on a posting that renders none", async () => {
+  // #499 measured 2026-11-14 in the signed-in browser: no "Job Location", no
+  // "Hires remotely", no place anywhere in the body - only the title said
+  // "System Software Engineer - AI at Delos Data • Palo Alto | Wellfound".
+  const { postingRemoteOutsideIndia } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(postingRemoteOutsideIndia("", "System Software Engineer - AI at Delos Data • Palo Alto | Wellfound"), "Palo Alto");
+  assert.equal(postingRemoteOutsideIndia("", "Founding Machine Learning Engineer at Arcade.dev • San Francisco | Wellfound"), "San Francisco");
+  assert.equal(postingRemoteOutsideIndia("", "AI Applied Engineer-Python at Talent Kettle • New York City | Wellfound"), "New York City");
+
+  // "Remote (Work from Home)" in the title is a work mode, not a place: it must
+  // not cancel the city next to it, and on its own it is not a verdict.
+  assert.equal(postingRemoteOutsideIndia("", "Backend Engineer at Speak • San Francisco • Remote (Work from Home) | Wellfound"), "San Francisco");
+  assert.equal(postingRemoteOutsideIndia("", "Machine Learning Engineer at Brave • Remote (Work from Home) | Wellfound"), "");
+
+  // A stated "Everywhere" in the body still wins over a place list (#1129).
+  assert.equal(
+    postingRemoteOutsideIndia("Machine Learning Engineer Remote ( Everywhere ) |Full Time", "Machine Learning Engineer at Jabali • Canada • Mexico • United States • Remote (Work from Home) | Wellfound"),
+    "",
+  );
+  assert.equal(postingRemoteOutsideIndia("", "Backend Engineer at X • India | Wellfound"), "");
+  assert.equal(postingRemoteOutsideIndia("", "Backend Engineer at X | Wellfound"), "");
+});

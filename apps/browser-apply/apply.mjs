@@ -6266,9 +6266,8 @@ function isGoneDocumentStatus(status) {
  *
  * Returns the matched place, or "" when there is nothing to act on.
  */
-function postingRemoteOutsideIndia(pageText) {
+function postingRemoteOutsideIndia(pageText, pageTitle = "") {
   const body = String(pageText || "").replace(/\s+/g, " ");
-  if (!body) return "";
   // Two page shapes, both measured 2026-11-14:
   //
   //   public posting      "… Backend Engineer $150k – $280k | Remote ( United
@@ -6300,6 +6299,17 @@ function postingRemoteOutsideIndia(pageText) {
   if (hiresRemotely) addFact(hiresRemotely[1]);
   const jobLocation = /Job Location\s+([A-Za-z .,/&'•-]{2,90})/i.exec(body);
   if (jobLocation) addFact(jobLocation[1]);
+  // An on-site posting renders no place in the page at all - #499 measured
+  // 2026-11-14 as "System Software Engineer - AI at Delos Data $140k – $220k
+  // POSTED 1 MONTH AGO Save Apply", with "Palo Alto" only in the document title.
+  // The title carries the places after the first "•" ("… at Delos Data •
+  // Palo Alto | Wellfound"), except that "Remote (Work from Home)" there is a
+  // work mode, not a place, and would otherwise cancel a real place.
+  for (const part of String(pageTitle || "").split("|")[0].split("•").slice(1)) {
+    const place = String(part || "").trim();
+    if (!place || /work\s*from\s*home/i.test(place)) continue;
+    claims.push(place);
+  }
   if (!claims.length) return "";
   const region = [...new Set(claims)].join("; ");
   if (/india|worldwide|world-wide|anywhere|everywhere|global|remote\b|apac|asia\b/i.test(region)) return "";
@@ -8837,8 +8847,11 @@ async function processJob(browser, job, profile, runtime = {}) {
     // job location - cannot be applied to from here, whatever the modal does or
     // does not say.
     if (ats === "wellfound") {
-      const postingText = await page.evaluate(() => (document.body?.innerText || "")).catch(() => "");
-      const outside = postingRemoteOutsideIndia(postingText);
+      const posting = await page.evaluate(() => ({
+        text: document.body?.innerText || "",
+        title: document.title || "",
+      })).catch(() => ({ text: "", title: "" }));
+      const outside = postingRemoteOutsideIndia(posting.text, posting.title);
       if (outside) {
         console.log(`  [location-ineligible] the posting is located "${outside}" - not an India-based role`);
         if (!sharedCtx) await context.close();
