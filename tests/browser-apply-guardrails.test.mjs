@@ -3756,3 +3756,33 @@ test("the document title carries the place on a posting that renders none", asyn
   assert.equal(postingRemoteOutsideIndia("", "Backend Engineer at X • India | Wellfound"), "");
   assert.equal(postingRemoteOutsideIndia("", "Backend Engineer at X | Wellfound"), "");
 });
+test("a generic title with no stored description is judged at the posting", async () => {
+  // Every India board but Instahyre stores no description (LinkedIn 0/113,
+  // Himalayas 0/43, YC 0/25, Glassdoor India 0/19, Indeed India 0/15 measured
+  // 2026-11-14), so ~55 engineering-looking rows were refused because the body
+  // check had no body. They are admitted on the title now, and the applier runs
+  // the same check on the live posting before it clicks anything.
+  const { isProvisionallyInScopeTitle, isStrictTargetRole, isEligibleJob } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(isProvisionallyInScopeTitle("Software Engineer"), true);
+  assert.equal(isProvisionallyInScopeTitle("Software Developer Intern"), true);
+  assert.equal(isProvisionallyInScopeTitle("Founding Engineer"), true);
+
+  // The title-level rules still decide, and they still refuse.
+  assert.equal(isProvisionallyInScopeTitle("Senior Backend Engineer"), false);
+  assert.equal(isProvisionallyInScopeTitle("Solutions Architect"), false);
+  assert.equal(isProvisionallyInScopeTitle("Security Engineer"), false);
+  assert.equal(isProvisionallyInScopeTitle("Marketing Intern"), false);
+  assert.equal(isProvisionallyInScopeTitle(""), false);
+
+  // The row is admitted only while the description is missing; the moment one
+  // exists and does not describe engineering work, the body check refuses it.
+  const row = {
+    id: 1, title: "Software Engineer", status: "Evaluated", score: 55,
+    link: "https://www.linkedin.com/jobs/view/1234567890",
+    source: "LinkedIn", job_id: 1, _send_paused: 0,
+  };
+  assert.equal(isEligibleJob({ ...row, job_description: "" }, { explicit: true }), true);
+  assert.equal(isEligibleJob({ ...row, job_description: "We are hiring a software sales representative to own outbound pipeline." }, { explicit: true }), false);
+  assert.equal(isEligibleJob({ ...row, job_description: "You will build backend services in Java and Spring Boot." }, { explicit: true }), true);
+});

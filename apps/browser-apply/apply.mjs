@@ -512,6 +512,36 @@ const STRICT_ROLE_EXCLUDE_RES = STRICT_ROLE_EXCLUDES.map((marker) => {
   return new RegExp(`(?<![a-z0-9])(?:${body}|${squeezed})(?![a-z0-9])`, "i");
 });
 
+/**
+ * Whether a title is worth opening the posting for, when the stored description
+ * is missing.
+ *
+ * The role gate judges a generic title ("Software Engineer", "API Developer",
+ * "Founding Engineer") on the posting body, so that "Research Engineer" at an
+ * ML company is admitted and "Software Sales" is not. Measured 2026-11-14:
+ * every India board but Instahyre stores no description at all - LinkedIn 0/113,
+ * Himalayas 0/43, YC 0/25, Glassdoor India 0/19, Indeed India 0/15 - so that
+ * branch had no body to read and ~55 engineering-looking India rows were refused
+ * for the absence of evidence rather than the presence of a bad one.
+ *
+ * This answers only the title-level question: every exclusion, seniority and
+ * generic-discipline rule still applies, and only a title that would otherwise
+ * be decided by the body is admitted. The applier then reads the live posting
+ * and runs the same check on it before anything is clicked.
+ */
+function isProvisionallyInScopeTitle(title) {
+  const source = String(title || "").trim().replace(/\s+/g, " ");
+  const raw = cleanTitle(source) || source;
+  const value = raw.toLowerCase();
+  if (!value) return false;
+  if (STRICT_ROLE_EXCLUDE_RES.some((pattern) => pattern.test(value))) return false;
+  if (SENIORITY_DENY.test(value) && !INTERN_MODIFIER.test(value)) return false;
+  if (STRICT_ROLE_GENERIC_DENY.test(roleBasis(raw) || value)) return false;
+  if (STRICT_ROLE_ALLOWED.test(value)) return true;
+  if (ENTRY_LEVEL_MARKER.test(value) && ENGINEERING_NOUN.test(value)) return true;
+  return isGenericRoleTitle(raw);
+}
+
 function isStrictTargetRole(title, description = "") {
   // roleBasis relies on capitalisation to strip a location glued onto the role
   // noun ("EngineerLondon"). Lower-casing first made every one of those rules
@@ -2639,7 +2669,19 @@ function isEligibleJob(job, { includeIndeed = INCLUDE_INDEED, explicit = false }
   const link = job?.link || job?.url || "";
   if (!link || !isAllowedInitialJobUrl(link)) return false;
   // Role scope is a hard gate, and it is checked FIRST.
-  if (!isStrictTargetRole(job?.title, jobDescriptionFor(job))) return false;
+  const storedDescription = jobDescriptionFor(job);
+  if (!isStrictTargetRole(job?.title, storedDescription)) {
+    // A source that never stored a description leaves the deciding evidence
+    // missing, not absent-by-verdict: LinkedIn 0/113, Himalayas 0/43, YC 0/25,
+    // Glassdoor India 0/19 and Indeed India 0/15 rows have no body at all, so a
+    // generic title failed a check it was never given the text for. Admit those
+    // provisionally - the applier reads the live posting and applies the same
+    // check to it before clicking anything - and refuse everyone else.
+    const provisionally = SCOPE_FROM_POSTING
+      && !String(storedDescription || "").trim()
+      && isProvisionallyInScopeTitle(job?.title);
+    if (!provisionally) return false;
+  }
   // Explicit --job-id runs may target high-score Evaluated OR Verified rows
   // (the pipeline marks email-channel-verified rows Verified; that says
   // nothing about whether the job page still accepts a browser application).
@@ -4221,8 +4263,16 @@ const ALLOW_EXTERNAL_APPLY = /^(?:1|true|yes|on)$/i.test(
   String(process.env.PULSEOPS_ALLOW_EXTERNAL_APPLY || "").trim(),
 );
 
-// Hosts that must never become an application target regardless of policy.
-// Shorteners are handled separately: they are legitimate when they merely
+// Whether a row with no stored description may be judged from the live posting
+// instead of refused for lack of evidence. On by default: the applier re-checks
+// the posting body before it clicks anything, so this widens what is *examined*,
+// not what is submitted. Set PULSEOPS_SCOPE_FROM_POSTING=0 to restore the strict
+// refusal.
+const SCOPE_FROM_POSTING = !/^(?:0|false|no|off)$/i.test(
+  String(process.env.PULSEOPS_SCOPE_FROM_POSTING || "").trim(),
+);
+
+// Hosts that must never become an application target regardless of policy.// Shorteners are handled separately: they are legitimate when they merely
 // forward to a real application page, so the *resolved* host is what matters.
 const EXTERNAL_APPLY_HOST_DENYLIST = /\b(?:pastebin\.com|discord\.gg|wa\.me|bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
 const URL_SHORTENER_HOST = /\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)\b/i;
@@ -8824,6 +8874,30 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "verified", verifiedBy: "server-badge", pdf: resumePdf };
     }
 
+    // A row whose source stored no description was admitted on its title alone
+    // (see isProvisionallyInScopeTitle). The posting it opened is the evidence
+    // that was missing, so run the same body check on it before spending a form
+    // on a role the gate would have refused. The text is read from <main> where
+    // the board has one, so a "similar jobs" sidebar cannot name a stack for a
+    // posting that never mentions one.
+    if (SCOPE_FROM_POSTING && !String(jobDescriptionFor(job) || "").trim()) {
+      const liveText = await page.evaluate(async () => {
+        const read = () => ((document.querySelector("main") || document.body)?.innerText || "");
+        // The boards that store no description are all client-rendered, so the
+        // page can answer with nav chrome for a second or two after load.
+        for (let waited = 0; waited < 10000 && read().length < 800; waited += 1000) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        return read().slice(0, 20000);
+      }).catch(() => "");
+      if (liveText && !isStrictTargetRole(job?.title, liveText)) {
+        console.log("  [out-of-scope] the posting's own text is not a backend/ML role — skipping");
+        if (!sharedCtx) await context.close();
+        return { company: job.company, title: job.title, link: url, ats, action: "out-of-scope-role", pdf: resumePdf };
+      }
+      console.log(`  [scope] no stored description; the posting body confirms an in-scope role (${liveText.length} chars)`);
+    }
+
     // Dead-listing guard: never attempt submits on 404/expired job pages
     const deadHit = await page.evaluate(() => {
       const t = (document.body?.innerText || "").slice(0, 2000);
@@ -10905,6 +10979,10 @@ function statusForBrowserResult(result) {
   // (a US-only onsite/remote role, said plainly in the modal). Retrying cannot
   // change that, and NeedsReview kept these rows coming back every run.
   if (action === "location-ineligible") return "Skipped";
+  // The stored description was missing and the posting itself turned out not to
+  // describe backend/ML work. Terminal for the same reason a title-level refusal
+  // is: the evidence is now in hand, and re-running reads the same page.
+  if (action === "out-of-scope-role") return "Skipped";
   // Blocked on a required question nobody has answered. Same terminal status as
   // an unconfirmed submission, but a different reason, so a retry gate can skip
   // it until an answer exists instead of re-filling the same form every run.
@@ -11302,6 +11380,7 @@ export {
   isAllowedInitialJobUrl,
   isAllowedNavigationUrl,
   isStrictTargetRole,
+  isProvisionallyInScopeTitle,
   isAuthWallHost,
   isGoogleFormUrl,
   isSubmissionControlLabel,
