@@ -3611,3 +3611,22 @@ test("a passive reCAPTCHA Enterprise badge is not a human challenge", async () =
   assert.equal(vendorFrameChallengesHuman(null), null);
   assert.equal(vendorFrameChallengesHuman(undefined), null);
 });
+test("a 404 or 410 posting document is a dead listing, a refusal is not", async () => {
+  // #393 deepgram 2026-11-14: Ashby answered the posting document with 404 and
+  // still rendered its own shell around it, so the page text carried nothing to
+  // match, 0 form fields appeared, and the row was recorded NeedsReview on a
+  // posting that no longer exists.
+  const { isGoneDocumentStatus } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(isGoneDocumentStatus(404), true);
+  assert.equal(isGoneDocumentStatus(410), true);
+  assert.equal(isGoneDocumentStatus("404"), true);
+
+  // A refusal is not a missing posting: the row stays in the queue.
+  assert.equal(isGoneDocumentStatus(403), false);
+  assert.equal(isGoneDocumentStatus(503), false);
+  assert.equal(isGoneDocumentStatus(429), false);
+  assert.equal(isGoneDocumentStatus(200), false);
+  assert.equal(isGoneDocumentStatus(0), false);
+  assert.equal(isGoneDocumentStatus(null), false);
+});

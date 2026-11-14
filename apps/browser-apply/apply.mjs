@@ -6221,6 +6221,17 @@ function isInteractiveChallengeUrl(frameUrl) {
  * headed window and is worth waiting for. This one is a refusal, so it is
  * recorded as Skipped and the row stops consuming batch slots.
  */
+/**
+ * Whether the posting document's own status says the listing is gone.
+ *
+ * Distinct from a refusal: 403/503 means the board will not show the page to
+ * this client, 404/410 means there is no page. Only the latter is a dead row.
+ */
+function isGoneDocumentStatus(status) {
+  const code = Number(status);
+  return code === 404 || code === 410;
+}
+
 function isBotVerificationWall(text) {
   const body = String(text || "");
   if (!body) return false;
@@ -8584,6 +8595,25 @@ async function processJob(browser, job, profile, runtime = {}) {
       try { if (frame === page.mainFrame()) visitedUrls.push(String(frame.url() || "")); } catch { /* gone */ }
     });
   }
+  // The posting document's HTTP status, kept for the dead-listing guard below.
+  //
+  // A board can answer a closed posting with 404 and still render its own
+  // application shell around it, so the page reads as a live (if empty) form
+  // and the text-based guard finds nothing to match. Measured #393 (deepgram,
+  // 2026-11-14): `404 GET document`, 0 form fields, "no Submit button detected",
+  // recorded NeedsReview on a posting that no longer exists. The status of the
+  // navigation is the board's own statement about the listing.
+  let documentStatus = 0;
+  if (typeof page.on === "function") {
+    page.on("response", (response) => {
+      try {
+        const request = response.request?.();
+        if (String(request?.resourceType?.() || "") !== "document") return;
+        if (!request?.isNavigationRequest?.()) return;
+        documentStatus = Number(response.status()) || 0;
+      } catch { /* a dead response object is not worth a warning */ }
+    });
+  }
   // The ATS names its own upload target in a presigned-attributes response.
   // Record that host so the CV upload is not blocked, and nothing else is.
   const uploadHosts = new Set();
@@ -8713,12 +8743,16 @@ async function processJob(browser, job, profile, runtime = {}) {
       const t = (document.body?.innerText || "").slice(0, 2000);
       return /404|page not found|unable to load the page|may not be valid|posting has been removed|job (?:posting )?(?:has been|was) removed|no longer exists|no longer available|no longer accepting applications|no longer open|job (?:you are trying to view )?(?:has |is |was )?expired|position (has been )?filled|this job is (?:no longer|closed)|job is closed|posting (?:has )?ended/i.test(t);
     }).catch(() => false);
-    const closedNotice = Boolean(deadHit) || await page.evaluate((closedSource) => {
+    const closedNotice = isGoneDocumentStatus(documentStatus) || Boolean(deadHit) || await page.evaluate((closedSource) => {
       const t = (document.body?.innerText || "").slice(0, 2000);
       return new RegExp(closedSource, "i").test(t);
     }, CLOSED_LISTING_TEXT.source).catch(() => false);
     if (closedNotice && !(await hasCaptcha(page))) {
-      console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
+      if (isGoneDocumentStatus(documentStatus)) {
+        console.log(`  [dead] the posting document answered ${documentStatus} — the listing is gone (mark for DB cleanup)`);
+      } else {
+        console.log("  [dead] job page is 404/expired — skipping (mark for DB cleanup)");
+      }
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
@@ -11228,6 +11262,7 @@ export {
   isAccountGate,
   wellfoundSendConfirmed,
   vendorFrameChallengesHuman,
+  isGoneDocumentStatus,
   persistBrowserResult,
   persistBrowserResults,
   pinNavigationOrigin,
