@@ -6233,30 +6233,38 @@ function isGoneDocumentStatus(status) {
 }
 
 /**
- * Whether a Wellfound posting states, in its own words, that it is remote only
- * within somewhere other than India.
+ * Whether a Wellfound posting states, in its own words, that it is somewhere
+ * other than India.
  *
  * The board enforces geography at submit: it disables "Send application" and,
  * on some listings, says why in the modal ("Accountable is not accepting
  * applications from your current location due to timezone overlap"). Those the
  * engine already records as location-ineligible. Others say nothing in the modal
- * and put the region on the posting instead:
+ * and put the place on the posting instead:
  *
  *   Backend Engineer  $150k – $280k | Remote ( United States ) • San Francisco
  *   Hires remotely in United States
  *   Visa Sponsorship Not Available
  *
- * Measured #1110 (Speak, 2026-11-14) in a browser where the same posting is
- * public: three sibling rows that day were Skipped only because the board
- * happened to word its refusal in the modal, and this one was recorded
- * NeedsReview on a role no India-based candidate can apply to.
+ * ...or, on an on-site role the scraper never located:
  *
- * Only the posting's own header text is read, only for the board whose wording
- * was measured, and only a recognised non-India region blocks. "India",
- * "worldwide" or no stated region at all leave the row alone - blank location is
- * where the productive half of this queue lives.
+ *   Job Location Palo Alto  Visa Sponsorship Not Available  Relocation Not Allowed
+ *   Job Location New York City  Remote Work Policy In office
  *
- * Returns the matched region string, or "" when there is nothing to act on.
+ * Measured 2026-11-14: #1110 (Speak) was recorded NeedsReview on a US-only role
+ * while three sibling rows were Skipped only because the board happened to word
+ * its refusal in the modal; #499 (Delos Data), #809 (Talent Kettle) and #822
+ * (Arcade.dev) sat in NeedsReview as on-site Palo Alto / New York / San
+ * Francisco roles the scraper had labelled "unknown/possible-remote".
+ *
+ * Only the posting's own words are read, only for the board whose wording was
+ * measured, and only a recognised non-India place blocks. A stated "India",
+ * "worldwide", "anywhere" or "everywhere" wins over a location list, because a
+ * row that names India is in scope whatever else it says. No place at all leaves
+ * the row alone - blank location is where the productive half of this queue
+ * lives.
+ *
+ * Returns the matched place, or "" when there is nothing to act on.
  */
 function postingRemoteOutsideIndia(pageText) {
   const body = String(pageText || "").replace(/\s+/g, " ");
@@ -6274,24 +6282,28 @@ function postingRemoteOutsideIndia(pageText) {
   // But widening the whole read is wrong the other way: descriptions quote
   // "Remote ( … )" in prose, and the "More jobs" sidebar names other postings'
   // own regions. So the title-line form is read from the top of the page only,
-  // and the fact-row form - which is distinctive wording no prose uses - is read
+  // and the fact-row forms - distinctive wording no prose uses - are read
   // anywhere.
+  //
+  // A fact row runs on into the next badge ("Hires remotely in United States
+  // Visa Sponsorship Not Available", "Job Location Palo Alto Visa Sponsorship"),
+  // so each capture is cut at the first word that starts a different fact.
+  const FACT_END = /\b(?:Remote work policy|Remote only|Company Location|Job Location|Job type|Employment type|Experience|Visa|Relocation|Equity|Salary|Skills|Hiring|Hires|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted|About the job|About us|About the company)\b|[|•\n]/i;
   const claims = [];
+  const addFact = (captured) => {
+    const value = String(captured || "").split(FACT_END)[0].trim();
+    if (value) claims.push(value);
+  };
   const titleLine = /Remote\s*\(\s*([^)]{2,70}?)\s*\)/i.exec(body.slice(0, 800));
   if (titleLine) claims.push(String(titleLine[1] || "").trim());
-  // The fact-row capture runs on into the next badge ("Hires remotely in United
-  // States Visa Sponsorship Not Available"), so cut it at the first word that
-  // starts a different fact.
-  const factRow = /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/i.exec(body);
-  if (factRow) {
-    claims.push(String(factRow[1] || "")
-      .split(/\b(?:Remote work policy|Remote only|Company Location|Job Location|Job type|Employment type|Experience|Visa|Relocation|Equity|Salary|Full[\s-]?Time|Part[\s-]?Time|Contract|Internship|Posted)\b|[|•\n]/i)[0]
-      .trim());
-  }
+  const hiresRemotely = /Hires remotely in\s+([A-Za-z ,/&.'-]{2,80})/i.exec(body);
+  if (hiresRemotely) addFact(hiresRemotely[1]);
+  const jobLocation = /Job Location\s+([A-Za-z .,/&'•-]{2,90})/i.exec(body);
+  if (jobLocation) addFact(jobLocation[1]);
   if (!claims.length) return "";
   const region = [...new Set(claims)].join("; ");
-  if (/india|worldwide|anywhere|global|world-wide|apac|asia\b/i.test(region)) return "";
-  const named = /united states|u\.?\s?s\.?\s?a\b|canada|americas?|latin america|emea|europe|european union|united kingdom|\buk\b|germany|france|netherlands|spain|poland|portugal|ireland|sweden|denmark|norway|finland|switzerland|singapore|japan|korea|china|australia|new zealand|brazil|mexico|argentina|colombia|chile|israel|uae|dubai|saudi|qatar|africa|nigeria|kenya|south africa|middle east|turkey|pakistan|bangladesh|sri lanka/i
+  if (/india|worldwide|world-wide|anywhere|everywhere|global|remote\b|apac|asia\b/i.test(region)) return "";
+  const named = /united states|u\.?\s?s\.?\s?a\b|canada|americas?|latin america|emea|europe|european union|united kingdom|\buk\b|germany|france|netherlands|spain|poland|portugal|ireland|sweden|denmark|norway|finland|switzerland|singapore|japan|korea|china|australia|new zealand|brazil|mexico|argentina|colombia|chile|israel|uae|dubai|saudi|qatar|africa|nigeria|kenya|south africa|middle east|turkey|pakistan|bangladesh|sri lanka|san francisco|new york|nyc|palo alto|mountain view|menlo park|seattle|redmond|austin|boston|cambridge|chicago|los angeles|san diego|san jose|denver|boulder|atlanta|miami|philadelphia|pittsburgh|portland|salt lake city|toronto|vancouver|montreal|london|dublin|berlin|munich|paris|amsterdam|stockholm|zurich|tel aviv|sydney|melbourne|tokyo|seoul/i
     .test(region);
   return named ? region.slice(0, 80) : "";
 }
@@ -8821,17 +8833,18 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "dead-link", pdf: resumePdf };
     }
 
-    // A posting that states a remote scope outside India cannot be applied to
-    // from here, whatever the modal does or does not say.
+    // A posting that states a place outside India - a remote scope or an on-site
+    // job location - cannot be applied to from here, whatever the modal does or
+    // does not say.
     if (ats === "wellfound") {
       const postingText = await page.evaluate(() => (document.body?.innerText || "")).catch(() => "");
-      const remoteRegion = postingRemoteOutsideIndia(postingText);
-      if (remoteRegion) {
-        console.log(`  [location-ineligible] the posting's own remote scope is "${remoteRegion}" — not an India-based role`);
+      const outside = postingRemoteOutsideIndia(postingText);
+      if (outside) {
+        console.log(`  [location-ineligible] the posting is located "${outside}" - not an India-based role`);
         if (!sharedCtx) await context.close();
         return {
           company: job.company, title: job.title, link: url, ats,
-          action: "location-ineligible", reason: `remote scope: ${remoteRegion}`, pdf: resumePdf,
+          action: "location-ineligible", reason: `location: ${outside}`, pdf: resumePdf,
         };
       }
     }

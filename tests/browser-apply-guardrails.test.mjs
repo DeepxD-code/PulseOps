@@ -3698,3 +3698,37 @@ test("the signed-in posting's fact row decides the remote scope", async () => {
   const prose = "Backend Engineer Remote Full Time About the job " + "x".repeat(1200) + " More jobs Remote ( United States )";
   assert.equal(postingRemoteOutsideIndia(prose), "");
 });
+
+test("an on-site posting's own Job Location decides eligibility", async () => {
+  // #499 (Delos Data), #809 (Talent Kettle) and #822 (Arcade.dev) measured
+  // 2026-11-14: no remote claim at all, and the scraper had no location, so all
+  // three sat in NeedsReview as "unknown/possible-remote" on-site US roles.
+  const { postingRemoteOutsideIndia } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(
+    postingRemoteOutsideIndia("Save Apply Now System Software Engineer - AI $140k | Palo Alto | Full Time Job Location Palo Alto Visa Sponsorship Not Available Relocation Not Allowed About the job"),
+    "Palo Alto",
+  );
+  assert.equal(
+    postingRemoteOutsideIndia("Job Location New York City Remote Work Policy In office Visa Sponsorship Not Available"),
+    "New York City",
+  );
+  assert.equal(
+    postingRemoteOutsideIndia("Job Location San Francisco Visa Sponsorship Not Available Relocation Not Allowed Hiring co"),
+    "San Francisco",
+  );
+
+  // #1126 Sardine: "Remote ( Canada +1 ) • United States", "Hires remotely in
+  // Canada - United States" - a non-India scope with no anywhere claim.
+  const sardine = postingRemoteOutsideIndia("Machine Learning Engineer $175k – $220k | Remote ( Canada +1 ) • United States | Full Time Job Location United States Hires remotely in Canada - United States Visa Spo");
+  assert.ok(/canada/i.test(sardine), `expected a Canada block, got ${JSON.stringify(sardine)}`);
+
+  // #1129 Jabali says "Remote ( Everywhere )" and also lists Canada/Mexico/US.
+  // A stated elsewhere-wins claim keeps the row in scope.
+  assert.equal(
+    postingRemoteOutsideIndia("Machine Learning Engineer Remote ( Everywhere ) • Canada +2 | Full Time Job Location Canada • Mexico • United States Remote Work Policy Onsite or rem"),
+    "",
+  );
+  assert.equal(postingRemoteOutsideIndia("Job Location Remote Work Policy Remote only"), "");
+  assert.equal(postingRemoteOutsideIndia("Job Location Bengaluru Visa Sponsorship Not Available"), "");
+});
