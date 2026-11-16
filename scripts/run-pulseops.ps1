@@ -210,7 +210,25 @@ try {
         Write-Log "browser_apply_exit=$applyExit"
     }
 
-    # -- 3. Push -------------------------------------------------------------
+    # -- 3. Email applications and replies ------------------------------------
+    # The browser applier queues the postings whose only application surface is
+    # an email address (output/email-apply-queue.jsonl); the sender sends them
+    # with the tailored resume attached. Without this step those rows sat in
+    # the queue forever.
+    $emailExit = 0
+    Write-Log "--- email applications: scripts/apply_by_email.py"
+    $emailExit = Invoke-Logged $python @("-u", "-X", "utf8", "scripts/apply_by_email.py")
+    Write-Log "email_apply_exit=$emailExit"
+
+    # Replies to the applications that were sent. The reply detector watches the
+    # cold-outreach addresses; a form application leaves no row there, so its
+    # answer was invisible until this watcher existed.
+    $replyExit = 0
+    Write-Log "--- application replies: scripts/watch_application_replies.py"
+    $replyExit = Invoke-Logged $python @("-u", "-X", "utf8", "scripts/watch_application_replies.py", "--apply")
+    Write-Log "reply_watch_exit=$replyExit"
+
+    # -- 4. Push -------------------------------------------------------------
     $pushExit = 0
     if (-not $NoPush) {
         $branch = (& git branch --show-current).Trim()

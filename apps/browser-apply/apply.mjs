@@ -4632,6 +4632,75 @@ async function navigateAllowed(page, target, ats, originUrl) {
  * Exported for the guardrail tests: this decides whether a real application
  * page is thrown away.
  */
+/**
+ * The place a posting names, as an ATS header prints it.
+ *
+ * The boards that store no description are read at the posting itself, and an
+ * ATS header puts the place in a structured field:
+ *
+ *   Software Engineer, Agent
+ *   Location London
+ *   Employment Type Full time
+ *   Location Type On-site
+ *
+ * So the field is read as a fact row - the value ends at the next fact word -
+ * and only a named foreign place counts. Measured on the Ashby postings the
+ * sweep reached on 2026-11-16: #359 San Francisco, #369 London, #373 London.
+ * Each was filled and submitted, and none of them can be applied to from
+ * Greater Noida, so every one of them was an application an employer did not
+ * want and the candidate could not use.
+ *
+ * "Remote", "On-site", "India", "Bengaluru, India" and "Remote - Worldwide"
+ * all read as places this candidate can take, so they never trip the rule: a
+ * role open to India is a role worth the form.
+ *
+ * Exported for the guardrail tests.
+ */
+function atsPostingLocationOutsideIndia(pageText) {
+  const text = String(pageText || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  // Only the header block: a fact row in the body is prose, and prose names
+  // cities for all sorts of reasons ("our offices in London and Bengaluru").
+  const head = text.slice(0, 1200);
+  const match = /\b(?:job\s+location|location)\s*[:\-]?\s+([A-Za-z][A-Za-z .,'/-]{1,45})/i.exec(head);
+  if (!match) return "";
+  let place = String(match[1] || "").trim();
+  // The value ends at the next fact field.
+  place = place.split(/\s+(?:employment\s+type|department|compensation|salary|workplace|job\s+type|location\s+type|remote|experience|about\s+the|company)\b/i)[0];
+  place = place.replace(/[.,;:'/]+$/, "").trim();
+  if (!place || place.length < 3) return "";
+  // An India signal anywhere in the header wins: a role that says "Bengaluru,
+  // India" or "Remote - Worldwide" is open to the candidate even when another
+  // line names a foreign office.
+  if (/india|worldwide|world-wide|anywhere|everywhere|global|apac|asia\b|remote\s*-?\s*home/i.test(head)) {
+    return "";
+  }
+  if (!FOREIGN_PLACE_RE.test(place)) return "";
+  return place.slice(0, 60);
+}
+
+/**
+ * The places that make a role unreachable from India.
+ *
+ * Shared by the board rule (postingRemoteOutsideIndia) and the ATS-header
+ * rule (atsPostingLocationOutsideIndia), so the two never disagree about what
+ * counts as a foreign place.
+ */
+const FOREIGN_PLACE_RE = new RegExp(
+  "united states|u\\.?\\s?s\\.?\\s?a\\b|canada|americas?|latin america|emea|europe|european union|"
+  + "united kingdom|\\buk\\b|germany|france|netherlands|spain|poland|portugal|ireland|sweden|denmark|"
+  + "norway|finland|switzerland|singapore|japan|korea|china|australia|new zealand|brazil|mexico|"
+  + "argentina|colombia|chile|israel|uae|dubai|saudi|qatar|africa|nigeria|kenya|south africa|"
+  + "middle east|turkey|pakistan|bangladesh|sri lanka|"
+  + "san francisco|new york|nyc|palo alto|mountain view|menlo park|seattle|redmond|austin|boston|"
+  + "cambridge|chicago|los angeles|san diego|san jose|denver|boulder|atlanta|miami|philadelphia|"
+  + "pittsburgh|portland|salt lake city|toronto|vancouver|montreal|london|dublin|berlin|munich|paris|"
+  + "amsterdam|stockholm|zurich|tel aviv|sydney|melbourne|tokyo|seoul|manchester|birmingham|"
+  + "edinburgh|glasgow|amsterdam|rotterdam|dublin|israel|tel aviv|hong kong|shanghai|beijing|"
+  + "shenzhen|taipei|sao paulo|buenos aires|santiago|montevideo|medell[ií]n|panama|lagos|nairobi",
+  "i",
+);
+
 function isMisclickDeparture(ats, boundaryAts, landedPath, externalApplyApproved = false) {
   if (ats !== "linkedin" || !landedPath) return false;
   // An approved off-site hop is the handoff, and the page in front of us is the
@@ -6504,8 +6573,7 @@ function postingRemoteOutsideIndia(pageText, pageTitle = "") {
   if (!claims.length) return "";
   const region = [...new Set(claims)].join("; ");
   if (/india|worldwide|world-wide|anywhere|everywhere|global|remote\b|apac|asia\b/i.test(region)) return "";
-  const named = /united states|u\.?\s?s\.?\s?a\b|canada|americas?|latin america|emea|europe|european union|united kingdom|\buk\b|germany|france|netherlands|spain|poland|portugal|ireland|sweden|denmark|norway|finland|switzerland|singapore|japan|korea|china|australia|new zealand|brazil|mexico|argentina|colombia|chile|israel|uae|dubai|saudi|qatar|africa|nigeria|kenya|south africa|middle east|turkey|pakistan|bangladesh|sri lanka|san francisco|new york|nyc|palo alto|mountain view|menlo park|seattle|redmond|austin|boston|cambridge|chicago|los angeles|san diego|san jose|denver|boulder|atlanta|miami|philadelphia|pittsburgh|portland|salt lake city|toronto|vancouver|montreal|london|dublin|berlin|munich|paris|amsterdam|stockholm|zurich|tel aviv|sydney|melbourne|tokyo|seoul/i
-    .test(region);
+  const named = FOREIGN_PLACE_RE.test(region);
   return named ? region.slice(0, 80) : "";
 }
 
@@ -9181,6 +9249,19 @@ async function processJob(browser, job, profile, runtime = {}) {
       }
     }
 
+    // The same rule for a posting that names its place in an ATS header, which
+    // is where the off-site forms put it:
+    //
+    //   Software Engineer, Agent
+    //   Location London
+    //   Employment Type Full time
+    //
+    // The board rule above reads a board's own layout and misses this shape
+    // entirely, so an off-site Ashby or Lever posting in London or San
+    // Francisco was filled, submitted and recorded as an application
+    // (measured #359, #369, #373 on 2026-11-16). The check runs on the page
+    // the form is on, below, once the form surface is up.
+
     // A board that refuses automated browsers never paints the posting. Waiting
     // for a form that cannot arrive, and then recording "no Submit button
     // found", describes a broken form rather than the refusal that happened.
@@ -9314,7 +9395,25 @@ async function processJob(browser, job, profile, runtime = {}) {
         // The re-trigger can land on the same dialog rather than the form.
         await dismissApplyInterstitial(page);
       }
-      if (surfaceReady) await fillCommonFields(page, ats, profile, job, navBoundary);
+      if (surfaceReady) {
+        // The place, read from the page the form is on. After an off-site hop
+        // this is the employer's ATS header, which is where the place actually
+        // is ("Location London / Employment Type Full time"). A role the
+        // candidate cannot take is not worth a form.
+        const headerText = await page.evaluate(() => (
+          (document.querySelector("main") || document.body)?.innerText || ""
+        )).catch(() => "");
+        const outside = atsPostingLocationOutsideIndia(headerText);
+        if (outside) {
+          console.log(`  [location-ineligible] the posting is located "${outside}" - not an India-based role`);
+          if (!sharedCtx) await context.close();
+          return {
+            company: job.company, title: job.title, link: url, ats,
+            action: "location-ineligible", reason: `location: ${outside}`, pdf: resumePdf,
+          };
+        }
+        await fillCommonFields(page, ats, profile, job, navBoundary);
+      }
     }
     // Some Hirist postings have no screening form at all: the Apply click is the
     // whole application and the board answers with /job/applied?jobId=<id>. The
@@ -11758,6 +11857,7 @@ export {
   hopApplyAts,
   onExternalAts,
   parseMailtoApply,
+  atsPostingLocationOutsideIndia,
   isAccountGate,
   wellfoundSendConfirmed,
   vendorFrameChallengesHuman,

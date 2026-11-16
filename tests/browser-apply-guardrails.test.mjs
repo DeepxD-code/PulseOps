@@ -3567,6 +3567,43 @@ test("a goto that timed out after the browser arrived still counts as arrived", 
   assert.equal(navigationLanding(target, "", true), "");
   assert.equal(navigationLanding(target, null, true), "");
 });
+test("an ATS header names the place, and a role abroad is not worth a form", async () => {
+  // #359, #369 and #373 (Ashby, 2026-11-16) were filled and submitted before
+  // anyone read the place: the header prints it as a fact row, not as prose.
+  const { atsPostingLocationOutsideIndia } = await import("../apps/browser-apply/apply.mjs");
+
+  assert.equal(
+    atsPostingLocationOutsideIndia(
+      "Software Engineer, Agent Location London Employment Type Full time Location Type On-site Department Engineering",
+    ),
+    "London",
+  );
+  assert.equal(
+    atsPostingLocationOutsideIndia(
+      "Software Engineer, Youth Well-Being Location San Francisco Employment Type Full time Department Applied AI",
+    ),
+    "San Francisco",
+  );
+
+  // A role open to the candidate is never refused.
+  assert.equal(
+    atsPostingLocationOutsideIndia("Backend Engineer Location Bengaluru, India Employment Type Full time"),
+    "",
+  );
+  assert.equal(atsPostingLocationOutsideIndia("Backend Engineer Location Remote Employment Type Full time"), "");
+  assert.equal(atsPostingLocationOutsideIndia("Backend Engineer Location Remote - Worldwide"), "");
+  // An India signal in the header wins even when another line names a foreign
+  // office: the company has two, the role is in one of them.
+  assert.equal(
+    atsPostingLocationOutsideIndia("Backend Engineer Location San Francisco Offices also in India Employment Type Full time"),
+    "",
+  );
+  // Nothing that reads as a place.
+  assert.equal(atsPostingLocationOutsideIndia("Software Engineer Location Type On-site Employment Type Full time"), "");
+  assert.equal(atsPostingLocationOutsideIndia("Backend Engineer Employment Type Full time"), "");
+  assert.equal(atsPostingLocationOutsideIndia(""), "");
+});
+
 test("a plain navigation lands on its own URL; a timed-out one does not", async () => {  // The distinction matters both ways: a posting URL with no redirect must count
   // as arrived (every ordinary job page does this), while a timed-out goto still
   // sitting on the redirector must not.
