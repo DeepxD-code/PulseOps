@@ -266,24 +266,37 @@ def classify_reply(sender: str, subject: str, body: str) -> str | None:
 def _job_for_reply(sender: str, subject: str, body: str) -> int | None:
     """Match a reply to the row it belongs to, when the evidence allows it.
 
-    Two ways, both narrow on purpose: the sender's domain is a company's own
-    domain and the row names that company, or the mail names a company that a
-    recent application names too. A wrong attachment would file a recruiter's
-    reply under an unrelated role, so a guess is worse than no guess.
+    Two ways, both narrow on purpose. The sender's domain is the company's own
+    domain ("hr@axonbloom.com" for a company named Axonbloom), or the mail
+    names the company as a whole word ("Akshora AI Labs").
+
+    The earlier version matched a cleaned-up blob, and that matched the wrong
+    rows: "CRED" was found inside "credential" and "Knowl" inside "knowledge",
+    so four replies were filed under unrelated roles. A company's name is a
+    word, not a fragment, and a domain is a domain, not a prefix of one.
     """
     domain = sender_address(sender).partition("@")[2]
-    blob = f"{subject} {body}".lower()
+    blob = f"{subject} {body}"
     rows = db.get_jobs_by_status(["Applied", "Verified", "NeedsVerification", "FollowupSent"], limit=800)
+    if not rows:
+        return None
+
+    # 1. The sender's own domain, label by label: hr@axonbloom.com for
+    #    Axonbloom, bishnudev@insiderone.in for insiderOne.
+    labels = [label for label in domain.split(".") if label]
     for row in rows:
-        company = str(row.get("company") or "").strip().lower()
-        if not company or company in {"unknown", "na", "none"}:
+        company = re.sub(r"[^a-z0-9]+", "", str(row.get("company") or "").lower())
+        if len(company) < 5:
             continue
-        slug = re.sub(r"[^a-z0-9]+", "", company)
-        if slug and len(slug) >= 4:
-            if slug in re.sub(r"[^a-z0-9]+", "", blob):
-                return int(row["id"])
-        company_domain = re.sub(r"[^a-z0-9]+", "", domain)
-        if company_domain and slug and company_domain.endswith(slug):
+        if any(label.lower() == company for label in labels[:-1]):
+            return int(row["id"])
+
+    # 2. The company's name, as a whole word in the mail.
+    for row in rows:
+        company = str(row.get("company") or "").strip()
+        if len(company) < 5 or company.lower() in {"unknown", "na", "none"}:
+            continue
+        if re.search(r"\b" + re.escape(company) + r"\b", blob, re.I):
             return int(row["id"])
     return None
 
