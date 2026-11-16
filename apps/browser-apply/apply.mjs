@@ -3297,6 +3297,15 @@ const ATS_SELECTORS = {
       'a:has-text("Apply now")',
       'a:has-text("Apply")',
       'button:has-text("Apply")',
+      // Some postings show LinkedIn's "I'm interested" instead of "Apply" -
+      // #1411 Crowe Capabilities Centre (2026-11-16) had Career paths,
+      // Working at Crowe, I'm interested and Similar Jobs, and the run
+      // recorded "no clickable final Submit found" on a page whose apply
+      // control was right there under another name.
+      'a:has-text("I\'m interested")',
+      'button:has-text("I\'m interested")',
+      'a:has-text("I am interested")',
+      'button:has-text("I am interested")',
     ],
     fields: {
       name: ['input[name="name"]'], email: ['input[type="email"]'], phone: ['input[type="tel"]'], resume: ['input[type="file"]'],
@@ -3461,6 +3470,43 @@ async function dismissConsentBanners(page) {
     if (!(await el.isVisible().catch(() => false))) continue;
     await el.click({ timeout: 4000 }).catch(() => {});
     console.log("    [consent-banner] dismissed a cookie notice to reach the form");
+    await page.waitForTimeout(500);
+    return true;
+  }
+  // A dialog whose buttons are simply "Accept" and "Decline" - Thales' career
+  // site (2026-11-16) puts one over the Apply control - is not on the list
+  // above, and a bare "Accept" is too broad a pattern to add there: it would
+  // also match "Accept terms", which is a legal agreement rather than a
+  // cookie notice.
+  //
+  // So the dialog is identified by what it says, not by what its button is
+  // called: a container that talks about cookies, consent or privacy AND
+  // offers an Accept or a Decline. Then "Accept" is taken when it is there,
+  // because that is what the existing rules already do on every other board
+  // ("Accept all"), and "Decline" is the fallback - declining a cookie notice
+  // consents to nothing.
+  const clicked = await page.evaluate(() => {
+    const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+    const containers = [...document.querySelectorAll("div,section,dialog,[role=dialog],[role=alertdialog]")]
+      .filter((el) => {
+        const text = norm(el.innerText);
+        if (!text || text.length > 1200) return false;
+        if (!/cookie|consent|privacy|gdpr|tracking/i.test(text)) return false;
+        const labels = [...el.querySelectorAll("button")].map((b) => norm(b.innerText));
+        return labels.some((l) => /^accept/i.test(l)) || labels.some((l) => /^(decline|reject)/i.test(l));
+      })
+      .sort((a, b) => norm(a.innerText).length - norm(b.innerText).length);
+    const dialog = containers[0];
+    if (!dialog) return "";
+    const buttons = [...dialog.querySelectorAll("button")];
+    const target = buttons.find((b) => /^accept/i.test(norm(b.innerText)))
+      || buttons.find((b) => /^(decline|reject)/i.test(norm(b.innerText)));
+    if (!target) return "";
+    target.click();
+    return norm(target.innerText);
+  }).catch(() => "");
+  if (clicked) {
+    console.log(`    [consent-banner] dismissed a cookie notice ("${clicked}") to reach the form`);
     await page.waitForTimeout(500);
     return true;
   }
