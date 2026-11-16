@@ -163,6 +163,13 @@ candidate:
     # named office, so they are answered only from these keys.
     internship_full_time_availability: 'Yes'
     office_location_availability: 'Yes'
+    # --- 2026-11-16: stated by the operator when Aspiremetrics asked for it
+    # with the internship reply (Pooja Sharma, 6 Nov 2026): college name,
+    # graduation year and available joining date. The first two are CV facts
+    # (KCC Institute of Technology & Management, Greater Noida; B.Tech
+    # 2023-2027, graduating 2027); the third is the operator's own statement
+    # and the only part that could not be read off the CV.
+    available_joining_date: 'Immediately'
 
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
