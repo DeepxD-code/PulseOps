@@ -354,6 +354,59 @@ def pace_llm_call() -> None:
     _last_call_ts = time.time()
 
 
+def generate_text(prompt: str, *, max_output_tokens: int = 900, temperature: float = 0.3) -> str:
+    """One plain-text Gemini completion, for prose that is not JSON.
+
+    The evaluator only ever asked for JSON, and its shared client, pacing and
+    transient-failure handling are worth reusing for the one other thing this
+    system writes in the candidate's own voice: the covering note that goes with
+    an email application. Nothing about retry classification changes here - a
+    daily quota still disables the engine, and a DNS blip or a 503 is still
+    retried - only the response format.
+
+    Raises on a terminal failure, so a caller never sends an empty body.
+    """
+    from google.genai import types
+
+    client = _gemini_client()
+    for attempt in range(4):
+        try:
+            pace_llm_call()
+            resp = client.models.generate_content(
+                model="gemini-flash-lite-latest",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                ),
+            )
+            text = str(getattr(resp, "text", "") or "").strip()
+            if text:
+                return text
+            raise RuntimeError("empty completion")
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if _is_daily_quota(msg):
+                    disable_engine("gemini", "daily quota exhausted")
+                    raise
+                if attempt < 3:
+                    wait = _retry_delay_seconds(msg, 4 * (2 ** attempt))
+                    print(f"  [Gemini] Rate-limited, retry in {wait}s…")
+                    time.sleep(wait)
+                    continue
+                raise
+            if _is_transient_network(msg) or _is_server_unavailable(msg) or "empty completion" in msg:
+                if attempt < 3:
+                    time.sleep(2 * (attempt + 1))
+                    print(f"  [Gemini] transient failure, retry {attempt + 1}/3…")
+                    continue
+                raise
+            raise
+    raise RuntimeError("Gemini exhausted retries")
+
+
+
 # ── Engine queries ────────────────────────────────────────────────────────────
 
 def _query_gemini(prompt: str) -> dict:

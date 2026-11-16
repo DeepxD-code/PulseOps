@@ -3467,6 +3467,48 @@ test("a pinned off-site hop is remembered as approved, whatever the landing host
   assert.equal(tryPinExternalApplyOrigin(boundary, "https://other.example/apply", "linkedin", true), false);
 });
 
+test("an email-only posting is an instruction, a footer address is not", async () => {
+  // #1036 ALPRESI Research (2026-11-15) has no application form at all: the whole
+  // surface is "Apply by email → mailto:careers@…?subject=Application: …". The run
+  // filled nothing, found no Submit and parked a live opening in NeedsReview.
+  const { parseMailtoApply } = await import("../apps/browser-apply/apply.mjs");
+
+  const applyLink = {
+    href: "mailto:careers@alpresiresearch.com?subject=Application:%20Software%20Developer%20Intern",
+    text: "Apply by email →",
+  };
+  assert.deepEqual(parseMailtoApply([applyLink], false), {
+    to: "careers@alpresiresearch.com",
+    subject: "Application: Software Developer Intern",
+    text: "Apply by email →",
+  });
+
+  // A page that carries a form is never diverted to email, whatever it links to.
+  assert.equal(parseMailtoApply([applyLink], true), null);
+
+  // One address on a form-less page is the application address even when the
+  // anchor says nothing useful.
+  assert.equal(parseMailtoApply([{ href: "mailto:hr@acme.example", text: "Contact" }], false).to, "hr@acme.example");
+  // Two of them, none saying "apply", is ambiguous: a footer contact block is
+  // exactly this shape and mailing a stranger is worse than leaving the row.
+  assert.equal(parseMailtoApply([
+    { href: "mailto:info@acme.example", text: "Contact" },
+    { href: "mailto:wecare@acme.example", text: "Careers: wecare@acme.example" },
+  ], false), null);
+  // An address that reads like an application wins over a footer one.
+  assert.equal(parseMailtoApply([
+    { href: "mailto:info@acme.example", text: "Contact" },
+    { href: "mailto:jobs@acme.example", text: "Send your CV" },
+  ], false).to, "jobs@acme.example");
+
+  // Nothing usable: no scheme, no address, or no links at all.
+  assert.equal(parseMailtoApply([{ href: "https://acme.example", text: "Apply" }], false), null);
+  assert.equal(parseMailtoApply([{ href: "mailto:", text: "Apply by email" }], false), null);
+  assert.equal(parseMailtoApply([{ href: "mailto:not-an-address", text: "Apply" }], false), null);
+  assert.equal(parseMailtoApply([], false), null);
+  assert.equal(parseMailtoApply(null, false), null);
+});
+
 test("UltiPro's design-system reads are allowed, and only read-only", async () => {
   // #1019 (Park Place Technologies) reached recruiting.ultipro.com and then sat
   // on a page whose Apply control never rendered: the ignite manifest, the web
@@ -3525,8 +3567,7 @@ test("a goto that timed out after the browser arrived still counts as arrived", 
   assert.equal(navigationLanding(target, "", true), "");
   assert.equal(navigationLanding(target, null, true), "");
 });
-test("a plain navigation lands on its own URL; a timed-out one does not", async () => {
-  // The distinction matters both ways: a posting URL with no redirect must count
+test("a plain navigation lands on its own URL; a timed-out one does not", async () => {  // The distinction matters both ways: a posting URL with no redirect must count
   // as arrived (every ordinary job page does this), while a timed-out goto still
   // sitting on the redirector must not.
   const { navigationLanding } = await import("../apps/browser-apply/apply.mjs");

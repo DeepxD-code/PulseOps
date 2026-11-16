@@ -615,6 +615,12 @@ const ATS_ASSET_HOSTS = Object.freeze({
 const VENDOR_ASSET_HOSTS = Object.freeze([
   "cdn.phenompeople.com",
   "cdn-bot.phenompeople.com",
+  // A Google Form serves its runtime from Google's own static CDN. Blocking
+  // those scripts leaves the form rendered but inert, which is the same failure
+  // as an unhydrated page: no submit control to click, so the row dies as
+  // "no clickable final Submit found".
+  "ssl.gstatic.com",
+  "www.gstatic.com",
 ]);
 const ASSET_RESOURCE_TYPES = new Set(["stylesheet", "script", "image", "font", "media", "other"]);
 // Static resources that cannot execute or read data, so a CDN origin is safe.
@@ -2219,7 +2225,7 @@ function identityFacts(candidate, stated, job = null, profile = null) {
       // phone country code or a "Country of dialling code" control, and writing
       // "India" into a dialling-code box is worse than leaving it.
       tag: "country",
-      hint: /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)(?:\s+(?:country|nation))*\s*[:*\-]?\s*$/i,
+      hint: /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?=.*\b(?:country|nation)\b)(?:(?:country|nation)|[^a-z])*$/i,
       value: candidate?.country,
     },
     {
@@ -3326,7 +3332,16 @@ const ATS_SELECTORS = {
       phone: ['input[type="tel"]', 'input[name="phone"]', 'input[autocomplete="tel"]', 'input[aria-label*="phone" i]', 'input[id*="phone" i]', 'input[name*="phone" i]'],
       resume: ['input[type="file"]'],
     },
-    submitBtn: ['button:has-text("Submit")', 'button[type="submit"]', 'button:has-text("Apply")']
+    submitBtn: [
+      'button:has-text("Submit")',
+      'button[type="submit"]',
+      'button:has-text("Apply")',
+      // A Google Form's submit control is a div, not a button: <div id="submit"
+      // role="button">Submit</div>. Without this the form fills correctly and
+      // then reports "no clickable final Submit found" - the same shape as
+      // Ashby's div[role=button], which is already listed above.
+      '[role="button"]:has-text("Submit")',
+    ]
   }
 };
 
@@ -4093,10 +4108,26 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
             // signin-us.ultipro.com) and a broken page both land here, and the
             // difference decides whether the row is board-blocked or needs a
             // human - so the destination has to survive the abort.
-            if (isNavigationBoundary(boundary)) boundary.blockedNavigation = requestUrl;
-            console.log(`    [redirect-block] ${requestUrl}`);
-            await route.abort("blockedbyclient");
-            return;
+            //
+            // An employer's own page, however, very often links its application
+            // to a Google Form: MediNex Workforce's careers page is exactly
+            // that ("Click Here to Apply for Any Position" -> a
+            // docs.google.com/forms link, #1371 and #1370, 2026-11-16). The
+            // one-hop rule exists so a redirect chain cannot walk further, and a
+            // Google Form is not a redirector - it is the application surface
+            // itself, and the only form behind it. So when the boundary is
+            // already on the employer's approved host, the form is pinned as the
+            // new origin and the chain still ends there.
+            if (isGoogleFormUrl(requestUrl) && onExternalAts(boundary)) {
+              const parsed = parseHttpUrl(requestUrl);
+              if (parsed) boundary.pinnedOrigin = parsed.origin;
+              console.log(`    [google-form] the employer's application is a Google Form → pinned ${canonicalHost(parseHttpUrl(requestUrl)?.hostname || "")}`);
+            } else {
+              if (isNavigationBoundary(boundary)) boundary.blockedNavigation = requestUrl;
+              console.log(`    [redirect-block] ${requestUrl}`);
+              await route.abort("blockedbyclient");
+              return;
+            }
           }
           if (shortener) console.log(`    [shortener] allowing hop ${requestUrl}`);
         }
@@ -4434,6 +4465,80 @@ function navigationLanding(target, landedUrl, gotoFailed = false) {
   return landed === String(target || "") ? "" : landed;
 }
 
+/**
+ * The address an employer offers when the only way to apply is email.
+ *
+ * ALPRESI Research's "Software Developer Intern" posting (#1036) has no form at
+ * all: the whole application surface is
+ *   <a href="mailto:careers@alpresiresearch.com?subject=Application: Software Developer Intern">Apply by email →</a>
+ * so every run filled nothing, found no Submit, and parked a real opening in
+ * NeedsReview - the same dead end for any Indian employer that asks for a CV by
+ * mail, which is a common shape on that board.
+ *
+ * Two guards keep this from mistaking a footer contact link for an application:
+ * the page must carry no form of its own, and the link must read like an
+ * application (or be the only mailto on an otherwise form-less page). The
+ * address itself is never fetched - it is handed to the mail transport, which
+ * has its own domain boundary - so a listing cannot use this to make a request.
+ *
+ * Exported for the guardrail tests: a false positive here mails a stranger.
+ */
+function parseMailtoApply(links, pageHasForm) {
+  if (pageHasForm) return null;
+  const parsed = [];
+  for (const item of Array.isArray(links) ? links : []) {
+    const href = String(item?.href || "").trim();
+    if (!/^mailto:/i.test(href)) continue;
+    const rest = href.slice(7).split("?")[0];
+    const to = decodeURIComponent(rest.split(",")[0] || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(to)) continue;
+    let subject = "";
+    try {
+      const query = new URLSearchParams(href.slice(7).split("?")[1] || "");
+      subject = String(query.get("subject") || "").trim();
+    } catch { subject = ""; }
+    const text = String(item?.text || "").replace(/\s+/g, " ").trim();
+    const looksLikeApply = /apply|application|send\s+(?:your\s+)?(?:cv|resume)|email\s+(?:your\s+)?(?:cv|resume)|share\s+(?:your\s+)?(?:cv|resume)/i.test(text)
+      || /apply|application|cv|resume/i.test(subject);
+    parsed.push({ to, subject, text, looksLikeApply });
+  }
+  if (!parsed.length) return null;
+  const chosen = parsed.find((item) => item.looksLikeApply)
+    || (parsed.length === 1 ? parsed[0] : null);
+  if (!chosen) return null;
+  return { to: chosen.to, subject: chosen.subject, text: chosen.text };
+}
+
+/**
+ * Where an employer asked for the application by mail, or null.
+ *
+ * Only consulted when the run has found no submit control, so a page that has a
+ * form is never diverted to email.
+ */
+async function emailApplyTarget(page) {
+  const found = await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+    };
+    const formFields = [...document.querySelectorAll("input, textarea, select")]
+      .filter((el) => visible(el))
+      .filter((el) => {
+        const type = String(el.getAttribute("type") || "").toLowerCase();
+        return !["hidden", "submit", "button", "reset"].includes(type);
+      });
+    return {
+      pageHasForm: formFields.length > 0,
+      links: [...document.querySelectorAll('a[href^="mailto:" i]')]
+        .filter(visible)
+        .map((a) => ({ href: a.getAttribute("href") || "", text: a.innerText || a.textContent || "" })),
+    };
+  }).catch(() => null);
+  if (!found) return null;
+  return parseMailtoApply(found.links, found.pageHasForm);
+}
+
 async function navigateAllowed(page, target, ats, originUrl) {
   const boundary = isNavigationBoundary(originUrl)
     ? originUrl
@@ -4444,11 +4549,21 @@ async function navigateAllowed(page, target, ats, originUrl) {
     let shortener = false;
     try { shortener = URL_SHORTENER_HOST.test(canonicalHost(new URL(target).hostname)); }
     catch { shortener = false; }
-    if (!shortener) {
+    // An employer's own page linking its application to a Google Form: the form
+    // is the application surface, not a redirector, so it is pinned as the new
+    // origin when the boundary is already on the employer's approved host.
+    // MediNex Workforce's careers page is exactly this (#1370, #1371).
+    const googleForm = isGoogleFormUrl(target) && onExternalAts(boundary);
+    if (!shortener && !googleForm) {
       console.log(`    [redirect-block] refusing navigation to ${target}`);
       return false;
     }
-    console.log("    [shortener] resolving a short link from a trusted Apply control");
+    if (googleForm) {
+      const parsed = parseHttpUrl(target);
+      if (parsed) boundary.pinnedOrigin = parsed.origin;
+      console.log(`    [google-form] the employer's application is a Google Form → pinned ${canonicalHost(parseHttpUrl(target)?.hostname || "")}`);
+    }
+    if (shortener) console.log("    [shortener] resolving a short link from a trusted Apply control");
   }
   let gotoError = null;
   try {
@@ -4599,7 +4714,8 @@ async function detectAndClickApply(page, ats, originUrl, finalGuard = {}) {
           try { return URL_SHORTENER_HOST.test(canonicalHost(new URL(httpTarget).hostname)); }
           catch { return false; }
         })();
-        if (httpTarget && !isAllowedNavigationUrl(httpTarget, ats, originUrl) && !isShortenerHop) {
+        if (httpTarget && !isAllowedNavigationUrl(httpTarget, ats, originUrl) && !isShortenerHop
+      && !(isGoogleFormUrl(httpTarget) && onExternalAts(originUrl))) {
           console.log(`    [redirect-block] apply link is outside the exact ATS boundary`);
           return { clicked: false, blocked: true, reason: "redirect" };
         }
@@ -5367,6 +5483,27 @@ function controlSignatureMatcher() {
       // climbing further, and it cannot pick up a neighbouring question.
       const own = [
         el.getAttribute("aria-label") || "",
+        // `aria-labelledby` is how Greenhouse's job board names every control it
+        // renders as a custom widget: the country field is
+        //   <input id="country" role="combobox" aria-labelledby="country-label">
+        // and the question itself lives in the referenced node, not in a label[for]
+        // and not in any ancestor. With the referenced text omitted the signature
+        // was "country ..." plus the wrapper's noise and no hint matched, so the
+        // required field blocked #1389 HackerRank (2026-11-15) while profile.yml
+        // already said country: India - and the same shape carries every
+        // react-select question on that board.
+        (() => {
+          const ids = String(el.getAttribute("aria-labelledby") || "").trim();
+          if (!ids) return "";
+          return ids.split(/\s+/).map((id) => {
+            try {
+              const node = document.getElementById(id);
+              return node ? String(node.textContent || "") : "";
+            } catch {
+              return "";
+            }
+          }).join(" ");
+        })(),
         (() => {
           if (typeof document === "undefined" || !el.id) return "";
           try {
@@ -6899,11 +7036,51 @@ async function answerFactualRadioQuestions(page, candidate) {
   const statedQuestions = answerFactualRadioHints();
   const groups = await page.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+    // The option's own words, in the order a person reading the row would see
+    // them. A wrapping label is the usual case, but LinkedIn's Easy Apply
+    // renders the input inside a bare wrapper and the word beside it, so the
+    // previous code fell through to input.value - and both radios of a Yes/No
+    // pair have value="on", so the group read as "on/on" and no answer could
+    // ever be chosen (#1388 BINARY WORKS, 2026-11-15:
+    // "on/on offers no \"No\""). aria-label and the sibling element are checked
+    // before the value, and the value is now the last resort rather than the
+    // second one.
+    const labelOf = (input) => {
+      const raw = norm(input.value);
+      const tried = [];
+      const own = input.getAttribute("aria-label");
+      if (own) tried.push(own);
+      try {
+        for (const label of input.labels || []) tried.push(label.innerText || label.textContent);
+      } catch { /* labels is not universal */ }
+      const wrapped = input.closest("label");
+      if (wrapped) tried.push(wrapped.innerText || wrapped.textContent);
+      const parent = input.parentElement;
+      if (parent) {
+        tried.push(parent.innerText || parent.textContent);
+        try {
+          for (const mate of parent.children) {
+            if (mate !== input && !mate.contains(input)) tried.push(mate.innerText || mate.textContent);
+          }
+        } catch { /* a childless parent is fine */ }
+        const before = parent.previousElementSibling;
+        const after = parent.nextElementSibling;
+        if (before) tried.push(before.innerText || before.textContent);
+        if (after) tried.push(after.innerText || after.textContent);
+      }
+      for (const candidate of tried) {
+        const text = norm(candidate);
+        // A row's own word is short. Anything long is the whole question, and
+        // answering "Are you located in Chennai? Yes No" as an option would be
+        // a false match.
+        if (text && text.length <= 40 && text !== raw) return text;
+      }
+      return raw;
+    };
     const byName = new Map();
     for (const input of document.querySelectorAll('input[type="radio"]')) {
       if (!input.name) continue;
-      const holder = input.closest("label") || (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null) || input.parentElement;
-      const text = norm(holder?.innerText || input.value);
+      const text = labelOf(input);
       const entry = byName.get(input.name) || { name: input.name, options: [], checked: false, question: "" };
       if (text) entry.options.push(text.slice(0, 60));
       if (input.checked) entry.checked = true;
@@ -6920,6 +7097,20 @@ async function answerFactualRadioQuestions(page, candidate) {
         if (text.length > optionLength + 12) { entry.question = text.slice(0, 400); break; }
         node = node.parentElement;
       }
+    }
+    // Last resort, and only for the yes/no shape it can be certain about: the
+    // options are unusable (empty, or two radios that both read "on" because
+    // their word lives in the group container rather than beside the input) and
+    // the group's own text names exactly the two words in DOM order. Reading
+    // them off the rendered question is not a guess about the answer - it is
+    // reading the labels the page shows.
+    for (const entry of byName.values()) {
+      const distinct = new Set(entry.options);
+      if (entry.options.length !== 2 || (distinct.size === 2 && !distinct.has(""))) continue;
+      const mark = entry.question.indexOf("?");
+      const after = mark >= 0 ? entry.question.slice(mark + 1) : entry.question;
+      const pair = /^[\s*:.,\-–—]{0,6}(yes)\b[\s\S]{0,20}?\b(no)\b/i.exec(after) || /^[\s*:.,\-–—]{0,6}(no)\b[\s\S]{0,20}?\b(yes)\b/i.exec(after);
+      if (pair) entry.options = [pair[1], pair[2]];
     }
     return [...byName.values()].filter((g) => !g.checked && g.options.length > 1);
   }).catch(() => []);
@@ -7716,6 +7907,32 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
         // A controlled input can reject the value it was given. Say so, rather
         // than logging a fill that did not happen.
         let landed = String(await field.inputValue().catch(() => "")).trim();
+        if (!landed) {
+          // A form that hydrates late can take the value and then throw it away
+          // when it re-renders: a Google Form (MediNex Workforce's internship
+          // form, #1371, 2026-11-16) had every field read back empty after the
+          // fill, because the page was still rendering when the value was
+          // written. The read-back is the evidence, so a field that comes back
+          // empty is retried once after the page has settled.
+          //
+          // Not for a combobox: a react-select keeps its own state and is
+          // answered by picking an option, which the branch below does.
+          const isCombo = await field.evaluate((el) => el.getAttribute("role") === "combobox").catch(() => false);
+          if (!isCombo) {
+            await page.waitForTimeout(700);
+            await field.fill(numeric.text).catch(() => {});
+            await page.waitForTimeout(250);
+            landed = String(await field.inputValue().catch(() => "")).trim();
+            if (!landed) {
+              // Some widgets only accept keystrokes. Click the field and type
+              // it, which is what a person does.
+              await field.click({ timeout: 1500 }).catch(() => {});
+              await page.keyboard.type(numeric.text, { delay: 5 }).catch(() => {});
+              await page.waitForTimeout(200);
+              landed = String(await field.inputValue().catch(() => "")).trim();
+            }
+          }
+        }
         if (landed !== answerText) {
           // Greenhouse renders several required questions as react-select
           // autocompletes - `Location (City)*` and `Are you legally authorized to
@@ -7893,7 +8110,7 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
     // answer a fully-filled application with "Select a country" — measured
     // 2026-11-05, #143 Glean: every other field was filled and the submit was
     // refused for this one control, four complaint nodes, all "Country".
-    /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?:country|nation)(?:\s+(?:country|nation))*\s*[:*\-]?\s*$/i,
+    /(?!\b(?:phone|mobile|tel|dial(?:ling)?|contact|calling|country\s*code)[^a-z]{0,20})\b(?:country|nation)\b.{0,40}?\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b|\b(?:locat\w*|reside\w*|based|address\w*|citizen\w*|from|where)\b.{0,40}?\b(?:country|nation)\b|^(?=.*\b(?:country|nation)\b)(?:(?:country|nation)|[^a-z])*$/i,
     [String(candidate?.country || profile?.candidate?.country || "India").trim() || "India"],
   );
   // The same question is a native <select> on Greenhouse and a react-select on
@@ -8047,6 +8264,16 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
       { key: "open_to_relocation", hint: /open to relocat|relocat(?:ion|e) for (?:this|the) role|willing to (?:move|relocat)/, tag: "open to relocation" },
       { key: "future_us_residence", hint: /(?:reside|work|live|located?|relocate) (?:now or )?(?:in|to) the (?:us|usa|united states)|future.*(?:united states)|\bthe us\b/i, tag: "future US residence" },
       { key: "requires_visa_sponsorship", hint: /sponsorship|require a visa|need a visa|visa support|work authorization|right to work/, tag: "visa sponsorship" },
+      // Internship availability, stated by the operator 2026-11-15 after #1389
+      // HackerRank held the form at "blocked-by: Are you available to intern ...
+      // for a full-time, 6-month internship starting from Jan 5th 2027?" and
+      // "Are you able to work from our Bangalore office, full-time for the entire
+      // 6-month internship period?". Both are commitments only he can make, so
+      // they are keyed answers rather than facts inferred from anything, and both
+      // are rendered on that board as react-select Yes/No comboboxes - which is
+      // why the commitment list (combo first, radio second) is where they belong.
+      { key: "internship_full_time_availability", hint: /available\s+(?:to|for)\s+(?:a\s+)?(?:full[- ]time\s+)?(?:six|\d+)[- ]month\s+internship|full[- ]time[^?]{0,60}internship|internship[^?]{0,60}full[- ]time|available\s+to\s+intern/i, tag: "full-time internship availability" },
+      { key: "office_location_availability", hint: /able\s+to\s+work\s+(?:from|out\s+of)\s+our\s+[A-Za-z][A-Za-z .]{1,24}\s+office|work\s+from\s+our\s+[A-Za-z][A-Za-z .]{1,24}\s+office\s+(?:full[- ]time|\d)/i, tag: "office location availability" },
       // Language proficiency. Keyed per language so any one of them can be
       // answered, and matched on the language name because that is how the form
       // words it: "Are you fluent or proficient in Arabic?". This blocked #716.
@@ -10394,6 +10621,26 @@ async function processJob(browser, job, profile, runtime = {}) {
       console.log(blockedFields.length
         ? `  [needs-candidate] final action is blocked on candidate-only answers: ${blockedFields.join(", ")} — recording NeedsReview`
         : "  [warn] no clickable final Submit found — recording NeedsReview");
+      // An employer whose only application surface is a mailto is not a broken
+      // form: it is an instruction. Recorded with the address so the mail
+      // transport can send it, rather than leaving a real opening parked.
+      if (!blockedFields.length) {
+        const mailTo = await emailApplyTarget(page);
+        if (mailTo) {
+          console.log(`  [email-apply] this posting takes applications by email → ${mailTo.to}`);
+          if (!sharedCtx) await context.close();
+          return {
+            company: job.company,
+            title: job.title,
+            link: url,
+            ats,
+            action: "email-apply",
+            pdf: resumePdf,
+            emailTo: mailTo.to,
+            emailSubject: mailTo.subject,
+          };
+        }
+      }
     }
     // Verify before claiming: a click alone is never treated as Applied.
     const serverApplied = clicked && HUMAN_FINAL_STATUSES.has(ats)
@@ -11019,6 +11266,10 @@ function statusForBrowserResult(result) {
   // an unconfirmed submission, but a different reason, so a retry gate can skip
   // it until an answer exists instead of re-filling the same form every run.
   if (action === "blocked-on-question") return "NeedsVerification";
+  // An employer who accepts applications by email only is not a broken form.
+  // The row waits for the mail transport, so it is not terminal and not Applied
+  // either - the send is what makes it Applied (scripts/apply_by_email.py).
+  if (action === "email-apply") return "NeedsReview";
   // A pause/claim miss is deliberately not written.  The existing Applying
   // marker remains recoverable instead of being downgraded to Evaluated.
   return null;
@@ -11354,6 +11605,24 @@ async function main() {
   const outPath = path.join(ROOT, "output", "apply-results.json");
   fs.mkdirSync(path.join(ROOT, "output"), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify({ ran_at: new Date().toISOString(), dry_run: DRY_RUN, jobs, results }, null, 2), "utf-8");
+  // Email-apply rows are appended to their own queue as well: apply-results.json
+  // is rewritten by every run, so a single `--job-id` run would otherwise be the
+  // only record of an address that a later run never sees.
+  if (!DRY_RUN) {
+    const mailQueue = results.filter((r) => r.action === "email-apply" && r.emailTo);
+    if (mailQueue.length) {
+      const queuePath = path.join(ROOT, "output", "email-apply-queue.jsonl");
+      const lines = mailQueue.map((r) => JSON.stringify({
+        job_id: r.job_id || null,
+        company: r.company, title: r.title, link: r.link, ats: r.ats,
+        to: r.emailTo, subject: r.emailSubject || "",
+        pdf: r.pdf || "",
+        queued_at: new Date().toISOString(),
+      })).join("\n") + "\n";
+      fs.appendFileSync(queuePath, lines, "utf-8");
+      console.log(`  [email-apply] ${mailQueue.length} posting(s) queued → ${path.relative(ROOT, queuePath)}`);
+    }
+  }
   flushPendingQuestions();
   console.log(`\n[+] Done ${results.length} jobs → ${path.relative(ROOT, outPath)}`);
   console.log(DRY_RUN ? "[*] DRY-RUN — no applications submitted. Re-run with --live --headed after verifying previews." : "[*] LIVE — final actions require --auto; verified/needs-review outcomes are recorded conservatively.");
@@ -11488,6 +11757,7 @@ export {
   navigationLanding,
   hopApplyAts,
   onExternalAts,
+  parseMailtoApply,
   isAccountGate,
   wellfoundSendConfirmed,
   vendorFrameChallengesHuman,

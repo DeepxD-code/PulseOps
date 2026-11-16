@@ -157,6 +157,13 @@ candidate:
     onsite_comfortable: 'Yes'
     commute_comfortable: 'Yes'
 
+    # --- 2026-11-15: stated by the operator when #1389 HackerRank (SDE Intern)
+    # could not be submitted without them. Both are commitments, not facts:
+    # nothing on the CV says whether he can start on a given date or work from a
+    # named office, so they are answered only from these keys.
+    internship_full_time_availability: 'Yes'
+    office_location_availability: 'Yes'
+
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
     # statements, not inferences. technical_skills_self summarises cv.md and

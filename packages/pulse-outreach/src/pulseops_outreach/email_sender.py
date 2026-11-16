@@ -232,7 +232,11 @@ def send_smtp(
     msg["From"]    = smtp_email
     msg["To"]      = to_email
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
+    # utf-8 explicitly: MIMEText defaults to us-ascii and raises
+    # UnicodeEncodeError on the first em dash or rupee sign, which would abort a
+    # send after the whole body was written. An application note written from a
+    # CV carries those characters routinely.
+    msg.attach(MIMEText(body, "plain", "utf-8"))
 
     if attachment_path and os.path.exists(attachment_path):
         with open(attachment_path, "rb") as f:
