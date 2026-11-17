@@ -4310,7 +4310,15 @@ async function installNavigationGuard(page, ats, originUrl, uploadHosts = null) 
             && !trustedCaptchaToken && !trustedAtsPost && !trustedFingerprintVendor && !trustedPortalApi
             && (!requestParsed || !frameOrigin || !sameOrigin(requestParsed, frameOrigin))) {
           const kind = request.resourceType?.() || "subresource";
-          console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
+          // A request that is not http(s) cannot carry anything off this machine,
+          // so blocking it is bookkeeping, not a privacy decision - and reporting
+          // each one buried the log. One LinkedIn Easy Apply produced thousands of
+          // "[subresource-block] fetch GET chrome-extension://invalid/" lines
+          // (measured 2026-11-17: 9,700 lines of output for five jobs) wrapped
+          // around the handful of lines that decide the outcome.
+          if (requestParsed) {
+            console.log(`    [subresource-block] ${kind} ${requestMethod || "GET"} ${requestUrl}`);
+          }
           await route.abort("blockedbyclient");
           return;
         }
@@ -10746,6 +10754,20 @@ async function processJob(browser, job, profile, runtime = {}) {
       // concluding anything, because it is recoverable and the others are not.
       const sso = await tryFederatedSignIn(page);
       if (sso.signedIn) {
+        // A board can finish the sign-in by returning to its own registration
+        // page instead of the posting. Internshala lands on
+        // /registration/student with a lone "Sign up" button (#1458 Osumare,
+        // 2026-11-17) even though the Google account is now authenticated - the
+        // log said "signed in via Google" and then "still no Submit", and the run
+        // recorded NeedsReview on a posting whose apply control was one
+        // navigation away. Go back before drawing any conclusion about the form.
+        const landedOnRegistration = /\/(?:registration|register|signup|sign-?up|login|sign-?in|auth)(?:[/?#]|$)/i
+          .test(String(page.url()));
+        if (landedOnRegistration && url) {
+          console.log(`  [sso] sign-in returned to ${String(page.url()).slice(0, 60)} — going back to the posting`);
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+          await page.waitForTimeout(4000);
+        }
         // Registration usually drops the candidate back on the job page rather
         // than a form, so the Apply control has to be pressed a second time.
         const applyAgain = page.locator('button:has-text("Apply now"), a:has-text("Apply now"), button:has-text("Apply"), a:has-text("Apply")').first();
