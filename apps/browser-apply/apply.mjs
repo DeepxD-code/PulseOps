@@ -138,6 +138,15 @@ const EDGE = process.argv.includes("--edge"); // real Edge persistent profile (b
 const EDGE_PROFILE = path.resolve(
   process.env.PULSEOPS_EDGE_PROFILE || path.join(ROOT, ".edge-profile"),
 );
+
+/**
+ * A CDP endpoint to drive instead of launching a browser.
+ *
+ * `obscura serve --stealth --port 9333` and `msedge.exe
+ * --remote-debugging-port=9222` both expose one. The applier opens its own tab
+ * for each job and never closes the browser it did not start.
+ */
+const CDP_ATTACH = String(process.env.PULSEOPS_CDP_URL || "").trim();
 let sharedCtx = null;
 const MOCK_ONLY = process.argv.includes("--mock");
 const JOB_URL_FLAG = process.argv.find((a) => a.startsWith("--job-url="));
@@ -11613,6 +11622,33 @@ async function main() {
   // context died right after the submit click while reCAPTCHA's webworker loaded.
   // Relauch instead, and say so, so a batch survives one dead window.
   const launchContext = async () => {
+    // A browser someone else is already running.
+    //
+    // The Edge profile below is ours: it holds whatever the operator signed
+    // into once, and it is locked while the run is alive, which is why exactly
+    // one application can be in flight. A CDP endpoint is the operator's own
+    // browser - their cookies, their history, their IP reputation - and it is
+    // the only way to reach a board whose wall is decided by reputation rather
+    // than by fingerprint: Himalayas and Glassdoor India answer every automated
+    // Chromium with a managed challenge that never clears (measured 2026-11-17
+    // through Obscura's stealth build: 403 + "Just a moment...").
+    //
+    // PULSEOPS_CDP_URL=http://127.0.0.1:9222, with the browser started as
+    //   msedge.exe --remote-debugging-port=9222
+    if (CDP_ATTACH) {
+      browser = await chromium.connectOverCDP(CDP_ATTACH, { timeout: 30000 });
+      const contexts = browser.contexts();
+      // A browser with one window has one context; a browser with several
+      // profiles has several. Prefer the one that already has a page, because
+      // that is the window the operator is actually using.
+      sharedCtx = contexts.find((c) => (c.pages?.() || []).length > 0) || contexts[0] || null;
+      if (!sharedCtx) {
+        await browser.close().catch(() => {});
+        browser = null;
+        throw new Error("the CDP endpoint answered but exposed no browser context");
+      }
+      return;
+    }
     if (EDGE || process.argv.includes("--edge")) {
       sharedCtx = await chromium.launchPersistentContext(EDGE_PROFILE, {
         channel: "msedge",
@@ -11627,6 +11663,11 @@ async function main() {
   };
   const contextAlive = async () => {
     try {
+      // An attached browser is alive while its CDP session is. Asking it for
+      // pages is the wrong question: the operator's window may have no page at
+      // all, and the first version read that as "the browser went away" and
+      // re-attached before the first job.
+      if (CDP_ATTACH) return Boolean(browser && browser.isConnected && browser.isConnected());
       if (sharedCtx) {
         if (typeof sharedCtx.pages === "function") {
           const pages = sharedCtx.pages();
@@ -11658,7 +11699,9 @@ async function main() {
   };
 
   try {
-    if (EDGE || process.argv.includes("--edge")) {
+    if (CDP_ATTACH) {
+      console.log(`[CDP] attached to ${CDP_ATTACH} (the browser's own tabs are left alone; each job opens its own)`);
+    } else if (EDGE || process.argv.includes("--edge")) {
       console.log(`[Edge] persistent profile ${EDGE_PROFILE} (msedge, headed)`);
     }
     await launchContext();
@@ -11743,7 +11786,15 @@ async function main() {
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
   } finally {
-    if (sharedCtx) await sharedCtx.close().catch(() => {});
+    // The browser this run started is this run's to close. A browser it
+    // attached to is not: closing a CDP-attached browser closes the operator's
+    // window, with their tabs in it, so the reference is simply dropped and the
+    // process ends once Playwright's socket is released (see the invocation
+    // block at the bottom of this file).
+    if (CDP_ATTACH) {
+      browser = null;
+      sharedCtx = null;
+    } else if (sharedCtx) await sharedCtx.close().catch(() => {});
     else if (browser) await browser.close().catch(() => {});
   }
 
@@ -11927,5 +11978,12 @@ export {
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 const modulePath = path.resolve(fileURLToPath(import.meta.url));
 if (invokedPath === modulePath) {
-  main().catch(e=>{ console.error("[Fatal] apply crashed", e); process.exit(1); });
+  main()
+    .then(() => {
+      // An attached browser is still holding a live socket. Everything this run
+      // had to write has been written by now, so ending the process is the
+      // whole cleanup - and it leaves the browser running, which is the point.
+      if (CDP_ATTACH) process.exit(0);
+    })
+    .catch(e=>{ console.error("[Fatal] apply crashed", e); process.exit(1); });
 }
