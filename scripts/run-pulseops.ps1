@@ -213,9 +213,12 @@ try {
 
         # One invocation applies to PULSEOPS_BATCH_SIZE rows and exits (default 5),
         # so a run sized at the default reports "done" with twenty eligible rows
-        # untouched and reads like an exhausted queue. Sized well above the
-        # eligible pool; the selector's own cap is 600.
-        $env:PULSEOPS_BATCH_SIZE = "40"
+        # untouched and reads like an exhausted queue. Sized to drain a whole
+        # sourcing run in one pass, because a posting that waits a day is often
+        # gone: #1430 Antilabs was scraped live and answered "No longer accepting
+        # applications" inside 24 hours (measured 2026-11-17). The selector's own
+        # cap is 600, so this is not the limiting factor.
+        $env:PULSEOPS_BATCH_SIZE = "60"
 
         $applyArgs = @("apps/browser-apply/apply.mjs", "--edge", "--headed", "--otp-pause")
         if ($DryRun) {
