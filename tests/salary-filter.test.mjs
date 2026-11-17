@@ -6,6 +6,7 @@ import {
   basicHtmlTextFromHtml,
   monthlyInrFromText,
   statedSalaryTooLow,
+  unpaidInternship,
 } from "../apps/browser-apply/salary.mjs";
 
 test("a stated salary under 10k INR per month is skipped", () => {
@@ -160,4 +161,42 @@ test("a skip names the fragment it fired on", () => {
 
   // No figure at all stays silent rather than naming nothing.
   assert.deepEqual(statedSalaryTooLow("no pay info"), { skip: false, monthly: null, matched: "" });
+});
+
+test("an unpaid internship is skipped without needing a figure", () => {
+  // #1334 Product Manager Accelerator (2026-11-17): a Google Form whose only
+  // pay statement is "this is an unpaid internship". The floor above never
+  // fired, because "unpaid" is not a number, so the row read as "undisclosed"
+  // and would have been applied to. The operator's rule is "unpaid == no".
+  for (const text of [
+    "AI Engineer Intern (unpaid) — 4 hours a day, US overlap",
+    "This is an unpaid internship. College credit is available.",
+    "Machine Learning Internship — no stipend",
+    "Backend intern, without stipend, remote",
+    "Data Science Trainee: stipend: none",
+    "Software Engineering Intern — uncompensated",
+    "Founding Engineer Intern, equity only",
+    "This internship is not paid",
+  ]) {
+    const verdict = unpaidInternship(text);
+    assert.equal(verdict.skip, true, text);
+    assert.ok(verdict.matched.length > 0, `fragment must be reported: ${text}`);
+  }
+});
+
+test("a paid internship is not skipped for being called unpaid in its benefits", () => {
+  // "unpaid leave" / "unpaid overtime" are perks in a full-time description, not
+  // the wage, and a paid internship must survive them. The rule is scoped to
+  // internships, so a full-time role with the word is never touched either.
+  for (const text of [
+    "Backend Intern, ₹25,000 per month. Benefits: unpaid leave, paid sick days.",
+    "Software Engineer Intern — stipend ₹15k/month, unpaid overtime is not expected",
+    "Senior Backend Engineer. Benefits include unpaid sabbatical and paid time off.",
+    "Internship with a monthly stipend of ₹20,000 and 12 days unpaid holiday",
+  ]) {
+    assert.equal(unpaidInternship(text).skip, false, text);
+  }
+  // No internship context at all means no opinion.
+  assert.equal(unpaidInternship("Unpaid volunteer coordinator wanted").skip, false);
+  assert.deepEqual(unpaidInternship("").skip, false);
 });

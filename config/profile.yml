@@ -171,6 +171,17 @@ candidate:
     # and the only part that could not be read off the CV.
     available_joining_date: 'Immediately'
 
+    # --- 2026-11-17: a public link to the CV itself.
+    # #1334 Product Manager Accelerator's Google Form demanded "a link to your
+    # resume so EVERYONE can view it", which no amount of browser automation can
+    # satisfy - the link has to exist somewhere anonymous. It now does, on the
+    # operator's own account (approved 2026-11-17): a public repo holding the
+    # current CV, so the answer is ready for the next form that asks instead of
+    # parking the row. The blob URL renders in GitHub's viewer for a human; the
+    # raw URL serves the PDF bytes to anything that fetches it.
+    public_resume_url: 'https://github.com/DeepxD-code/cv/blob/master/Avradeep-Majumder-CV.pdf'
+    public_resume_raw_url: 'https://raw.githubusercontent.com/DeepxD-code/cv/master/Avradeep-Majumder-CV.pdf'
+
     # --- 2026-10-07: answers for questions that were blocking live
     # submissions. The language and frontend entries are the operator's own
     # statements, not inferences. technical_skills_self summarises cv.md and

@@ -141,6 +141,38 @@ function statedSalaryTooLow(text, minimumMonthlyInr = MIN_MONTHLY_INR) {
 }
 
 /**
+ * Should this posting be skipped because the internship is unpaid?
+ *
+ * The floor above only fires on a figure, and "unpaid" is not a figure: a
+ * posting that says it pays nothing states no salary at all, so it read as
+ * "undisclosed" and was applied to. The operator's rule is one line - unpaid
+ * means no (2026-11-17) - and it is about internships specifically, because
+ * "unpaid" in a full-time description is almost always "unpaid leave",
+ * "unpaid overtime" or "unpaid day off" in the perks list.
+ *
+ * So the word only counts when the posting is an internship (title or text)
+ * and the word is not followed by one of those nouns. "No stipend", "without
+ * stipend", "stipend: none", "uncompensated" and "equity only" say the same
+ * thing without the word.
+ */
+const UNPAID_MARKER =
+  /(?:\bunpaid\b|\bnot\s+(?:a\s+)?paid\b|\bwithout\s+(?:a\s+)?(?:stipend|pay|compensation)\b|\bno\s+(?:stipend|pay|compensation)\b|\bstipend\s*[:\-]?\s*(?:none|nil|unpaid)\b|\buncompensated\b|\bequity[\s-]+only\b)/i;
+// "unpaid leave", "unpaid overtime" and friends are a benefit, not the wage.
+const UNPAID_AS_A_BENEFIT =
+  /\bunpaid\s+(?:leave|holiday|holidays|day|days|time\s*off|overtime|absence|sick|internship\s+(?:leave|policy))\b/i;
+const INTERNSHIP_CONTEXT = /\b(?:intern|internship|interns|trainee|traineeship)\b/i;
+
+function unpaidInternship(text) {
+  const blob = String(text || "");
+  if (!INTERNSHIP_CONTEXT.test(blob)) return { skip: false, matched: "" };
+  const m = UNPAID_MARKER.exec(blob);
+  if (!m) return { skip: false, matched: "" };
+  const around = blob.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40);
+  if (UNPAID_AS_A_BENEFIT.test(around)) return { skip: false, matched: "" };
+  return { skip: true, matched: m[0] };
+}
+
+/**
  * Read a page as plain text with no stylesheet, script or layout dependency.
  * Used when a full browser render fails on an employer careers site: the
  * submission-relevant content is almost always in the static markup.
@@ -172,4 +204,5 @@ export {
   basicHtmlTextFromHtml,
   monthlyInrFromText,
   statedSalaryTooLow,
+  unpaidInternship,
 };

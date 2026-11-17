@@ -36,7 +36,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
-import { basicHtmlTextFromHtml, statedSalaryTooLow } from "./salary.mjs";
+import { basicHtmlTextFromHtml, statedSalaryTooLow, unpaidInternship } from "./salary.mjs";
 import { isExperienceStepText, matchExperienceEntry } from "./experience.mjs";
 import { BASIC_HTML, detectBasicHtml } from "./page-probe.mjs";
 import { cleanTitle } from "../weekly-scan/lib/relevance.mjs";
@@ -87,17 +87,26 @@ async function probeJobPage(url) {
 }
 
 /**
- * Skip a posting that states a salary under the floor. A role with no stated
- * pay is never skipped for this reason. Uses the cheap probe when available so
- * an unstyled page never needs a browser at all.
+ * Skip a posting that pays nothing, or states pay under the floor. A role with
+ * no stated pay is never skipped for the salary reason: inventing a threshold
+ * would drop good applications. "Unpaid" is different - it is a stated figure
+ * of zero, and an internship that pays nothing is not worth an application
+ * (operator's rule, 2026-11-17). Uses the cheap probe when available so an
+ * unstyled page never needs a browser at all.
  */
-async function rejectLowStatedSalary(page, job, probe = null) {
+async function rejectUnderpaidPosting(page, job, probe = null) {
   let text = probe && probe.basic ? probe.text : "";
   if (!text) {
     text = await readPageText(page);
   }
   if (!text) return null;
-  const { skip, monthly, matched } = statedSalaryTooLow(`${job.title || ""} ${text}`);
+  const posting = `${job.title || ""} ${text}`;
+  const unpaid = unpaidInternship(posting);
+  if (unpaid.skip) {
+    console.log(`  [unpaid] this internship pays nothing — not applying (matched "${String(unpaid.matched).trim().slice(0, 40)}")`);
+    return { action: "unpaid-internship", monthly: 0 };
+  }
+  const { skip, monthly, matched } = statedSalaryTooLow(posting);
   if (!skip) return null;
   const shown = Math.round(monthly).toLocaleString("en-IN");
   // Name the fragment the rule fired on. A skip is the engine deciding not to
@@ -8267,6 +8276,20 @@ async function fillCommonFields(page, ats, profile, job, originUrl = null) {
   const site = String(candidate.portfolio || candidate.github || "").trim();
   await answerQuestion(/linkedin/, candidate.linkedin, "linkedin profile");
   await answerQuestion(/website|portfolio|github/, site, "website");
+  // A form that wants a *link* to the CV rather than a file upload is asking
+  // something no amount of automation can produce at submit time: the URL has
+  // to exist somewhere anonymous already. #1334's Google Form demanded "a link
+  // to your resume so EVERYONE can view it" and parked the row. The operator
+  // approved publishing the current CV on their own account (2026-11-17), so
+  // the answer is a profile fact now. The wording is required to say link or
+  // URL: a text input merely labelled "Resume" may want something else, and a
+  // file control is never in this selector's scope at all.
+  await answerQuestion(
+    /\bresume\s*(?:link|url)\b|\b(?:cv|resume)\b[^.,;]{0,20}\b(?:link|url)\b|\blink\s+(?:to|of)\s+(?:your\s+)?(?:resume|cv)\b/i,
+    String(heardStated?.public_resume_url || "").trim(),
+    "public resume link",
+    { key: "public_resume_url" },
+  );
   // A stated work location is a fact from the profile, so it is safe to give.
   // PlanetScale asks "Where are you located?" and "Where are you based?" -
   // neither matched the old pattern, and both blocked the submit.
@@ -9328,8 +9351,9 @@ async function processJob(browser, job, profile, runtime = {}) {
       return { company: job.company, title: job.title, link: url, ats, action: "board-blocked", pdf: resumePdf };
     }
 
-    // A posting that states pay under the floor is not worth an application.
-    const salaryBlock = await rejectLowStatedSalary(page, job, pageProbe);
+    // A posting that states pay under the floor, or an internship that pays
+    // nothing at all, is not worth an application.
+    const salaryBlock = await rejectUnderpaidPosting(page, job, pageProbe);
     if (salaryBlock) {
       if (!sharedCtx) await context.close();
       return { company: job.company, title: job.title, link: url, ats, action: salaryBlock.action, pdf: resumePdf };
@@ -11403,6 +11427,9 @@ function statusForBrowserResult(result) {
   if (action === "board-blocked") return "Skipped";
   if (action === "dead-link" || action === "invalid-listing") return "Expired";
   if (action === "salary-below-threshold") return "Skipped";
+  // An internship that pays nothing is a stated figure of zero, not an
+  // undisclosed one, and the operator's rule is "unpaid means no".
+  if (action === "unpaid-internship") return "Skipped";
   // The board refused the submission itself as spam. Recording this as
   // NeedsVerification sends an operator to wait for a confirmation that will
   // never come, and re-running just repeats the refusal. Skipped is the honest
