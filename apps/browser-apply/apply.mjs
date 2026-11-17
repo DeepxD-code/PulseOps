@@ -45,6 +45,70 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
 
 /**
+ * The interpreter that actually holds this project's packages.
+ *
+ * Every helper spawned here used to be spawned as bare "python", and on this
+ * machine that is 3.14 while the editable installs live in 3.12. It only showed
+ * up when a job needed a tailored resume: #1442 GoodGPT (2026-11-17) logged
+ *
+ *   [upload] resume build failed: Command failed: python ... build_resume_for_job.py --job-id 1442
+ *
+ * and submitted the generic PDF instead, because 3.14 cannot even import
+ * pulseops_core (measured: ModuleNotFoundError) while 3.12 imports it and builds
+ * a verified 2-page PDF. The caller never saw a wrong document - it saw a failed
+ * build and fell back - which is exactly the kind of silent miss the resume rule
+ * exists to prevent.
+ *
+ * Resolved by asking each candidate to import the package rather than by
+ * assuming a path, so the answer stays right if the install moves.
+ * PULSEOPS_PYTHON wins outright.
+ */
+function resolvePython() {
+  const explicit = String(process.env.PULSEOPS_PYTHON || "").trim();
+  const localPrograms = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, "Programs", "Python", "Python312", "python.exe")
+    : "";
+  const candidates = [
+    explicit,
+    localPrograms,
+    "C:\\Program Files\\Python312\\python.exe",
+    "python3",
+    "python",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    // A bare name is left to PATH; only an absolute path is existence-checked.
+    if (/[\\/]/.test(candidate) && !fs.existsSync(candidate)) continue;
+    try {
+      execFileSync(candidate, ["-c", "import pulseops_core"], {
+        cwd: ROOT,
+        stdio: "ignore",
+        timeout: 20000,
+        windowsHide: true,
+      });
+      return candidate;
+    } catch {
+      // Next candidate. The last one is returned regardless so a spawn still
+      // carries the honest name into the error message.
+    }
+  }
+  return explicit || "python";
+}
+
+const PYTHON = resolvePython();
+
+/**
+ * Child environment for a Python helper: UTF-8 in both directions.
+ *
+ * Without PYTHONUTF8 a helper that captures a subprocess' output decodes it as
+ * the ANSI code page, and one byte outside cp1252 aborts the reader thread
+ * mid-build. That is a decode error, not a rendering error, and it took the
+ * same form as a missing dependency in the #1442 log.
+ */
+function pythonEnv(extra = {}) {
+  return { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1", ...extra };
+}
+
+/**
  * Read the rendered page as text, falling back to stylesheet-free HTML when the
  * DOM is empty. Only used once a browser already exists.
  */
@@ -1212,11 +1276,12 @@ function getAuthoritativeDbPath(env = process.env, root = ROOT) {
 function runSqliteJson(dbPath, pythonCode, args = [], timeout = 5000) {
   if (!isExistingDbPath(dbPath)) return null;
   try {
-    const out = execFileSync("python", ["-c", pythonCode, ...args], {
+    const out = execFileSync(PYTHON, ["-c", pythonCode, ...args], {
       encoding: "utf-8",
       timeout,
       windowsHide: true,
       shell: false,
+      env: pythonEnv(),
     });
     const line = String(out || "").trim().split(/\r?\n/).pop();
     return line ? JSON.parse(line) : null;
@@ -3033,13 +3098,13 @@ function ensureTailoredPdf(job) {
   if (job?.id) args.push("--job-id", String(job.id));
   else args.push("--company", String(job?.company || ""), "--title", String(job?.title || ""));
   try {
-    const out = execFileSync("python", args, {
+    const out = execFileSync(PYTHON, args, {
       cwd: ROOT,
       encoding: "utf-8",
       timeout: 240000,
       windowsHide: true,
       shell: false,
-      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      env: pythonEnv(),
     });
     const payload = JSON.parse(String(out).trim().split(/\r?\n/).filter(Boolean).pop());
     if (payload?.ok && payload?.pdf && fs.existsSync(payload.pdf)) {
@@ -5268,9 +5333,9 @@ async function tryEmailOtp(page) {
     let fetchError = null;
     try {
       // Poll: the mail may not have arrived when the prompt appeared.
-      code = execFileSync("python", ["-m", "pulseops_core.otp_fetch", "--within-minutes", "10"], {
+      code = execFileSync(PYTHON, ["-m", "pulseops_core.otp_fetch", "--within-minutes", "10"], {
         cwd: ROOT,
-        env: { ...process.env, PYTHONPATH: path.join(ROOT, "packages", "pulse-core", "src") },
+        env: pythonEnv({ PYTHONPATH: path.join(ROOT, "packages", "pulse-core", "src") }),
         encoding: "utf8",
         timeout: 45000,
         windowsHide: true,
@@ -9845,7 +9910,7 @@ async function processJob(browser, job, profile, runtime = {}) {
           const helper = path.join(ROOT, "portal", "yc_answers.py");
           // Scraped text is passed as an argv value, never interpolated into a
           // shell command. execFileSync does not invoke a command shell.
-          const out = execFileSync("python", [
+          const out = execFileSync(PYTHON, [
             helper,
             String(job.company || ""),
             String(job.title || ""),
@@ -9856,6 +9921,7 @@ async function processJob(browser, job, profile, runtime = {}) {
             timeout: 120000,
             windowsHide: true,
             shell: false,
+            env: pythonEnv(),
           });
           answers = JSON.parse(out.trim().split(/\r?\n/).pop());
         } catch (e) { console.log(`  [yc] answer drafting failed: ${String(e).slice(0, 120)}`); }
@@ -11271,10 +11337,11 @@ for row in rows:
     result.append(item)
 print(json.dumps(result))
 `;
-  const out = execFileSync("python", ["-c", pythonCode, dbPath, mode, String(id), includeIndeed ? "1" : "0"], {
-  encoding: "utf-8",
-      timeout: 30000,
-      windowsHide: true,
+  const out = execFileSync(PYTHON, ["-c", pythonCode, dbPath, mode, String(id), includeIndeed ? "1" : "0"], {
+    encoding: "utf-8",
+    timeout: 30000,
+    windowsHide: true,
+    env: pythonEnv(),
       // Sized for the row cap, not left at the 1MB default. With 600 rows each
       // carrying a job_description this child was killed with ENOBUFS and the
       // run reported "queue is empty", which is indistinguishable from there

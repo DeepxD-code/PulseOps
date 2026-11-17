@@ -1391,7 +1391,10 @@ test("PULSEOPS_DB is honored without falling back to the default DB", () => {
 test("YC answer generation does not build a shell command from scraped text", () => {
   const source = fs.readFileSync(path.join(ROOT, "apps", "browser-apply", "apply.mjs"), "utf8");
   assert.equal(source.includes(["exec", "Sync("].join("")), false);
-  assert.match(source, /execFileSync\("python",\s*\[/);
+  // The interpreter is the resolved one (see resolvePython); what matters here is
+  // that the helper and its arguments are separate argv entries, never a command
+  // string built out of scraped text.
+  assert.match(source, /execFileSync\(PYTHON,\s*\[/);
   assert.equal(source.includes('python "${helper}"'), false);
 });
 
@@ -3889,4 +3892,35 @@ test("a generic title with no stored description is judged at the posting", asyn
   assert.equal(isEligibleJob({ ...row, job_description: "" }, { explicit: true }), true);
   assert.equal(isEligibleJob({ ...row, job_description: "We are hiring a software sales representative to own outbound pipeline." }, { explicit: true }), false);
   assert.equal(isEligibleJob({ ...row, job_description: "You will build backend services in Java and Spring Boot." }, { explicit: true }), true);
+});
+
+test("no Python helper is spawned as bare `python`", () => {
+  // #1442 GoodGPT (2026-11-17) submitted the generic resume because the helper
+  // was spawned as bare "python" - which on this machine is 3.14, where
+  // `import pulseops_core` fails outright - so build_resume_for_job.py reported
+  // "All 5 layout profiles failed" and the caller silently fell back. The same
+  // bare name appeared in five places: the resume builder, the OTP fetcher, the
+  // YC answer drafter and two sqlite queries.
+  //
+  // This reads the source rather than the runtime because the failure is an
+  // absence - a call that names an interpreter instead of the resolved one - and
+  // no unit test of a function can see which binary was spawned.
+  const source = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "apps", "browser-apply", "apply.mjs"),
+    "utf-8",
+  );
+  const bare = source
+    .split(/\r?\n/)
+    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    .filter(({ line }) => /execFileSync\(\s*"python"|execFile\(\s*"python"|spawn\(\s*"python"/.test(line));
+  assert.deepEqual(
+    bare,
+    [],
+    `spawn helpers with PYTHON (resolvePython) so the interpreter holding pulseops_core is used: ${JSON.stringify(bare)}`,
+  );
+  // And the resolver must still be there, wired to the package that decides it.
+  assert.match(source, /function resolvePython\(/, "resolvePython is the single place the interpreter is chosen");
+  assert.match(source, /const PYTHON = resolvePython\(\)/, "PYTHON must be resolved once at load");
+  assert.match(source, /import pulseops_core/, "the probe asks the interpreter to import the real package");
+  assert.match(source, /PYTHONUTF8: "1"/, "children must not decode their own subprocess output as the ANSI code page");
 });

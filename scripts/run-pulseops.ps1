@@ -196,6 +196,27 @@ try {
         if (-not (Test-Path $edgeProfile)) { $edgeProfile = Join-Path $repo ".edge-profile" }
         $env:PULSEOPS_EDGE_PROFILE = $edgeProfile
 
+        # A run that dies leaves its Edge behind, and the next launch then fails
+        # in three seconds with "Opening in existing browser session. This
+        # usually means that the profile is already in use by another instance of
+        # Chromium." Measured 2026-11-17: after a normal 5-job batch, 18 msedge
+        # processes still held the profile and every retry failed. Only processes
+        # whose command line names THIS profile are cleared; the operator's own
+        # Edge window is never touched.
+        $holders = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*$edgeProfile*" }
+        if ($holders) {
+            Write-Log "[edge] clearing $($holders.Count) stale process(es) still holding the apply profile"
+            $holders | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 3
+        }
+
+        # One invocation applies to PULSEOPS_BATCH_SIZE rows and exits (default 5),
+        # so a run sized at the default reports "done" with twenty eligible rows
+        # untouched and reads like an exhausted queue. Sized well above the
+        # eligible pool; the selector's own cap is 600.
+        $env:PULSEOPS_BATCH_SIZE = "40"
+
         $applyArgs = @("apps/browser-apply/apply.mjs", "--edge", "--headed", "--otp-pause")
         if ($DryRun) {
             $applyArgs += "--dry-run"
